@@ -89,8 +89,10 @@
   (let [cmd (settings/hook-command "hooks.scope-lock")]
     (testing "includes framework classpath"
       (is (re-find #"cch/repo/src" cmd)))
-    (testing "includes project classpath"
-      (is (re-find #"CLAUDE_PROJECT_DIR" cmd)))
+    (testing "includes resources classpath"
+      (is (re-find #"cch/repo/resources" cmd)))
+    (testing "project classpath comes first (for overrides)"
+      (is (re-find #"^bb -cp \"\$CLAUDE_PROJECT_DIR" cmd)))
     (testing "includes namespace"
       (is (re-find #"-m hooks\.scope-lock" cmd)))
     (testing "includes cch tag"

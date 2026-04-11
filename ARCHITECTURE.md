@@ -67,9 +67,13 @@ src/
 ```clojure
 (defhook scope-lock
   "Enforces file edit scope per worktree."
-  {:event "PreToolUse" :matcher "Edit|Write"}
+  {}
   [input]
-  (check-scope (proto/extract-file-path input) (:cwd input) (worktree-root)))
+  (let [file-path (proto/extract-file-path input)
+        cwd       (:cwd input)
+        root      (worktree-root cwd)
+        cfg       (config/load-edn (config/find-config-up cwd ".scope-lock.edn" root))]
+    (check-scope file-path root (:allowed-paths cfg))))
 ```
 
 This expands to a `-main` function that:
@@ -112,17 +116,17 @@ The chain is pre-composed at load time via `reduce`/`comp`, so at runtime it's a
 ### Default Stack
 
 ```
-wrap-timing
-  └── wrap-error-handler
-        └── wrap-logging
-              └── check (your hook logic)
+wrap-logging                    ← outermost: sees everything, including exceptions
+  └── wrap-timing               ← measures elapsed, attaches to result metadata
+        └── wrap-error-handler  ← catches exceptions, returns {:decision :deny}
+              └── (your hook)
 ```
 
 | Middleware | Purpose |
 |-----------|---------|
+| `wrap-logging` | Fire-and-forget SQLite event insert. Outermost so all invocations are logged, including exceptions. Reads `:cch/elapsed-ms` from timing. |
 | `wrap-timing` | Measures elapsed ms, attaches to result metadata |
 | `wrap-error-handler` | Catches exceptions, returns `{:decision :deny}` with error message |
-| `wrap-logging` | Fire-and-forget SQLite event insert via sqlite3 CLI |
 
 ### Custom Middleware
 
@@ -174,7 +178,7 @@ Indexed on: session_id, timestamp, hook_name, decision.
       "matcher": "Edit|Write",
       "hooks": [{
         "type": "command",
-        "command": "bb -cp \"~/.local/share/cch/repo/src:$CLAUDE_PROJECT_DIR/.claude/hooks/src\" -m hooks.scope-lock # cch:scope-lock"
+        "command": "bb -cp \"$CLAUDE_PROJECT_DIR/.claude/hooks/src:~/.local/share/cch/repo/src:~/.local/share/cch/repo/resources\" -m hooks.scope-lock # cch:scope-lock"
       }]
     }]
   }
@@ -185,12 +189,13 @@ The trailing `# cch:scope-lock` comment is a tag that lets `cch uninstall` find 
 
 ### Classpath Strategy
 
-The hook command includes two classpath entries:
+The hook command includes three classpath entries, in priority order:
 
-1. **`~/.local/share/cch/repo/src`** — framework core + built-in hooks (global)
-2. **`$CLAUDE_PROJECT_DIR/.claude/hooks/src`** — project-local hooks (optional overrides)
+1. **`$CLAUDE_PROJECT_DIR/.claude/hooks/src`** — project-local hooks (first, so they can override built-ins)
+2. **`~/.local/share/cch/repo/src`** — framework core + built-in hooks (global)
+3. **`~/.local/share/cch/repo/resources`** — schema.sql for SQLite DB creation
 
-A project can override any built-in hook by providing the same namespace locally.
+A project can override any built-in hook by providing the same namespace locally. Because the project path comes first, Clojure resolves the project's version.
 
 ### Global vs Project
 

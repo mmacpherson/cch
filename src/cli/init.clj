@@ -3,16 +3,21 @@
   (:require [cch.log :as log]
             [cch.config :as config]
             [babashka.fs :as fs]
-            [babashka.process :as p]
+            [clojure.java.io :as io]
             [clojure.string :as str]))
 
 (defn detect-repo-root
-  "Detect the cch repo root by walking up from this file's classpath.
-  Falls back to the current working directory."
+  "Detect the cch repo root from a known resource on the classpath.
+  schema.sql is in resources/ at the repo root, so we can find it
+  via io/resource and walk up to the repo root. This works regardless
+  of the process's cwd."
   []
-  (let [result (p/sh ["git" "rev-parse" "--show-toplevel"])]
-    (when (zero? (:exit result))
-      (str/trim (:out result)))))
+  (when-let [schema-url (io/resource "schema.sql")]
+    (let [schema-path (str schema-url)]
+      ;; file:/path/to/repo/resources/schema.sql → /path/to/repo
+      (when (str/starts-with? schema-path "file:")
+        (let [file-path (subs schema-path 5)]
+          (str (fs/parent (fs/parent file-path))))))))
 
 (defn ensure-repo-symlink!
   "Create ~/.local/share/cch/repo → the cch repo checkout."

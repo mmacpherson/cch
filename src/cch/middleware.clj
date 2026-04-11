@@ -48,11 +48,14 @@
       result)))
 
 (def default-middleware
-  "Default middleware stack. Order matters:
-  - wrap-timing outermost: measures total elapsed time, attaches to result metadata
-  - wrap-logging: reads :cch/elapsed-ms from metadata, fires sqlite3 insert.
-    Runs outside error-handler so failed hooks are still logged.
+  "Default middleware stack. Order matters — compose-middleware reverses then
+  reduces, producing: logging(timing(error-handler(handler))).
+  Execution flow on a call:
+    logging → timing → error-handler → handler → error-handler → timing → logging
+  - wrap-logging outermost: sees timing metadata on the return path, logs all
+    invocations including exceptions caught by error-handler
+  - wrap-timing: measures elapsed time, attaches :cch/elapsed-ms to result metadata
   - wrap-error-handler innermost: catches exceptions, returns {:decision :deny}"
-  [wrap-timing
-   wrap-logging
+  [wrap-logging
+   wrap-timing
    wrap-error-handler])

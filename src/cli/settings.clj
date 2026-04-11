@@ -32,21 +32,24 @@
       (spit tmp (json/generate-string data {:pretty true}))
       (fs/move tmp path {:replace-existing true}))))
 
-(defn cch-repo-path
-  "Path to the cch framework source directory."
+(defn cch-repo-root
+  "Path to the cch framework repo (via symlink at ~/.local/share/cch/repo)."
   []
   (let [xdg (or (System/getenv "XDG_DATA_HOME")
                 (str (System/getProperty "user.home") "/.local/share"))]
-    (str xdg "/cch/repo/src")))
+    (str xdg "/cch/repo")))
 
 (defn hook-command
   "Generate the hook command string for a given hook namespace.
-  Includes both global framework src and project-local hooks."
+  Project-local path comes first so it can override built-in hooks.
+  Includes resources for schema.sql access in logging."
   [hook-ns]
-  (str "bb -cp \"" (cch-repo-path)
-       ":$CLAUDE_PROJECT_DIR/.claude/hooks/src\""
-       " -m " hook-ns
-       " # cch:" (last (str/split (str hook-ns) #"\."))))
+  (let [repo (cch-repo-root)]
+    (str "bb -cp \"$CLAUDE_PROJECT_DIR/.claude/hooks/src"
+         ":" repo "/src"
+         ":" repo "/resources\""
+         " -m " hook-ns
+         " # cch:" (last (str/split (str hook-ns) #"\.")))))
 
 (defn- cch-tagged?
   "Returns true if a hook command has the given cch tag."
