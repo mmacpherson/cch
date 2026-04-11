@@ -1,0 +1,1 @@
+{:lint-as {cch.core/defhook clojure.core/defn}}
