@@ -36,8 +36,9 @@
   [hook-name _docstring opts bindings & body]
   (let [middleware# (:middleware opts `mw/default-middleware)]
     `(defn ~'-main [& _args#]
-       (let [handler# (compose-middleware (fn ~bindings ~@body) ~middleware#)
-             input#   (assoc (proto/read-input)
-                             :cch/hook-name ~(str hook-name))
-             result#  (handler# input#)]
-         (proto/write-response! result#)))))
+       (let [handler#    (compose-middleware (fn ~bindings ~@body) ~middleware#)
+             raw-input#  (proto/read-input)
+             event-name# (or (:hook_event_name raw-input#) "PreToolUse")
+             input#      (assoc raw-input# :cch/hook-name ~(str hook-name))
+             result#     (handler# input#)]
+         (proto/write-response! event-name# result#)))))

@@ -18,23 +18,27 @@
       (get-in input [:tool_params :file_path])))
 
 (defn ->response
-  "Build the JSON response envelope for a PreToolUse hook decision.
+  "Build the JSON response envelope for a hook decision.
 
+  event-name is the hook event (e.g. \"PreToolUse\", \"PostToolUse\").
   decision is a map with:
     :decision  — :allow, :deny, or :ask
     :reason    — human-readable explanation
     :context   — (optional) additional context for Claude
     :updated-input — (optional) replacement tool_input"
-  [{:keys [decision reason context updated-input]}]
-  (let [output (cond-> {:hookEventName          "PreToolUse"
-                        :permissionDecision     (name decision)
+  [event-name {:keys [decision reason context updated-input]}]
+  (let [output (cond-> {:hookEventName            event-name
+                        :permissionDecision       (name decision)
                         :permissionDecisionReason reason}
                  context       (assoc :additionalContext context)
                  updated-input (assoc :updatedInput updated-input))]
     (json/generate-string {:hookSpecificOutput output})))
 
 (defn write-response!
-  "Write a hook decision to stdout. nil decision means allow (no output)."
-  [decision]
-  (when decision
-    (println (->response decision))))
+  "Write a hook decision to stdout. nil decision means allow (no output).
+  event-name defaults to \"PreToolUse\" if not provided."
+  ([decision]
+   (write-response! "PreToolUse" decision))
+  ([event-name decision]
+   (when decision
+     (println (->response event-name decision)))))

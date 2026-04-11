@@ -2,10 +2,38 @@
   "cch init — set up cch in the current project."
   (:require [cch.log :as log]
             [cch.config :as config]
-            [babashka.fs :as fs]))
+            [babashka.fs :as fs]
+            [babashka.process :as p]
+            [clojure.string :as str]))
+
+(defn detect-repo-root
+  "Detect the cch repo root by walking up from this file's classpath.
+  Falls back to the current working directory."
+  []
+  (let [result (p/sh ["git" "rev-parse" "--show-toplevel"])]
+    (when (zero? (:exit result))
+      (str/trim (:out result)))))
+
+(defn ensure-repo-symlink!
+  "Create ~/.local/share/cch/repo → the cch repo checkout."
+  [repo-root]
+  (let [xdg  (or (System/getenv "XDG_DATA_HOME")
+                  (str (System/getProperty "user.home") "/.local/share"))
+        link (str xdg "/cch/repo")]
+    (fs/create-dirs (str xdg "/cch"))
+    (if (fs/exists? link)
+      (println "  Repo symlink exists:" link "→" (str (fs/read-link link)))
+      (do
+        (fs/create-sym-link link repo-root)
+        (println "  Created repo symlink:" link "→" repo-root)))))
 
 (defn run [& _args]
   (println "Initializing cch...")
+
+  ;; Detect and link repo
+  (if-let [repo-root (detect-repo-root)]
+    (ensure-repo-symlink! repo-root)
+    (println "  WARNING: could not detect cch repo root (not in a git repo)"))
 
   ;; Ensure global config exists
   (let [global-path (config/global-config-path)]
@@ -13,7 +41,7 @@
       (println "  Global config exists:" global-path)
       (do
         (fs/create-dirs (fs/parent global-path))
-        (spit global-path "{:log {:enabled true}}\n")
+        (spit global-path ";; cch global configuration\n;; Add overrides here as needed.\n{}\n")
         (println "  Created global config:" global-path))))
 
   ;; Ensure SQLite DB exists
@@ -26,7 +54,7 @@
     (if (fs/exists? project-config)
       (println "  Project config exists:" project-config)
       (do
-        (spit project-config ";; cch project configuration\n;; See: https://github.com/user/claude-code-hooks\n{}\n")
+        (spit project-config ";; cch project configuration\n;; See: https://github.com/mmacpherson/claude-code-hooks\n{}\n")
         (println "  Created project config:" project-config))))
 
   ;; Ensure .claude directory exists

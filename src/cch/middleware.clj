@@ -50,10 +50,9 @@
 (def default-middleware
   "Default middleware stack. Order matters:
   - wrap-timing outermost: measures total elapsed time, attaches to result metadata
-  - wrap-error-handler: catches exceptions, returns {:decision :deny}
-  - wrap-logging innermost: reads :cch/elapsed-ms from metadata (nil if timing absent),
-    fires and forgets a sqlite3 insert. Must be inside error-handler so logging
-    errors don't crash the hook."
+  - wrap-logging: reads :cch/elapsed-ms from metadata, fires sqlite3 insert.
+    Runs outside error-handler so failed hooks are still logged.
+  - wrap-error-handler innermost: catches exceptions, returns {:decision :deny}"
   [wrap-timing
-   wrap-error-handler
-   wrap-logging])
+   wrap-logging
+   wrap-error-handler])

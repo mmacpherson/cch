@@ -41,7 +41,7 @@ Claude Code hooks are shell commands that run before or after tool calls. They r
 
 (defhook my-hook
   "Block edits to secret files."
-  {:event "PreToolUse" :matcher "Edit|Write"}
+  {}
   [input]
   (when (re-find #"\.env$" (get-in input [:tool_input :file_path] ""))
     {:decision :deny :reason "Cannot edit .env files"}))
@@ -74,10 +74,8 @@ cch log --limit=50               # More results
 | Hook | Event | Matcher | Description |
 |------|-------|---------|-------------|
 | `scope-lock` | PreToolUse | Edit\|Write | Enforce file edit scope per git worktree |
-| `protect-files` | PreToolUse | Edit\|Write | Hard-deny edits to sensitive files |
-| `command-audit` | PostToolUse | Bash | Log all shell commands (observability) |
-| `format-on-save` | PostToolUse | Edit\|Write | Run formatters after writes |
-| `slow-confirm` | PreToolUse | Bash | Prompt for destructive commands |
+
+Planned (not yet implemented): `protect-files`, `command-audit`, `format-on-save`, `slow-confirm`.
 
 ## Writing Custom Hooks
 
@@ -103,7 +101,7 @@ Every hook follows a two-part structure:
 ;; 2. Wire it up with defhook
 (defhook my-custom-hook
   "Prompt before writing migration files."
-  {:event "PreToolUse" :matcher "Write"}
+  {}
   [input]
   (check-something
     (proto/extract-file-path input)

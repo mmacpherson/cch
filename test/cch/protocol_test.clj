@@ -23,7 +23,7 @@
 (deftest test-response-format
   (testing "basic deny response"
     (let [parsed (json/parse-string
-                   (proto/->response {:decision :deny :reason "blocked"})
+                   (proto/->response "PreToolUse" {:decision :deny :reason "blocked"})
                    true)]
       (is (= "PreToolUse" (get-in parsed [:hookSpecificOutput :hookEventName])))
       (is (= "deny" (get-in parsed [:hookSpecificOutput :permissionDecision])))
@@ -31,18 +31,24 @@
 
   (testing "response with additional context"
     (let [parsed (json/parse-string
-                   (proto/->response {:decision :ask
-                                      :reason   "out of scope"
-                                      :context  "file is in another repo"})
+                   (proto/->response "PreToolUse" {:decision :ask
+                                                    :reason   "out of scope"
+                                                    :context  "file is in another repo"})
                    true)]
       (is (= "file is in another repo"
              (get-in parsed [:hookSpecificOutput :additionalContext])))))
 
   (testing "response with updated input"
     (let [parsed (json/parse-string
-                   (proto/->response {:decision      :allow
-                                      :reason        "modified"
-                                      :updated-input {:command "safe-cmd"}})
+                   (proto/->response "PreToolUse" {:decision      :allow
+                                                    :reason        "modified"
+                                                    :updated-input {:command "safe-cmd"}})
                    true)]
       (is (= {:command "safe-cmd"}
-             (get-in parsed [:hookSpecificOutput :updatedInput]))))))
+             (get-in parsed [:hookSpecificOutput :updatedInput])))))
+
+  (testing "event name is passed through"
+    (let [parsed (json/parse-string
+                   (proto/->response "PostToolUse" {:decision :allow :reason "ok"})
+                   true)]
+      (is (= "PostToolUse" (get-in parsed [:hookSpecificOutput :hookEventName]))))))
