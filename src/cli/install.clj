@@ -35,13 +35,15 @@
   (let [[flags kvs rest-args] (parse-flags args)
         hook-name             (first rest-args)
         global?               (contains? flags "--global")
+        http?                 (contains? flags "--http")
+        mode                  (if http? :http :command)
         exclude-set           (->> (or (:exclude kvs) "")
                                    (#(str/split % #","))
                                    (remove str/blank?)
                                    set)]
 
     (when-not hook-name
-      (println "Usage: cch install <hook-name> [--global] [--exclude=Event1,Event2]")
+      (println "Usage: cch install <hook-name> [--global] [--http] [--exclude=Event1,Event2]")
       (println)
       (println "Available hooks:")
       (doseq [[name {:keys [description]}] (registry/list-hooks)]
@@ -54,8 +56,11 @@
                      (settings/project-settings-path "."))
             events (select-events hook exclude-set)]
         (doseq [{:keys [event matcher]} events]
-          (settings/add-hook! path event matcher (:ns hook)))
-        (println (format "Installed '%s' in %s" hook-name path))
+          (settings/add-hook! path event matcher (:ns hook) :mode mode))
+        (println (format "Installed '%s' in %s (%s mode)"
+                         hook-name path (name mode)))
+        (when http?
+          (println "  Make sure `cch serve` is running, or events will fail silently."))
         (if (:events hook)
           (do
             (println (format "  Subscribed to %d event(s):" (count events)))

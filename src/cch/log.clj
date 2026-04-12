@@ -82,16 +82,17 @@
 
 (defn query-events
   "Query recent events. Returns a seq of maps.
-  opts: :limit, :hook, :event, :session, :decision, :since"
-  [& {:keys [limit hook event session decision since]}]
+  opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix"
+  [& {:keys [limit hook event session decision since cwd-prefix]}]
   (let [limit   (or limit 20)
         path    (db-path)
         wheres  (cond-> []
-                  hook     (conj (format "hook_name = '%s'" (escape-sql hook)))
-                  event    (conj (format "event_type = '%s'" (escape-sql event)))
-                  session  (conj (format "session_id = '%s'" (escape-sql session)))
-                  decision (conj (format "decision = '%s'" (escape-sql decision)))
-                  since    (conj (format "timestamp > '%s'" (escape-sql since))))
+                  hook       (conj (format "hook_name = '%s'" (escape-sql hook)))
+                  event      (conj (format "event_type = '%s'" (escape-sql event)))
+                  session    (conj (format "session_id = '%s'" (escape-sql session)))
+                  decision   (conj (format "decision = '%s'" (escape-sql decision)))
+                  since      (conj (format "timestamp > '%s'" (escape-sql since)))
+                  cwd-prefix (conj (format "cwd LIKE '%s%%'" (escape-sql cwd-prefix))))
         where   (if (seq wheres)
                   (str " WHERE " (str/join " AND " wheres))
                   "")

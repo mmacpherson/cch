@@ -97,3 +97,33 @@
       (is (re-find #"-m hooks\.scope-lock" cmd)))
     (testing "includes cch tag"
       (is (re-find #"# cch:scope-lock" cmd)))))
+
+(deftest test-add-hook-http-mode
+  (let [tmp (str (fs/create-temp-file {:prefix "settings-" :suffix ".json"}))]
+    (try
+      (spit tmp "{}")
+
+      (testing "http install writes type:http with URL and timeout"
+        (settings/add-hook! tmp "PreToolUse" "Edit|Write" "hooks.scope-lock" :mode :http)
+        (let [s     (settings/read-settings tmp)
+              entry (first (get-in s [:hooks :PreToolUse]))
+              hook  (first (:hooks entry))]
+          (is (= "http" (:type hook)))
+          (is (= "http://127.0.0.1:8888/hooks/scope-lock" (:url hook)))
+          (is (= 5 (:timeout hook)))
+          (is (= "Edit|Write" (:matcher entry)))))
+
+      (testing "reinstall with same hook replaces the prior HTTP entry (not duplicate)"
+        (settings/add-hook! tmp "PreToolUse" "Edit|Write" "hooks.scope-lock" :mode :http)
+        (let [hooks (get-in (settings/read-settings tmp) [:hooks :PreToolUse])]
+          (is (= 1 (count hooks)))))
+
+      (testing "switching from http back to command replaces the HTTP entry"
+        (settings/add-hook! tmp "PreToolUse" "Edit|Write" "hooks.scope-lock" :mode :command)
+        (let [hooks (get-in (settings/read-settings tmp) [:hooks :PreToolUse])
+              hook  (first (:hooks (first hooks)))]
+          (is (= 1 (count hooks)))
+          (is (= "command" (:type hook)))
+          (is (re-find #"# cch:scope-lock" (:command hook)))))
+      (finally
+        (fs/delete tmp)))))

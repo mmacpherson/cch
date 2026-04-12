@@ -184,6 +184,31 @@ Indexed on: session_id, timestamp, hook_name, decision.
 
 The `extra TEXT` column holds the full hook input as JSON (minus cch's internal `:cch/hook-name` marker). `wrap-logging` populates it for every invocation, so event-specific fields that don't map to structured columns — `trigger` for PreCompact, `reason` for SessionEnd, `prompt` for UserPromptSubmit, `last_assistant_message` for Stop — are always recoverable via `json_extract(extra, '$.trigger')` etc.
 
+## HTTP dispatcher (`cch serve`)
+
+`src/cch/server.clj` runs a long-lived Babashka HTTP server (bundled `org.httpkit.server`) that collapses per-event latency from ~50ms (bb startup) to a few milliseconds (in-process dispatch).
+
+**Dispatch flow:**
+
+```
+Claude Code event fires
+  ↓ settings.json says {"type":"http", "url":"http://127.0.0.1:8888/hooks/<name>"}
+  ↓ POST to the server
+  ↓ route lookup → registered hook's `composed` handler
+  ↓ same middleware chain as command mode (logging, timing, error-handling)
+  ↓ check function returns nil / decision map
+  ↓ proto/->response serializes JSON
+  ↓ response body back to Claude Code
+```
+
+The key trick is in `defhook` (see `src/cch/core.clj`): each hook emits three defs — `handler-fn` (raw body), `composed` (middleware-wrapped), and `-main` (command-mode stdin/stdout entry point). Both command and HTTP paths go through `composed`, so logging/metrics/error semantics are byte-identical across modes.
+
+Server binds to `127.0.0.1` only. No auth, no CORS — localhost is the defense.
+
+### Web dashboard
+
+The same HTTP server renders a read-only dashboard at `/`. Server-rendered HTML via `hiccup2.core`, styled with Pico.css + Google Fonts (Roboto / Roboto Condensed), **zero client JS**. Filters are plain `<form method="get">` submits; auto-refresh uses `<meta http-equiv="refresh">`; click-to-expand is native `<details>`/`<summary>`. The entire dashboard lives in `cch.server/dashboard-html` — no separate templates, no build step.
+
 ### The universal observer
 
 `hooks.event-log` is a built-in observer that subscribes to every Claude Code event cch supports (24 of the ~26 documented events — WorktreeCreate and FileChanged are excluded by design). The hook body returns `nil`; all the work lives in the existing middleware. Registering it requires a new `:events` (plural) field on registry entries: a vec of `{:event, :matcher}` maps that `cch install` expands into N `settings.json` entries, all sharing the `# cch:event-log` tag so `cch uninstall` removes them in one shot.

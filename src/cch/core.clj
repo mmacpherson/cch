@@ -1,10 +1,12 @@
 (ns cch.core
   "Core framework: defhook macro and middleware composition.
 
-  defhook generates a -main function that:
-    1. Reads JSON from stdin (Claude Code hook protocol)
-    2. Runs the handler through the middleware chain
-    3. Writes the decision to stdout (nil = allow, no output)"
+  defhook generates three artifacts in one shot:
+    1. handler-fn   — the raw check function (for in-process dispatch / REPL)
+    2. composed     — handler-fn wrapped in the middleware chain (logging,
+                      timing, error handling). Used by both command and HTTP modes.
+    3. -main        — command-mode entry point (stdin → stdout). Reads JSON
+                      from stdin, runs through `composed`, writes response."
   (:require [cch.protocol :as proto]
             [cch.middleware :as mw]))
 
@@ -23,6 +25,12 @@
   Options map:
     :middleware — custom middleware vec (default: cch.middleware/default-middleware)
 
+  Generates three defs in the current namespace:
+    handler-fn  — your raw body as a function (for REPL / in-process dispatch)
+    composed    — handler-fn wrapped in the middleware chain (shared by
+                  command and HTTP dispatch paths)
+    -main       — command-mode entry point used by `bb -m <ns>`
+
   Hook wiring metadata (event type, matcher pattern) lives in
   cli/registry.clj — the single source of truth for installation.
 
@@ -35,10 +43,21 @@
         {:decision :deny :reason \"Cannot edit secret files\"}))"
   [hook-name _docstring opts bindings & body]
   (let [middleware# (:middleware opts `mw/default-middleware)]
-    `(defn ~'-main [& _args#]
-       (let [handler#    (compose-middleware (fn ~bindings ~@body) ~middleware#)
-             raw-input#  (proto/read-input)
-             event-name# (or (:hook_event_name raw-input#) "PreToolUse")
-             input#      (assoc raw-input# :cch/hook-name ~(str hook-name))
-             result#     (handler# input#)]
-         (proto/write-response! event-name# result#)))))
+    `(do
+       ;; Raw handler — the user's body, no middleware, no protocol. Useful
+       ;; for REPL work and direct invocation from the HTTP server.
+       (defn ~'handler-fn ~bindings ~@body)
+
+       ;; Composed handler — wraps handler-fn in the middleware chain.
+       ;; Both -main (command mode) and cch.server (HTTP mode) go through
+       ;; this, so logging / timing / error handling are identical.
+       (def ~'composed (compose-middleware ~'handler-fn ~middleware#))
+
+       ;; Command-mode entry point: read JSON from stdin, run through the
+       ;; composed handler, write JSON to stdout.
+       (defn ~'-main [& _args#]
+         (let [raw-input#  (proto/read-input)
+               event-name# (or (:hook_event_name raw-input#) "PreToolUse")
+               input#      (assoc raw-input# :cch/hook-name ~(str hook-name))
+               result#     (~'composed input#)]
+           (proto/write-response! event-name# result#))))))

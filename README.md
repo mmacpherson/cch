@@ -54,10 +54,11 @@ That's it. The `defhook` macro generates a `-main` entry point with middleware f
 | Command | Description |
 |---------|-------------|
 | `cch init` | Set up global config, SQLite database, and project config |
-| `cch install <hook>` | Wire a hook into `settings.local.json` (or `--global`) |
+| `cch install <hook>` | Wire a hook into `settings.local.json` (or `--global`, or `--http`) |
 | `cch uninstall <hook>` | Remove a hook from settings |
 | `cch list` | Show available hooks with installation status |
 | `cch log` | Query event history from SQLite |
+| `cch serve` | Run the HTTP dispatcher + web dashboard |
 
 ### Log Queries
 
@@ -89,6 +90,36 @@ Planned (not yet implemented): `protect-files`, `format-on-save`, `slow-confirm`
 - Wait for the HTTP dispatcher (tracked in `claude-code-hooks-bq2`), which eliminates per-event startup cost.
 
 **Payload capture.** The `extra` column stores the full event input as JSON — including `tool_input` for Bash/Edit/Write (commands, file paths, contents), `prompt` text from UserPromptSubmit, and `last_assistant_message` from Stop. It's a local file on your machine; no data leaves the host. Be aware of this before using cch in a regulated environment.
+
+## `cch serve` — HTTP dispatcher + dashboard
+
+```bash
+cch serve                        # default: 127.0.0.1:8888
+cch serve --port 9000 --host 127.0.0.1
+```
+
+Runs a long-lived Babashka HTTP server that dispatches hooks in-process and serves a simple dashboard.
+
+**Why:** command-mode hooks spawn a fresh Babashka per event (~50ms of bb startup). With the observer installed across 24 events, that adds up. Installing a hook in HTTP mode collapses dispatch latency to a few milliseconds because the JVM is already running.
+
+```bash
+cch serve &
+cch install event-log --global --http   # now fires against http://127.0.0.1:8888/hooks/event-log
+```
+
+**Dashboard** at `http://127.0.0.1:8888/` — server-rendered (no client JS), styled with Pico.css + Roboto. Filter by repo, hook, event type, session, decision, or time range. Click a row to expand the full event payload. Auto-refreshes every 10s.
+
+**Server routes:**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/hooks/<name>` | Dispatches to the named hook's composed handler. Returns the same JSON shape command-mode produces. |
+| `GET`  | `/` | Dashboard HTML (events table + filters). |
+| `GET`  | `/health` | JSON liveness check and registered-hooks list. |
+
+Server binds to `127.0.0.1` only — never exposed beyond localhost.
+
+**Caveat:** if you install hooks with `--http` but `cch serve` isn't running, every Claude Code event silently errors (Claude Code treats HTTP connection failures as non-blocking errors and proceeds). Keep the server running, or stick with command mode.
 
 ## Writing Custom Hooks
 

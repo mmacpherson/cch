@@ -51,11 +51,23 @@
          " -m " hook-ns
          " # cch:" (last (str/split (str hook-ns) #"\.")))))
 
+(defn hook-http-url
+  "Generate the HTTP dispatch URL for a hook. Default server is
+  127.0.0.1:8888; override by passing opts."
+  [hook-ns & {:keys [host port] :or {host "127.0.0.1" port 8888}}]
+  (let [hook-name (last (str/split (str hook-ns) #"\."))]
+    (format "http://%s:%d/hooks/%s" host port hook-name)))
+
 (defn- cch-tagged?
-  "Returns true if a hook command has the given cch tag."
+  "Returns true if a hook entry is cch's: either a tagged command or an
+  HTTP entry whose URL points at a cch dispatcher route for this hook."
   [hook-cmd hook-name]
-  (and (:command hook-cmd)
-       (str/includes? (:command hook-cmd) (str "# cch:" hook-name))))
+  (let [cmd (:command hook-cmd)
+        url (:url hook-cmd)]
+    (cond
+      cmd (str/includes? cmd (str "# cch:" hook-name))
+      url (str/includes? url (str "/hooks/" hook-name))
+      :else false)))
 
 (defn- strip-cch-command
   "Remove only the cch-tagged command from an entry, preserving others.
@@ -67,17 +79,29 @@
 
 (defn add-hook!
   "Add a hook to a settings file. Returns the updated settings.
-  Surgically removes only the cch-tagged command, preserving co-located hooks."
-  [settings-path event-type matcher hook-ns]
+  Surgically removes only cch's prior entry for this hook, preserving
+  co-located non-cch hooks.
+
+  mode is :command (default) or :http. HTTP entries point at
+  http://127.0.0.1:8888/hooks/<hook-name>; host/port are overridable via
+  opts (:http-host, :http-port)."
+  [settings-path event-type matcher hook-ns & {:keys [mode http-host http-port]
+                                                :or {mode :command}}]
   (let [settings  (read-settings settings-path)
         hooks-key (keyword event-type)
         hooks-vec (get-in settings [:hooks hooks-key] [])
         hook-name (last (str/split (str hook-ns) #"\."))
-        command   (hook-command hook-ns)
-        ;; Remove only the cch command, preserving other hooks in same entry
+        ;; Remove any prior cch entry (command- or HTTP-tagged), preserving
+        ;; co-located non-cch hooks in the same matcher group.
         filtered  (vec (keep #(strip-cch-command % hook-name) hooks-vec))
+        hook-map  (case mode
+                    :command {:type "command" :command (hook-command hook-ns)}
+                    :http    {:type "http"
+                              :url     (hook-http-url hook-ns :host (or http-host "127.0.0.1")
+                                                              :port (or http-port 8888))
+                              :timeout 5})
         ;; Omit :matcher for events that don't support it — keeps settings.json tidy.
-        entry     (cond-> {:hooks [{:type "command" :command command}]}
+        entry     (cond-> {:hooks [hook-map]}
                     matcher (assoc :matcher matcher))
         updated   (conj filtered entry)
         new-settings (assoc-in settings [:hooks hooks-key] updated)]

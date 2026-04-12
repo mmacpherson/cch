@@ -8,8 +8,10 @@
     install <hook>    Enable a hook (project-local by default)
     uninstall <hook>  Disable a hook
     list              Show available and installed hooks
-    log               Query event history"
-  (:require [cli.init :as init]
+    log               Query event history
+    serve             Run the HTTP dispatcher + web dashboard"
+  (:require [cch.server :as server]
+            [cli.init :as init]
             [cli.install :as install]
             [cli.list-cmd :as list-cmd]
             [cli.log-cmd :as log-cmd]))
@@ -21,10 +23,11 @@
   (println)
   (println "Commands:")
   (println "  init              Set up cch in the current project")
-  (println "  install <hook>    Enable a hook (--global for all projects)")
+  (println "  install <hook>    Enable a hook (--global for all projects, --http for HTTP mode)")
   (println "  uninstall <hook>  Disable a hook")
   (println "  list              Show available and installed hooks")
   (println "  log               Query event history")
+  (println "  serve             Run the HTTP dispatcher + web dashboard")
   (println)
   (println "Run 'cch <command> --help' for details."))
 
@@ -36,4 +39,5 @@
       "uninstall" (apply install/run-uninstall rest-args)
       "list"      (apply list-cmd/run rest-args)
       "log"       (apply log-cmd/run rest-args)
+      "serve"     (apply server/-main rest-args)
       (print-usage))))
