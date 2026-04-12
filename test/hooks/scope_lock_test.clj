@@ -1,12 +1,10 @@
 (ns hooks.scope-lock-test
-  (:require [clojure.test :refer [deftest is testing]]
-            [hooks.scope-lock :as scope]
-            [cch.protocol :as proto]
-            [cch.config :as config]
-            [cheshire.core :as json]
-            [babashka.fs :as fs]
+  (:require [babashka.fs :as fs]
             [babashka.process :as p]
-            [clojure.string :as str]))
+            [cheshire.core :as json]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [hooks.scope-lock :as scope]))
 
 ;; Use the actual repo root for integration tests
 (def repo-root
@@ -93,50 +91,9 @@
     (let [result (scope/check-scope "/repo/.git" "/repo" nil)]
       (is (= :deny (:decision result))))))
 
-(deftest test-malformed-yaml-config
-  (let [tmp-dir  (str (fs/create-temp-dir {:prefix "scope-bad-yaml-"}))
-        config-f (str tmp-dir "/.cch-config.yaml")]
-    (try
-      (spit config-f "hooks:\n  scope-lock:\n    allowed-paths: [unclosed\n")
-      (testing "malformed YAML throws ex-info with ::malformed-config"
-        (let [ex (try
-                   (config/load-yaml config-f)
-                   nil
-                   (catch clojure.lang.ExceptionInfo e e))]
-          (is (some? ex))
-          (is (= :cch.config/malformed-config (:type (ex-data ex))))))
-      (finally
-        (fs/delete-tree tmp-dir)))))
-
-;; --- Config file loading tests (uses temp directories) ---
-
-(deftest test-config-file-loading
-  (let [tmp-dir (str (fs/create-temp-dir {:prefix "scope-test-"}))
-        config  (str tmp-dir "/.cch-config.yaml")]
-    (try
-      (spit config "hooks:\n  scope-lock:\n    allowed-paths:\n      - src/\n      - .claude/\n")
-      (testing "config is loaded; hook section reachable via nested path"
-        (let [cfg (config/load-yaml config)]
-          (is (= ["src/" ".claude/"] (get-in cfg [:hooks :scope-lock :allowed-paths])))))
-      (finally
-        (fs/delete-tree tmp-dir)))))
-
-;; --- Protocol response tests ---
-
-(deftest test-response-ask
-  (let [decision {:decision :ask :reason "out of scope"}
-        parsed   (json/parse-string (proto/->response "PreToolUse" decision) true)]
-    (is (= "ask" (get-in parsed [:hookSpecificOutput :permissionDecision])))
-    (is (= "PreToolUse" (get-in parsed [:hookSpecificOutput :hookEventName])))
-    (is (= "out of scope" (get-in parsed [:hookSpecificOutput :permissionDecisionReason])))))
-
-(deftest test-response-deny
-  (let [decision {:decision :deny :reason "no .git edits"}
-        parsed   (json/parse-string (proto/->response "PreToolUse" decision) true)]
-    (is (= "deny" (get-in parsed [:hookSpecificOutput :permissionDecision])))
-    (is (= "no .git edits" (get-in parsed [:hookSpecificOutput :permissionDecisionReason])))))
-
-;; Event-name / non-PreToolUse shape coverage lives in cch.protocol-test.
+;; Malformed-YAML contract is proven by cch.config-test/test-load-yaml;
+;; the fail-closed end-to-end behavior is proven by test-cli-integration
+;; below. Protocol response shapes are proven by cch.protocol-test.
 
 ;; --- Integration test: run as subprocess like Claude Code would ---
 
