@@ -136,10 +136,7 @@
     (is (= "deny" (get-in parsed [:hookSpecificOutput :permissionDecision])))
     (is (= "no .git edits" (get-in parsed [:hookSpecificOutput :permissionDecisionReason])))))
 
-(deftest test-response-event-name-passthrough
-  (let [decision {:decision :allow :reason "ok"}
-        parsed   (json/parse-string (proto/->response "PostToolUse" decision) true)]
-    (is (= "PostToolUse" (get-in parsed [:hookSpecificOutput :hookEventName])))))
+;; Event-name / non-PreToolUse shape coverage lives in cch.protocol-test.
 
 ;; --- Integration test: run as subprocess like Claude Code would ---
 
