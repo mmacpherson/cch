@@ -2,8 +2,12 @@
   "PreToolUse hook for Edit/Write that enforces file scope.
 
   Default: allows edits anywhere within the git worktree root.
-  Narrowed: if a .scope-lock.edn is found walking up from cwd,
-  only allows edits under the listed :allowed-paths (relative to worktree root)."
+  Narrowed: if a .cch-config.yaml is found walking up from cwd and
+  contains hooks.scope-lock.allowed-paths, only allows edits under
+  those path prefixes (relative to worktree root).
+
+  Fails closed: if the config file exists but is malformed YAML, scope-lock
+  denies rather than falling through to the unrestricted default."
   (:require [cch.core :refer [defhook]]
             [cch.config :as config]
             [cch.protocol :as proto]
@@ -49,14 +53,15 @@
     (let [file-path (normalize-path file-path)
           root      (normalize-path root)]
       (cond
+        ;; Always hard-deny writes into or targeting .git, even under /tmp
+        (or (str/includes? file-path "/.git/")
+            (str/ends-with? file-path "/.git"))
+        {:decision :deny
+         :reason   (str "scope-lock: blocked edit inside .git/: " file-path)}
+
         ;; Always allow /tmp — universal scratch space
         (str/starts-with? file-path "/tmp/")
         nil
-
-        ;; Always hard-deny writes into .git/
-        (str/includes? file-path "/.git/")
-        {:decision :deny
-         :reason   (str "scope-lock: blocked edit inside .git/: " file-path)}
 
         ;; Outside worktree — ask user
         (not (str/starts-with? file-path (str root "/")))
@@ -85,12 +90,20 @@
   "Enforces file edit scope per worktree."
   {}
   [input]
-  (let [file-path    (proto/extract-file-path input)
-        cwd          (:cwd input)
-        root         (worktree-root cwd)
-        ;; Load narrowing config (I/O happens here, not in check-scope)
-        config-path  (when root
-                       (config/find-config-up (or cwd root) ".scope-lock.edn" root))
-        cfg          (config/load-edn config-path)
-        allowed-paths (:allowed-paths cfg)]
-    (check-scope file-path root allowed-paths)))
+  (let [file-path   (proto/extract-file-path input)
+        cwd         (:cwd input)
+        root        (worktree-root cwd)
+        ;; Load narrowing config (I/O happens here, not in check-scope).
+        ;; Malformed YAML fails closed: better to block a legitimate edit
+        ;; than silently widen scope from a corrupt config.
+        config-path (when root
+                      (config/find-config-up (or cwd root) ".cch-config.yaml" root))
+        cfg         (try
+                      (config/load-yaml config-path)
+                      (catch clojure.lang.ExceptionInfo _e
+                        ::malformed))]
+    (if (= cfg ::malformed)
+      {:decision :deny
+       :reason   (str "scope-lock: malformed config at " config-path
+                      " — refusing to load (fail closed)")}
+      (check-scope file-path root (get-in cfg [:hooks :scope-lock :allowed-paths])))))

@@ -10,7 +10,7 @@ Create a new cch hook based on the user's description.
    - Write a pure check function first (no I/O, easy to test)
    - Wrap it with `(defhook ...)` from `cch.core`
    - Use `cch.protocol/extract-file-path` for file-based hooks
-   - Use `cch.config/load-config` or `cch.config/find-config-up` if the hook needs configuration
+   - If the hook needs configuration, read `.cch-config.yaml` via `cch.config/load-yaml` and extract your section with `(get-in cfg [:hooks :<hook-name> ...])`. Wrap the load in try/catch on `ExceptionInfo` and fail closed (return a deny) if it's malformed — do not proceed as if no config existed.
 
 3. **Register the hook** in `src/cli/registry.clj`:
    - Add an entry to the `hooks` map with `:ns`, `:event`, `:matcher`, `:description`

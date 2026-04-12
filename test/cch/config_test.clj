@@ -8,16 +8,16 @@
         sub-dir (str tmp-dir "/a/b/c")]
     (try
       (fs/create-dirs sub-dir)
-      (spit (str tmp-dir "/.claude-hooks.edn") "{:log {:enabled true}}")
+      (spit (str tmp-dir "/.cch-config.yaml") "log:\n  enabled: true\n")
 
       (testing "finds config walking up from subdirectory"
-        (is (= (str tmp-dir "/.claude-hooks.edn")
-               (config/find-config-up sub-dir ".claude-hooks.edn"))))
+        (is (= (str tmp-dir "/.cch-config.yaml")
+               (config/find-config-up sub-dir ".cch-config.yaml"))))
 
       (testing "returns nil when config not found"
         (let [isolated (str (fs/create-temp-dir {:prefix "no-config-"}))]
           (try
-            (is (nil? (config/find-config-up isolated ".nonexistent.edn")))
+            (is (nil? (config/find-config-up isolated ".nonexistent.yaml")))
             (finally
               (fs/delete-tree isolated)))))
       (finally
@@ -31,36 +31,48 @@
       (fs/create-dirs sub-dir)
 
       (testing "finds config within boundary"
-        (spit (str tmp-dir "/project/.scope-lock.edn") "{:allowed-paths [\"src/\"]}")
-        (is (= (str tmp-dir "/project/.scope-lock.edn")
-               (config/find-config-up sub-dir ".scope-lock.edn" boundary))))
+        (spit (str tmp-dir "/project/.cch-config.yaml")
+              "hooks:\n  scope-lock:\n    allowed-paths:\n      - src/\n")
+        (is (= (str tmp-dir "/project/.cch-config.yaml")
+               (config/find-config-up sub-dir ".cch-config.yaml" boundary))))
 
       (testing "does NOT find config above boundary"
-        (spit (str tmp-dir "/.scope-lock.edn") "{:allowed-paths [\"evil/\"]}")
+        (spit (str tmp-dir "/.cch-config.yaml")
+              "hooks:\n  scope-lock:\n    allowed-paths:\n      - evil/\n")
         ;; Walking from sub-dir with boundary at project/ should find project config,
         ;; not the one above it
-        (is (= (str tmp-dir "/project/.scope-lock.edn")
-               (config/find-config-up sub-dir ".scope-lock.edn" boundary))))
+        (is (= (str tmp-dir "/project/.cch-config.yaml")
+               (config/find-config-up sub-dir ".cch-config.yaml" boundary))))
 
       (testing "returns nil when config only exists above boundary"
-        (fs/delete (str tmp-dir "/project/.scope-lock.edn"))
+        (fs/delete (str tmp-dir "/project/.cch-config.yaml"))
         ;; Now the only config is above the boundary — should not find it
-        (is (nil? (config/find-config-up sub-dir ".scope-lock.edn" boundary))))
+        (is (nil? (config/find-config-up sub-dir ".cch-config.yaml" boundary))))
       (finally
         (fs/delete-tree tmp-dir)))))
 
-(deftest test-load-edn
-  (let [tmp (str (fs/create-temp-file {:prefix "edn-test-" :suffix ".edn"}))]
+(deftest test-load-yaml
+  (let [tmp (str (fs/create-temp-file {:prefix "yaml-test-" :suffix ".yaml"}))]
     (try
-      (spit tmp "{:foo :bar :n 42}")
-      (testing "loads valid EDN"
-        (is (= {:foo :bar :n 42} (config/load-edn tmp))))
+      (spit tmp "foo: bar\nn: 42\nitems:\n  - a\n  - b\n")
+      (testing "loads valid YAML with keyword keys"
+        (is (= {:foo "bar" :n 42 :items ["a" "b"]} (config/load-yaml tmp))))
 
       (testing "returns nil for nonexistent file"
-        (is (nil? (config/load-edn "/nonexistent/file.edn"))))
+        (is (nil? (config/load-yaml "/nonexistent/file.yaml"))))
 
       (testing "returns nil for nil path"
-        (is (nil? (config/load-edn nil))))
+        (is (nil? (config/load-yaml nil))))
+
+      (testing "throws ex-info with ::malformed-config on bad YAML"
+        (spit tmp "key: [unclosed\n")
+        (let [ex (try
+                   (config/load-yaml tmp)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? ex))
+          (is (= :cch.config/malformed-config (:type (ex-data ex))))
+          (is (= tmp (:path (ex-data ex))))))
       (finally
         (fs/delete tmp)))))
 

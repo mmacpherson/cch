@@ -54,7 +54,7 @@ doctor:
     fi
     echo ""
     echo "Config:"
-    cfg="$HOME/.config/cch/config.edn"
+    cfg="$HOME/.config/cch/config.yaml"
     if [ -f "$cfg" ]; then
         printf "  ✓ %-14s %s\n" "global config" "$cfg"
     else
@@ -71,4 +71,3 @@ doctor:
 # Remove generated files
 clean:
     rm -rf .cpcache .nrepl-port
-    rm -f .claude-hooks.edn

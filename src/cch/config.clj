@@ -1,11 +1,25 @@
 (ns cch.config
-  "Three-tier configuration loading.
+  "Two-tier configuration loading.
 
-  Merge order (most specific wins):
-    1. Global:       ~/.config/cch/config.edn
-    2. Per-project:  .claude-hooks.edn (walks up from cwd)
-    3. Per-hook:     .<hook-name>.edn (walks up from cwd)"
-  (:require [clojure.edn :as edn]
+  Merge order (later wins):
+    1. Global:   ~/.config/cch/config.yaml       (per-user, optional)
+    2. Project:  .cch-config.yaml                (walks up from cwd to worktree root)
+
+  Schema:
+
+    log:
+      enabled: true
+    hooks:
+      <hook-name>:
+        <hook-specific config>
+
+  Each hook reads its own section via (get-in cfg [:hooks :<name>]).
+
+  Missing files return nil. Malformed YAML throws ex-info with
+  {:type ::malformed-config} — callers decide policy (security-sensitive
+  hooks should translate this into a deny decision rather than silently
+  proceeding)."
+  (:require [clj-yaml.core :as yaml]
             [babashka.fs :as fs]))
 
 (defn global-config-path
@@ -13,7 +27,7 @@
   []
   (str (or (System/getenv "XDG_CONFIG_HOME")
            (str (System/getProperty "user.home") "/.config"))
-       "/cch/config.edn"))
+       "/cch/config.yaml"))
 
 (defn find-config-up
   "Walk up from dir looking for filename. Returns path or nil.
@@ -29,11 +43,22 @@
            (when-not (and boundary (= (str d) (str (fs/path boundary))))
              (recur (fs/parent d)))))))))
 
-(defn load-edn
-  "Load an EDN file, returning nil if it doesn't exist."
+(defn load-yaml
+  "Load a YAML file. Returns nil if missing, throws ex-info with
+  {:type ::malformed-config} on parse failure, returns the parsed map
+  (keyword-keyed) on success.
+
+  Distinguishes missing from malformed so callers whose correctness
+  depends on the config (e.g. security-narrowing hooks) can fail closed
+  rather than silently proceed as if no config existed."
   [path]
   (when (and path (fs/exists? path))
-    (edn/read-string (slurp path))))
+    (try
+      (yaml/parse-string (slurp path) :keywords true)
+      (catch Exception e
+        (throw (ex-info (str "malformed YAML at " path ": " (.getMessage e))
+                        {:type ::malformed-config :path path}
+                        e))))))
 
 (defn deep-merge
   "Recursively merge maps. Later values win for non-map keys."
@@ -47,16 +72,11 @@
           {} (remove nil? maps)))
 
 (defn load-config
-  "Load and merge configuration for a hook invocation.
-  Optional boundary limits how far up the tree config discovery walks."
-  ([cwd]
-   (load-config cwd nil nil))
-  ([cwd hook-name]
-   (load-config cwd hook-name nil))
-  ([cwd hook-name boundary]
-   (let [global   (load-edn (global-config-path))
-         project  (some-> (find-config-up cwd ".claude-hooks.edn" boundary) load-edn)
-         hook-cfg (when hook-name
-                    (some-> (find-config-up cwd (str "." hook-name ".edn") boundary)
-                            load-edn))]
-     (deep-merge global project hook-cfg))))
+  "Load and merge global + project configuration.
+  Optional boundary limits how far up the tree project config discovery walks.
+  Throws ex-info on malformed YAML in either tier; caller decides policy."
+  ([cwd] (load-config cwd nil))
+  ([cwd boundary]
+   (let [global  (load-yaml (global-config-path))
+         project (some-> (find-config-up cwd ".cch-config.yaml" boundary) load-yaml)]
+     (deep-merge global project))))

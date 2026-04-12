@@ -210,21 +210,31 @@ Settings files are written atomically: write to `.tmp`, then rename. This preven
 
 ## Configuration
 
-### Three-Tier Merge
+### Two-Tier Merge
 
 ```
-~/.config/cch/config.edn          Global defaults
-  ↓ merge
-<project>/.claude-hooks.edn       Project settings (committed)
-  ↓ merge
-<project>/.scope-lock.edn         Hook-specific (walks up from cwd)
+~/.config/cch/config.yaml         Global (per-user) defaults
+  ↓ deep-merge
+<project>/.cch-config.yaml        Project settings (committed, pre-commit-style)
 ```
 
-Later tiers win for scalar values. Maps are deep-merged.
+Both files share the same schema. Project values win over global. Maps are deep-merged; scalars use later-wins.
+
+```yaml
+# .cch-config.yaml
+log:
+  enabled: true
+hooks:
+  scope-lock:
+    allowed-paths:
+      - src/
+```
+
+Each hook reads its own section via `(get-in cfg [:hooks :<hook-name>])`. A missing `hooks:` section or a missing per-hook subsection behaves as "no config" for that hook.
 
 ### Config Discovery
 
-Hook-specific config files (like `.scope-lock.edn`) are found by walking up the directory tree from the current working directory, bounded by the project/worktree root. This enables per-subdirectory narrowing — e.g., `infrastructure/sample-infrastructure/.scope-lock.edn` only applies when Claude's cwd is within that subtree. The boundary prevents stray config files above the project root from silently applying.
+`.cch-config.yaml` is found by walking up the directory tree from the current working directory, bounded by the worktree root. The boundary prevents stray config files above the project root from silently applying. Malformed YAML throws — hooks translate that to a fail-closed deny rather than proceeding as if no config existed.
 
 ## Hook Types
 

@@ -31,6 +31,12 @@
   (testing "/tmp is always allowed, even with a worktree root"
     (is (nil? (scope/check-scope "/tmp/scratch.py" "/repo" nil)))))
 
+(deftest test-tmp-git-bypass-denied
+  (testing "/tmp/.git/ is denied: .git check must run before /tmp allow"
+    (let [result (scope/check-scope "/tmp/repo/.git/config" "/tmp/repo" nil)]
+      (is (= :deny (:decision result)))
+      (is (str/includes? (:reason result) ".git/")))))
+
 (deftest test-allows-when-no-repo
   (testing "nil root means not in a git repo — should allow everything"
     (is (nil? (scope/check-scope "/anywhere/file.py" nil nil)))))
@@ -74,18 +80,44 @@
                    (str repo-root "/src-old/legacy.py") repo-root ["src/"])]
       (is (= :ask (:decision result))))))
 
+;; --- Security edge cases ---
+
+(deftest test-dot-dot-traversal-blocked
+  (testing "path traversal via ../ resolves and is caught"
+    (let [result (scope/check-scope "/repo/src/../../etc/passwd" "/repo" nil)]
+      (is (= :ask (:decision result)))
+      (is (str/includes? (:reason result) "outside worktree")))))
+
+(deftest test-dot-git-without-trailing-slash
+  (testing ".git directory itself (no trailing slash) is denied"
+    (let [result (scope/check-scope "/repo/.git" "/repo" nil)]
+      (is (= :deny (:decision result))))))
+
+(deftest test-malformed-yaml-config
+  (let [tmp-dir  (str (fs/create-temp-dir {:prefix "scope-bad-yaml-"}))
+        config-f (str tmp-dir "/.cch-config.yaml")]
+    (try
+      (spit config-f "hooks:\n  scope-lock:\n    allowed-paths: [unclosed\n")
+      (testing "malformed YAML throws ex-info with ::malformed-config"
+        (let [ex (try
+                   (config/load-yaml config-f)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+          (is (some? ex))
+          (is (= :cch.config/malformed-config (:type (ex-data ex))))))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
 ;; --- Config file loading tests (uses temp directories) ---
 
 (deftest test-config-file-loading
-  (let [tmp-dir  (str (fs/create-temp-dir {:prefix "scope-test-"}))
-        config   (str tmp-dir "/.scope-lock.edn")]
+  (let [tmp-dir (str (fs/create-temp-dir {:prefix "scope-test-"}))
+        config  (str tmp-dir "/.cch-config.yaml")]
     (try
-      (spit config "{:allowed-paths [\"src/\" \".claude/\"]}")
-
-      (testing "config is loaded and passed to check-scope via defhook wrapper"
-        ;; Verify the config loading works by calling the components directly
-        (let [cfg (config/load-edn config)]
-          (is (= ["src/" ".claude/"] (:allowed-paths cfg)))))
+      (spit config "hooks:\n  scope-lock:\n    allowed-paths:\n      - src/\n      - .claude/\n")
+      (testing "config is loaded; hook section reachable via nested path"
+        (let [cfg (config/load-yaml config)]
+          (is (= ["src/" ".claude/"] (get-in cfg [:hooks :scope-lock :allowed-paths])))))
       (finally
         (fs/delete-tree tmp-dir)))))
 
@@ -138,4 +170,28 @@
             result (run input)
             parsed (json/parse-string (:out result) true)]
         (is (zero? (:exit result)))
-        (is (= "deny" (get-in parsed [:hookSpecificOutput :permissionDecision])))))))
+        (is (= "deny" (get-in parsed [:hookSpecificOutput :permissionDecision])))))
+
+    (testing "malformed .cch-config.yaml fails closed with deny"
+      (let [tmp-repo (str (fs/create-temp-dir {:prefix "scope-malformed-"}))]
+        (try
+          ;; Init a repo inside /tmp so worktree-root resolves, then drop a
+          ;; malformed yaml. /tmp dir is symlinked on some systems; normalize.
+          (p/sh {:dir tmp-repo} "git" "init" "-q")
+          (let [real-root (str/trim (:out (p/sh {:dir tmp-repo}
+                                               "git" "rev-parse" "--show-toplevel")))]
+            (spit (str real-root "/.cch-config.yaml")
+                  "hooks:\n  scope-lock:\n    allowed-paths: [unclosed\n")
+            (fs/create-dirs (str real-root "/src"))
+            (let [input  (format "{\"cwd\":\"%s\",\"tool_input\":{\"file_path\":\"%s/src/a.clj\"}}"
+                                 real-root real-root)
+                  result (p/sh {:dir real-root :in input}
+                               "bb" "-cp" (str repo-root "/src:" repo-root "/resources")
+                               "-m" "hooks.scope-lock")
+                  parsed (json/parse-string (:out result) true)]
+              (is (zero? (:exit result)))
+              (is (= "deny" (get-in parsed [:hookSpecificOutput :permissionDecision])))
+              (is (str/includes? (get-in parsed [:hookSpecificOutput :permissionDecisionReason])
+                                 "malformed config"))))
+          (finally
+            (fs/delete-tree tmp-repo)))))))

@@ -50,7 +50,10 @@
            session-id decision reason elapsed-ms]}]
   (let [path (db-path)
         sql  (format
-               "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+               ;; busy_timeout lets concurrent hook runs serialize instead of
+               ;; SQLITE_BUSY-failing. PRAGMA is per-connection and each
+               ;; sqlite3 CLI call gets its own, so set it inline every time.
+               "PRAGMA busy_timeout=5000; INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s);"
                (sql-value session-id)
                (sql-value hook-name)
                (sql-value event-type)
@@ -62,8 +65,10 @@
                (sql-value elapsed-ms))]
     (try
       (ensure-db! path)
+      ;; Discard subprocess stdio — inheriting would corrupt the hook's
+      ;; JSON response on stdout that Claude Code parses.
       (p/process ["sqlite3" path sql]
-                 {:out :inherit :err :inherit})
+                 {:out :discard :err :discard})
       (catch Exception _e
         nil))))
 

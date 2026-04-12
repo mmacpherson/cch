@@ -154,21 +154,24 @@ The input map your hook receives includes:
 
 ## Configuration
 
-Three tiers, merged in order (most specific wins):
+Two tiers, merged in order (project wins over global):
 
 | Tier | File | Purpose |
 |------|------|---------|
-| Global | `~/.config/cch/config.edn` | User preferences across all projects |
-| Project | `.claude-hooks.edn` | Shared project settings (commit this) |
-| Hook-specific | `.scope-lock.edn` etc. | Per-hook config (walks up directory tree) |
+| Global | `~/.config/cch/config.yaml` | User preferences across all projects |
+| Project | `.cch-config.yaml` | Shared project settings (commit this) |
+
+Hook-specific settings live under a `hooks:` section keyed by hook name, pre-commit-style.
 
 ### Example: scope-lock narrowing
 
-```clojure
-;; infrastructure/sample-infrastructure/.scope-lock.edn
-;; Only allow edits within these paths when cwd is here:
-{:allowed-paths ["infrastructure/sample-infrastructure/"
-                 ".claude/"]}
+```yaml
+# .cch-config.yaml (at repo root, committed)
+hooks:
+  scope-lock:
+    allowed-paths:
+      - src/
+      - .claude/
 ```
 
 ## Architecture
