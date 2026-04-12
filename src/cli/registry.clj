@@ -10,10 +10,14 @@
 
 (def hooks
   "Built-in hooks and their configuration."
-  {"scope-lock" {:ns          "hooks.scope-lock"
-                 :event       "PreToolUse"
-                 :matcher     "Edit|Write"
-                 :description "Enforces file edit scope per git worktree"}})
+  {"scope-lock"    {:ns          "hooks.scope-lock"
+                    :event       "PreToolUse"
+                    :matcher     "Edit|Write"
+                    :description "Enforces file edit scope per git worktree"}
+   "command-audit" {:ns          "hooks.command-audit"
+                    :event       "PostToolUse"
+                    :matcher     "Bash"
+                    :description "Logs Bash commands; flags configured regex patterns"}})
 
 (defn get-hook
   "Look up a hook by name. Returns nil if not found."

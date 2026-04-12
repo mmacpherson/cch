@@ -72,8 +72,8 @@ src/
   (let [file-path (proto/extract-file-path input)
         cwd       (:cwd input)
         root      (worktree-root cwd)
-        cfg       (config/load-edn (config/find-config-up cwd ".scope-lock.edn" root))]
-    (check-scope file-path root (:allowed-paths cfg))))
+        cfg       (config/load-yaml (config/find-config-up cwd ".cch-config.yaml" root))]
+    (check-scope file-path root (get-in cfg [:hooks :scope-lock :allowed-paths]))))
 ```
 
 This expands to a `-main` function that:
@@ -95,7 +95,18 @@ nil                                    ;; allow — fastest path, no stdout
 {:decision :deny  :reason "..."}       ;; block tool call
 ```
 
-This maps to Claude Code's JSON response envelope:
+This maps to Claude Code's JSON response envelope — which varies by event. `cch.protocol/->response` is a `defmulti` dispatching on event name across four shape groups:
+
+| Event(s) | Shape |
+|----------|-------|
+| `PreToolUse` | nested `hookSpecificOutput.permissionDecision` |
+| `PostToolUse`, `PostToolUseFailure`, `Stop`, `SubagentStop`, `UserPromptSubmit`, `ConfigChange`, `TaskCreated`, `TaskCompleted` | top-level `{decision, reason}` |
+| `PermissionRequest` | nested `hookSpecificOutput.decision.behavior` |
+| everything else (`SessionStart`, `Notification`, `FileChanged`, ...) | no output — observation-only |
+
+Hook authors don't need to know which shape applies — they always return `{:decision :deny/:ask/:allow :reason ...}` (or `nil`). The renderer normalizes `:deny` to `"block"` for top-level-decision events so the same Clojure idiom works across every supported event type.
+
+`scope-lock` emits PreToolUse shape:
 
 ```json
 {
@@ -105,6 +116,12 @@ This maps to Claude Code's JSON response envelope:
     "permissionDecisionReason": "scope-lock: edit outside worktree"
   }
 }
+```
+
+`command-audit` emits the PostToolUse shape — top-level:
+
+```json
+{"decision": "block", "reason": "command-audit: matched flag-pattern \"rm -rf /\" in: rm -rf /"}
 ```
 
 ## Middleware

@@ -74,8 +74,9 @@ cch log --limit=50               # More results
 | Hook | Event | Matcher | Description |
 |------|-------|---------|-------------|
 | `scope-lock` | PreToolUse | Edit\|Write | Enforce file edit scope per git worktree |
+| `command-audit` | PostToolUse | Bash | Log every Bash command; flag configured regex patterns as advisory context |
 
-Planned (not yet implemented): `protect-files`, `command-audit`, `format-on-save`, `slow-confirm`.
+Planned (not yet implemented): `protect-files`, `format-on-save`, `slow-confirm`.
 
 ## Writing Custom Hooks
 
