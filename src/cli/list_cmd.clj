@@ -14,6 +14,14 @@
          (keep #(second (re-find #"# cch:(\S+)" %)))
          set)))
 
+(defn- event-summary
+  "One-line summary of a hook's event subscription(s)."
+  [{:keys [event matcher events]}]
+  (cond
+    events (format "%d events" (count events))
+    matcher (format "%s on %s" event matcher)
+    :else event))
+
 (defn run [& _args]
   (let [global-path  (settings/global-settings-path)
         project-path (settings/project-settings-path ".")
@@ -21,12 +29,12 @@
         project-installed (installed-hooks project-path)]
     (println "Available hooks:")
     (println)
-    (doseq [[name {:keys [event matcher description]}] (registry/list-hooks)]
+    (doseq [[name hook] (registry/list-hooks)]
       (let [status (cond
                      (project-installed name) "[project]"
                      (global-installed name)  "[global] "
                      :else                    "         ")]
-        (println (format "  %s %-16s %s" status name description))
-        (println (format "             %s on %s" event matcher))))
+        (println (format "  %s %-16s %s" status name (:description hook)))
+        (println (format "             %s" (event-summary hook)))))
     (println)
-    (println "Install: cch install <hook-name> [--global]")))
+    (println "Install: cch install <hook-name> [--global] [--exclude=Event1,...]")))

@@ -182,6 +182,14 @@ CREATE TABLE events (
 
 Indexed on: session_id, timestamp, hook_name, decision.
 
+The `extra TEXT` column holds the full hook input as JSON (minus cch's internal `:cch/hook-name` marker). `wrap-logging` populates it for every invocation, so event-specific fields that don't map to structured columns — `trigger` for PreCompact, `reason` for SessionEnd, `prompt` for UserPromptSubmit, `last_assistant_message` for Stop — are always recoverable via `json_extract(extra, '$.trigger')` etc.
+
+### The universal observer
+
+`hooks.event-log` is a built-in observer that subscribes to every Claude Code event cch supports (24 of the ~26 documented events — WorktreeCreate and FileChanged are excluded by design). The hook body returns `nil`; all the work lives in the existing middleware. Registering it requires a new `:events` (plural) field on registry entries: a vec of `{:event, :matcher}` maps that `cch install` expands into N `settings.json` entries, all sharing the `# cch:event-log` tag so `cch uninstall` removes them in one shot.
+
+This is also the dogfood that proves the protocol renderer split: 24 events across four output-shape groups, all handled by `cch.protocol/->response`'s `defmulti` with zero per-event branching in the hook itself.
+
 ## Settings.json Management
 
 ### How Hooks Get Wired

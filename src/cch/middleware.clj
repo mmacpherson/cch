@@ -3,7 +3,8 @@
 
   Each middleware wraps a handler: (fn [handler] (fn [input] result)).
   The chain is pre-composed at load time via comp for zero runtime cost."
-  (:require [cch.log :as log]))
+  (:require [cch.log :as log]
+            [cheshire.core :as json]))
 
 (defn wrap-timing
   "Adds :cch/elapsed-ms to result metadata. Preserves nil (allow)."
@@ -29,7 +30,13 @@
 (defn wrap-logging
   "Fire-and-forget event logging to SQLite.
   Reads :cch/elapsed-ms from result metadata if present (set by wrap-timing).
-  Degrades gracefully to nil elapsed time if timing middleware is absent."
+  Degrades gracefully to nil elapsed time if timing middleware is absent.
+
+  Captures the full input payload (minus cch's internal :cch/hook-name
+  marker) as JSON in the `extra` column so every row carries
+  event-specific fields that don't map to structured columns —
+  trigger for PreCompact, reason for SessionEnd, prompt for
+  UserPromptSubmit, etc."
   [handler]
   (fn [input]
     (let [result (handler input)]
@@ -44,7 +51,8 @@
          :session-id (:session_id input)
          :decision   (:decision result)
          :reason     (:reason result)
-         :elapsed-ms (:cch/elapsed-ms (meta result))})
+         :elapsed-ms (:cch/elapsed-ms (meta result))
+         :extra      (json/generate-string (dissoc input :cch/hook-name))})
       result)))
 
 (def default-middleware

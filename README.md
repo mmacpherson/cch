@@ -75,8 +75,20 @@ cch log --limit=50               # More results
 |------|-------|---------|-------------|
 | `scope-lock` | PreToolUse | Edit\|Write | Enforce file edit scope per git worktree |
 | `command-audit` | PostToolUse | Bash | Log every Bash command; flag configured regex patterns as advisory context |
+| `event-log` | *(24 events)* | *(all)* | Universal observer — logs every Claude Code event to SQLite |
 
 Planned (not yet implemented): `protect-files`, `format-on-save`, `slow-confirm`.
+
+### The universal observer
+
+`cch install event-log` subscribes to every Claude Code event cch supports — session boundaries, prompt submissions, tool calls (pre + post), task lifecycle, config changes, compactions, MCP elicitations, and more. Each invocation writes a row to `~/.local/share/cch/events.db` with the event type, timestamp, and the full input payload (as JSON in the `extra` column). Query with `cch log --event=<type>` or directly via `sqlite3`.
+
+**Latency caveat.** Each Claude Code event triggers a fresh Babashka process (~50ms). Subscribing to all 24 events is imperceptible on a casual workflow but noticeable on heavy tool loops (every Bash / Edit fires two events). Two options:
+
+- Install a subset: `cch install event-log --exclude=PreToolUse,PostToolUse,PostToolUseFailure`
+- Wait for the HTTP dispatcher (tracked in `claude-code-hooks-bq2`), which eliminates per-event startup cost.
+
+**Payload capture.** The `extra` column stores the full event input as JSON — including `tool_input` for Bash/Edit/Write (commands, file paths, contents), `prompt` text from UserPromptSubmit, and `last_assistant_message` from Stop. It's a local file on your machine; no data leaves the host. Be aware of this before using cch in a regulated environment.
 
 ## Writing Custom Hooks
 

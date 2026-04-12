@@ -34,6 +34,7 @@
         events (log/query-events
                  :limit    (some-> (:limit opts) parse-long)
                  :hook     (:hook opts)
+                 :event    (:event opts)
                  :session  (:session opts)
                  :decision (:decision opts)
                  :since    (:since opts))]

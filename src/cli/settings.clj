@@ -76,8 +76,9 @@
         command   (hook-command hook-ns)
         ;; Remove only the cch command, preserving other hooks in same entry
         filtered  (vec (keep #(strip-cch-command % hook-name) hooks-vec))
-        entry     {:matcher matcher
-                   :hooks   [{:type "command" :command command}]}
+        ;; Omit :matcher for events that don't support it — keeps settings.json tidy.
+        entry     (cond-> {:hooks [{:type "command" :command command}]}
+                    matcher (assoc :matcher matcher))
         updated   (conj filtered entry)
         new-settings (assoc-in settings [:hooks hooks-key] updated)]
     (write-settings! settings-path new-settings)

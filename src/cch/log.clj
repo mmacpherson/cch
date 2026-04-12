@@ -45,15 +45,20 @@
 
   event is a map with keys:
     :hook-name, :event-type, :tool-name, :file-path, :cwd,
-    :session-id, :decision, :reason, :elapsed-ms"
+    :session-id, :decision, :reason, :elapsed-ms, :extra
+
+  When CCH_LOG_SYNC=1 in the environment, runs sqlite3 synchronously via
+  p/sh instead of fire-and-forget. Used by tests that need to assert on
+  rows immediately after a hook invocation."
   [{:keys [hook-name event-type tool-name file-path cwd
-           session-id decision reason elapsed-ms]}]
+           session-id decision reason elapsed-ms extra]}]
   (let [path (db-path)
+        sync? (= "1" (System/getenv "CCH_LOG_SYNC"))
         sql  (format
                ;; busy_timeout lets concurrent hook runs serialize instead of
                ;; SQLITE_BUSY-failing. PRAGMA is per-connection and each
                ;; sqlite3 CLI call gets its own, so set it inline every time.
-               "PRAGMA busy_timeout=5000; INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+               "PRAGMA busy_timeout=5000; INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
                (sql-value session-id)
                (sql-value hook-name)
                (sql-value event-type)
@@ -62,31 +67,35 @@
                (sql-value cwd)
                (sql-value (when decision (name decision)))
                (sql-value reason)
-               (sql-value elapsed-ms))]
+               (sql-value elapsed-ms)
+               (sql-value extra))]
     (try
       (ensure-db! path)
-      ;; Discard subprocess stdio — inheriting would corrupt the hook's
-      ;; JSON response on stdout that Claude Code parses.
-      (p/process ["sqlite3" path sql]
-                 {:out :discard :err :discard})
+      (if sync?
+        (p/sh ["sqlite3" path sql])
+        ;; Discard subprocess stdio — inheriting would corrupt the hook's
+        ;; JSON response on stdout that Claude Code parses.
+        (p/process ["sqlite3" path sql]
+                   {:out :discard :err :discard}))
       (catch Exception _e
         nil))))
 
 (defn query-events
   "Query recent events. Returns a seq of maps.
-  opts: :limit, :hook, :session, :decision, :since"
-  [& {:keys [limit hook session decision since]}]
+  opts: :limit, :hook, :event, :session, :decision, :since"
+  [& {:keys [limit hook event session decision since]}]
   (let [limit   (or limit 20)
         path    (db-path)
         wheres  (cond-> []
                   hook     (conj (format "hook_name = '%s'" (escape-sql hook)))
+                  event    (conj (format "event_type = '%s'" (escape-sql event)))
                   session  (conj (format "session_id = '%s'" (escape-sql session)))
                   decision (conj (format "decision = '%s'" (escape-sql decision)))
                   since    (conj (format "timestamp > '%s'" (escape-sql since))))
         where   (if (seq wheres)
                   (str " WHERE " (str/join " AND " wheres))
                   "")
-        sql     (format "SELECT id,timestamp,session_id,hook_name,event_type,tool_name,file_path,cwd,decision,reason,elapsed_ms FROM events%s ORDER BY id DESC LIMIT %d;"
+        sql     (format "SELECT id,timestamp,session_id,hook_name,event_type,tool_name,file_path,cwd,decision,reason,elapsed_ms,extra FROM events%s ORDER BY id DESC LIMIT %d;"
                         where limit)
         result  (p/sh ["sqlite3" "-json" path sql])]
     (when (zero? (:exit result))
