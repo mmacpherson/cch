@@ -205,6 +205,17 @@ The key trick is in `defhook` (see `src/cch/core.clj`): each hook emits three de
 
 Server binds to `127.0.0.1` only. No auth, no CORS — localhost is the defense.
 
+### Service management
+
+`cch install-service` writes an OS-native unit/plist that keeps the dispatcher running across reboots and crashes:
+
+- **Linux** — systemd user unit at `~/.config/systemd/user/cch.service`. Uses the `%h` specifier for the user's home directory so the unit is portable across accounts. `Restart=on-failure` with `RestartSec=3`.
+- **macOS** — launchd LaunchAgent at `~/Library/LaunchAgents/com.cch.server.plist`. Uses `RunAtLoad` + `KeepAlive` for auto-start + crash restart. Home directory is baked in at install time (launchd has no `%h` equivalent).
+
+Templates live under `resources/service/` as real `.template` files — reviewable separately from the Clojure code. `src/cli/service_cmd.clj` detects the OS via `os.name`, renders the template (substituting `{{HOME}}` for macOS), writes to the canonical path, and prints the activation command the user runs explicitly. No auto-activation keeps the step reviewable.
+
+`cch install <hook> --http` probes the server at install time via a TCP connect to `127.0.0.1:8888` — if it fails, a prominent warning tells the user to run `cch install-service` before expecting HTTP-mode hooks to work. This prevents the silent-ECONNREFUSED failure mode where hooks are installed into a broken state.
+
 ### Web dashboard
 
 The same HTTP server renders a read-only dashboard at `/`. Server-rendered HTML via `hiccup2.core`, styled with Pico.css + Google Fonts (Roboto / Roboto Condensed), **zero client JS**. Filters are plain `<form method="get">` submits; auto-refresh uses `<meta http-equiv="refresh">`; click-to-expand is native `<details>`/`<summary>`. The entire dashboard lives in `cch.server/dashboard-html` — no separate templates, no build step.

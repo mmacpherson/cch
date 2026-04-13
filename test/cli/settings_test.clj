@@ -1,5 +1,6 @@
 (ns cli.settings-test
   (:require [clojure.test :refer [deftest is testing]]
+            [cli.install]
             [cli.settings :as settings]
             [babashka.fs :as fs]))
 
@@ -97,6 +98,17 @@
       (is (re-find #"-m hooks\.scope-lock" cmd)))
     (testing "includes cch tag"
       (is (re-find #"# cch:scope-lock" cmd)))))
+
+(deftest test-server-reachable
+  (testing "returns true when something accepts on the port"
+    (with-open [srv (java.net.ServerSocket. 0)]
+      (let [port (.getLocalPort srv)]
+        (is (= true (#'cli.install/server-reachable? "127.0.0.1" port))))))
+  (testing "returns false on a port nothing is listening on (with a short timeout)"
+    ;; Pick a port, close the listener, then probe — connect refused.
+    (let [port (with-open [srv (java.net.ServerSocket. 0)]
+                 (.getLocalPort srv))]
+      (is (= false (#'cli.install/server-reachable? "127.0.0.1" port))))))
 
 (deftest test-add-hook-http-mode
   (let [tmp (str (fs/create-temp-file {:prefix "settings-" :suffix ".json"}))]

@@ -59,6 +59,8 @@ That's it. The `defhook` macro generates a `-main` entry point with middleware f
 | `cch list` | Show available hooks with installation status |
 | `cch log` | Query event history from SQLite |
 | `cch serve` | Run the HTTP dispatcher + web dashboard |
+| `cch install-service` | Install OS-native auto-start (systemd/launchd) for `cch serve` |
+| `cch uninstall-service` | Remove the auto-start unit/plist |
 
 ### Log Queries
 
@@ -107,7 +109,7 @@ cch serve &
 cch install event-log --global --http   # now fires against http://127.0.0.1:8888/hooks/event-log
 ```
 
-**Dashboard** at `http://127.0.0.1:8888/` — server-rendered (no client JS), styled with Pico.css + Roboto. Filter by repo, hook, event type, session, decision, or time range. Click a row to expand the full event payload. Auto-refreshes every 10s.
+**Dashboard** at `http://127.0.0.1:8888/` — server-rendered (no client JS), styled with Pico.css + Roboto. Filter by repo, hook, event type, session, decision, or time range. Click a row to expand the full event payload. `?open=all` expands every row at once; refresh manually with the link in the meta area.
 
 **Server routes:**
 
@@ -119,7 +121,23 @@ cch install event-log --global --http   # now fires against http://127.0.0.1:888
 
 Server binds to `127.0.0.1` only — never exposed beyond localhost.
 
-**Caveat:** if you install hooks with `--http` but `cch serve` isn't running, every Claude Code event silently errors (Claude Code treats HTTP connection failures as non-blocking errors and proceeds). Keep the server running, or stick with command mode.
+### Running `cch serve` as a service
+
+For HTTP-installed hooks to work reliably across reboots and crashes, `cch serve` needs to be a managed service. `cch install-service` writes the canonical unit/plist for your OS:
+
+```bash
+cch install-service
+
+# Linux — activate:
+systemctl --user enable --now cch
+
+# macOS — activate:
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.cch.server.plist
+```
+
+Without this, HTTP-installed hooks fail with ECONNREFUSED any time the server isn't running. `cch install <hook> --http` probes the server at install time and prints a warning if it's not reachable, so you don't silently install into a broken state.
+
+Windows service support isn't shipped yet — if you need it, say so in an issue and we'll prioritize.
 
 ## Writing Custom Hooks
 

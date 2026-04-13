@@ -4,6 +4,17 @@
             [cli.settings :as settings]
             [clojure.string :as str]))
 
+(defn- server-reachable?
+  "Fast TCP connect probe. Returns true if `cch serve` appears to be up
+  at the given host:port within a short timeout. Used purely for a
+  pre-flight warning on `--http` installs — never blocks the install."
+  [host port]
+  (try
+    (with-open [s (java.net.Socket.)]
+      (.connect s (java.net.InetSocketAddress. ^String host (int port)) 500)
+      true)
+    (catch Exception _ false)))
+
 (defn parse-flags
   "Parse --flag and --key=value forms from args.
   Returns [flag-set kv-map positional-vec]."
@@ -59,8 +70,17 @@
           (settings/add-hook! path event matcher (:ns hook) :mode mode))
         (println (format "Installed '%s' in %s (%s mode)"
                          hook-name path (name mode)))
-        (when http?
-          (println "  Make sure `cch serve` is running, or events will fail silently."))
+        (when (and http? (not (server-reachable? "127.0.0.1" 8888)))
+          (println)
+          (println "⚠  cch serve is not reachable at http://127.0.0.1:8888.")
+          (println "   Hooks installed in HTTP mode will fail with ECONNREFUSED")
+          (println "   until the server is running. For persistent setup:")
+          (println "       cch install-service")
+          (println "       systemctl --user enable --now cch  # Linux")
+          (println "       launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.cch.server.plist  # macOS")
+          (println "   Or start a one-off session with:")
+          (println "       cch serve &")
+          (println))
         (if (:events hook)
           (do
             (println (format "  Subscribed to %d event(s):" (count events)))

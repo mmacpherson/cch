@@ -1,0 +1,13 @@
+[Unit]
+Description=cch HTTP dispatcher + dashboard
+Documentation=https://github.com/mmacpherson/claude-code-hooks
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env bb -cp %h/.local/share/cch/repo/src:%h/.local/share/cch/repo/resources -m cli.cch serve
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
