@@ -3,8 +3,6 @@
   Only lists hooks that have implementations under src/hooks/.
 
   Planned (not yet implemented):
-  - protect-files: hard-deny edits to .env, secrets, keys
-  - command-audit: log all Bash commands (PostToolUse)
   - format-on-save: run formatters after writes (PostToolUse)
   - slow-confirm: prompt for destructive commands")
 
@@ -21,6 +19,10 @@
                     :event       "PreToolUse"
                     :matcher     "Edit|Write"
                     :description "Enforces file edit scope per git worktree"}
+   "protect-files" {:ns          "hooks.protect-files"
+                    :event       "PreToolUse"
+                    :matcher     "Edit|Write"
+                    :description "Hard-denies edits to secrets/keys/.env/.git/.ssh"}
    "command-audit" {:ns          "hooks.command-audit"
                     :event       "PostToolUse"
                     :matcher     "Bash"
