@@ -106,7 +106,8 @@
 ;; --- Side-effect events: no output ---
 
 (deftest test-no-output-events
-  (testing "SessionStart emits nothing even when a decision is provided"
+  (testing "SessionStart with :decision only (no :context) still emits nothing —
+            SessionStart has no block/allow semantics"
     (is (nil? (proto/->response "SessionStart" {:decision :deny :reason "nope"}))))
 
   (testing "Notification emits nothing"
@@ -119,3 +120,74 @@
     (is (nil? (proto/->response "PreToolUse" nil)))
     (is (nil? (proto/->response "PostToolUse" nil)))
     (is (nil? (proto/->response "Unknown" nil)))))
+
+;; --- SessionStart additionalContext ---
+
+(deftest test-session-start-additional-context
+  (testing ":context emits hookSpecificOutput.additionalContext"
+    (let [p (parsed "SessionStart" {:context "project uses Babashka, not clojure"})]
+      (is (= "SessionStart" (get-in p [:hookSpecificOutput :hookEventName])))
+      (is (= "project uses Babashka, not clojure"
+             (get-in p [:hookSpecificOutput :additionalContext])))
+      ;; No permissionDecision, no top-level decision
+      (is (nil? (get-in p [:hookSpecificOutput :permissionDecision])))
+      (is (nil? (:decision p)))))
+
+  (testing "empty decision-map → nil"
+    (is (nil? (proto/->response "SessionStart" {}))))
+
+  (testing ":decision alone with no :context → nil (SessionStart can't be denied)"
+    (is (nil? (proto/->response "SessionStart" {:decision :deny})))))
+
+;; --- UserPromptSubmit context-only (no decision) ---
+
+(deftest test-user-prompt-submit-context-only
+  (testing ":context without :decision emits additionalContext shape"
+    (let [p (parsed "UserPromptSubmit" {:context "remember: user prefers terse replies"})]
+      (is (= "UserPromptSubmit" (get-in p [:hookSpecificOutput :hookEventName])))
+      (is (= "remember: user prefers terse replies"
+             (get-in p [:hookSpecificOutput :additionalContext])))
+      ;; No top-level decision since none was requested
+      (is (nil? (:decision p)))))
+
+  (testing ":decision + :context still routes to top-level-decision shape"
+    (let [p (parsed "UserPromptSubmit" {:decision :block
+                                        :reason   "prompt looks malicious"
+                                        :context  "pattern matched X"})]
+      (is (= "block" (:decision p)))
+      (is (= "pattern matched X"
+             (get-in p [:hookSpecificOutput :additionalContext]))))))
+
+;; --- Generic escape hatch ---
+
+(deftest test-hook-specific-output-escape-hatch
+  (testing "passes user-supplied map through verbatim, auto-populates hookEventName"
+    (let [p (parsed "FileChanged"
+                    {:hook-specific-output {:someExperimentalField "value"
+                                            :otherField            42}})]
+      (is (= "FileChanged" (get-in p [:hookSpecificOutput :hookEventName])))
+      (is (= "value" (get-in p [:hookSpecificOutput :someExperimentalField])))
+      (is (= 42 (get-in p [:hookSpecificOutput :otherField])))))
+
+  (testing "explicit hookEventName in escape-hatch map wins over auto-populated"
+    (let [p (parsed "FileChanged"
+                    {:hook-specific-output {:hookEventName "CustomName"
+                                            :field         "v"}})]
+      (is (= "CustomName" (get-in p [:hookSpecificOutput :hookEventName])))))
+
+  (testing "takes precedence over :decision when both present"
+    (let [p (parsed "PreToolUse"
+                    {:decision             :deny
+                     :reason               "would normally block"
+                     :hook-specific-output {:permissionDecision "allow"
+                                            :permissionDecisionReason "overridden"}})]
+      ;; Escape hatch rendered — :decision/:reason ignored
+      (is (= "allow" (get-in p [:hookSpecificOutput :permissionDecision])))
+      (is (= "overridden"
+             (get-in p [:hookSpecificOutput :permissionDecisionReason])))))
+
+  (testing "works on otherwise-unmodeled events (forward compat)"
+    (let [p (parsed "SomeFutureEvent"
+                    {:hook-specific-output {:futureShape "whatever"}})]
+      (is (= "SomeFutureEvent" (get-in p [:hookSpecificOutput :hookEventName])))
+      (is (= "whatever" (get-in p [:hookSpecificOutput :futureShape]))))))

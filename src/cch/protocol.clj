@@ -14,8 +14,17 @@
   |   SubagentStop, UserPromptSubmit,            | top-level {decision, reason}                     |
   |   ConfigChange, TaskCreated, TaskCompleted   |                                                  |
   | PermissionRequest                            | hookSpecificOutput.decision.{behavior, ...}      |
-  | everything else (SessionStart, Notification, | no output (nil); events support observation only |
-  |   PreCompact, CwdChanged, FileChanged, ...)  |                                                  |
+  | SessionStart (with :context)                 | hookSpecificOutput.additionalContext             |
+  | UserPromptSubmit (context-only, no decision) | hookSpecificOutput.additionalContext             |
+  | any event with :hook-specific-output         | pass-through escape hatch                        |
+  | everything else                              | no output (nil); events support observation only |
+
+  Escape hatch: a hook that returns {:hook-specific-output {...}} gets its
+  map emitted verbatim under hookSpecificOutput (with hookEventName auto-
+  populated). Takes precedence over :decision when both are present. Use
+  for events whose shape isn't modeled here — Elicitation responses,
+  future event types, experimental additionalContext on events like
+  FileChanged.
 
   WorktreeCreate's path-on-stdout output is intentionally unsupported by the
   generic renderer — a WorktreeCreate hook would need a bespoke main that
@@ -40,10 +49,30 @@
   #{"PostToolUse" "PostToolUseFailure" "Stop" "SubagentStop"
     "UserPromptSubmit" "ConfigChange" "TaskCreated" "TaskCompleted"})
 
-(defn- event-shape
-  "Classify an event name into a response-shape group."
-  [event-name]
+(defn- dispatch
+  "Route an event + decision-map to a response-shape key. Takes both
+  args because some shapes are content-triggered (escape hatch, context-
+  only additionalContext) rather than event-name-only."
+  [event-name decision-map]
   (cond
+    ;; Explicit escape hatch wins over everything — the hook author
+    ;; asked for a literal shape, honor it even on events we model.
+    (:hook-specific-output decision-map)
+    ::escape-hatch
+
+    ;; SessionStart's only documented output is additionalContext; :decision
+    ;; alone still emits nothing (SessionStart has no block/allow semantics).
+    (and (= event-name "SessionStart") (:context decision-map))
+    ::additional-context
+
+    ;; UserPromptSubmit can inject context without blocking. If there's a
+    ;; :decision, the top-level-decision shape handles context alongside it;
+    ;; this branch covers the context-only case.
+    (and (= event-name "UserPromptSubmit")
+         (nil? (:decision decision-map))
+         (:context decision-map))
+    ::additional-context
+
     (= event-name "PreToolUse")             ::pretooluse
     (= event-name "PermissionRequest")      ::permission-request
     (top-level-decision-events event-name)  ::top-level-decision
@@ -52,8 +81,21 @@
 (defmulti ^:private ->response-map
   "Build the response map (or nil) for a hook decision.
   Returns a JSON-serializable map, or nil to emit no output.
-  Dispatches on the event's response-shape group."
-  (fn [event-name _decision] (event-shape event-name)))
+  Dispatches on the event + decision-map content (see `dispatch`)."
+  dispatch)
+
+(defmethod ->response-map ::escape-hatch
+  [event-name {:keys [hook-specific-output]}]
+  ;; Pass user-supplied map through verbatim; auto-populate hookEventName
+  ;; only if the hook didn't set it (let explicit wins).
+  {:hookSpecificOutput
+   (merge {:hookEventName event-name} hook-specific-output)})
+
+(defmethod ->response-map ::additional-context
+  [event-name {:keys [context]}]
+  {:hookSpecificOutput
+   {:hookEventName     event-name
+    :additionalContext context}})
 
 (defmethod ->response-map ::pretooluse
   [event-name {:keys [decision reason context updated-input]}]
