@@ -146,14 +146,16 @@
 
 (defn- event-card
   "One event rendered as a collapsible <article> — summary row on top,
-  full detail on expand. All fields are shown in the detail panel."
-  [{:keys [id timestamp session_id hook_name event_type tool_name
-           file_path cwd decision reason elapsed_ms extra]}]
+  full detail on expand. When `open-all?` is true, renders <details open>
+  so every card starts expanded — useful for scanning many events' full
+  payloads at once after filtering down."
+  [open-all? {:keys [id timestamp session_id hook_name event_type tool_name
+                     file_path cwd decision reason elapsed_ms extra]}]
   (let [observation? (and (= hook_name "event-log") (nil? decision))
         short-ts     (apply str (take 19 (or timestamp "")))
         short-reason (if reason (apply str (take 80 reason)) "")]
     [:article.event {:class (if observation? "observed" "acted")}
-     [:details
+     [:details (when open-all? {:open "open"})
       ;; summary is itself the CSS grid. The chevron is a real span (not
       ;; ::before + ::marker) so browser default markers can't double up.
       [:summary
@@ -337,17 +339,36 @@
    .event-list .detail h5 { margin: 1em 0 0.3em 0; font-size: 0.85em; color: var(--pico-muted-color); }
    .event-list .detail pre { font-size: 0.8em; white-space: pre-wrap; word-break: break-word; max-height: 30em; overflow: auto; background: var(--pico-background-color); padding: 0.7em; border-radius: 4px; margin: 0; }")
 
+(defn- encode-query
+  "Build a `?k=v&...` query string from a keyword-keyed map, dropping
+  blank values. URL-encodes values."
+  [m]
+  (let [pairs (for [[k v] m
+                    :when (and v (not (str/blank? (str v))))]
+                (str (name k) "="
+                     (java.net.URLEncoder/encode (str v) "UTF-8")))]
+    (if (seq pairs)
+      (str "?" (str/join "&" pairs))
+      "")))
+
 (defn- dashboard-html
   [q]
-  (let [repos  (distinct-repos)
-        events (log/query-events
-                 :limit       (or (some-> (:limit q) Long/parseLong) 50)
-                 :hook        (when-not (str/blank? (:hook q)) (:hook q))
-                 :event       (when-not (str/blank? (:event q)) (:event q))
-                 :session     (when-not (str/blank? (:session q)) (:session q))
-                 :decision    (when-not (str/blank? (:decision q)) (:decision q))
-                 :since       (when-not (str/blank? (:since q)) (:since q))
-                 :cwd-prefix  (when-not (str/blank? (:cwd-prefix q)) (:cwd-prefix q)))]
+  (let [open-all? (= "all" (:open q ""))
+        ;; Query used when following an in-page link — preserves filters
+        ;; but toggles the open flag.
+        link-q    (dissoc q :open)
+        open-url  (str "/" (encode-query (assoc link-q :open "all")))
+        close-url (str "/" (encode-query link-q))
+        self-url  (str "/" (encode-query q))
+        events    (log/query-events
+                    :limit       (or (some-> (:limit q) Long/parseLong) 50)
+                    :hook        (when-not (str/blank? (:hook q)) (:hook q))
+                    :event       (when-not (str/blank? (:event q)) (:event q))
+                    :session     (when-not (str/blank? (:session q)) (:session q))
+                    :decision    (when-not (str/blank? (:decision q)) (:decision q))
+                    :since       (when-not (str/blank? (:since q)) (:since q))
+                    :cwd-prefix  (when-not (str/blank? (:cwd-prefix q)) (:cwd-prefix q)))
+        repos     (distinct-repos)]
     (str "<!doctype html>\n"
          (hic/html
            [:html {:lang "en"}
@@ -355,7 +376,10 @@
              [:meta {:charset "utf-8"}]
              [:title "cch · events"]
              [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
-             [:meta {:http-equiv "refresh" :content "30"}]
+             ;; No auto-refresh: it kills any <details open> state the user
+             ;; has opened and jumps the scroll position. Manual refresh
+             ;; (Cmd+R, or the link in the meta area) until we have
+             ;; something smarter like SSE-patched partial reloads.
              [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
              [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
              [:link {:rel "stylesheet"
@@ -368,13 +392,19 @@
               [:h1 "cch · events"]
               [:p.subtitle
                "Centralized log of every Claude Code event cch is subscribed to. "
-               "Auto-refreshes every 30s."]
+               "Refresh the page (Cmd+R) to load newer events."]
               (filter-form q repos)
               [:p.meta
-               (format "%d event(s) · click a row to expand · " (count events))
+               (format "%d event(s) · " (count events))
+               [:a {:href self-url} "↻ refresh"]
+               " · "
+               (if open-all?
+                 [:a {:href close-url} "close all"]
+                 [:a {:href open-url} "open all"])
+               " · "
                [:a {:href "/"} "clear filters"]]
               [:div.event-list
-               (for [e events] (event-card e))]]]]))))
+               (for [e events] (event-card open-all? e))]]]]))))
 
 ;; --- Handlers ---
 
