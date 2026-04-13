@@ -2,8 +2,19 @@
   "SQLite event logging via fire-and-forget sqlite3 CLI.
 
   Every hook invocation is logged as a row in ~/.local/share/cch/events.db.
-  The sqlite3 process is spawned non-blocking (~1.3ms) so it doesn't
-  delay the hook response."
+  The sqlite3 process is spawned with `p/process` (returns immediately, no
+  wait on exit) so the INSERT itself doesn't block the hook response.
+
+  What DOES happen on the hot path: `ProcessBuilder.start` to fork+exec the
+  sqlite3 binary. Measured warm-JVM cost in bench/log_overhead.clj:
+    p50 ~3ms  p95 ~6ms  p99 ~8ms  (per wrap-logging call)
+  That's the fork+exec itself; ensure-db! adds ~3μs (warm stat) and is
+  cached via delay so repeated calls are free.
+
+  Under sustained load, async sqlite3 processes can pile up and serialize
+  on the DB lock (PRAGMA busy_timeout=5000). That's fine for interactive
+  hook firing but is a known weakness for bursty high-volume use — a
+  future background-queue optimization is tracked separately."
   (:require [babashka.process :as p]
             [babashka.fs :as fs]
             [cheshire.core :as json]
@@ -26,6 +37,18 @@
     (when-not (fs/exists? path)
       (let [schema (slurp (io/resource "schema.sql"))]
         (p/sh ["sqlite3" path schema])))))
+
+(def ^:private ensured-paths
+  "Set of DB paths we've already run ensure-db! against in this process.
+  Skips redundant stat calls for long-running dispatchers (cch serve);
+  a no-op for short-lived hook subprocesses."
+  (atom #{}))
+
+(defn- ensure-db-once!
+  [path]
+  (when-not (contains? @ensured-paths path)
+    (ensure-db! path)
+    (swap! ensured-paths conj path)))
 
 (defn- escape-sql
   "Escape a string for SQLite single-quoted literals."
@@ -70,7 +93,7 @@
                (sql-value elapsed-ms)
                (sql-value extra))]
     (try
-      (ensure-db! path)
+      (ensure-db-once! path)
       (if sync?
         (p/sh ["sqlite3" path sql])
         ;; Discard subprocess stdio — inheriting would corrupt the hook's

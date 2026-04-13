@@ -40,3 +40,28 @@
           result   (composed {:tool_name "Edit"})]
       (is (= :allow (:decision result)))
       (is (number? (:cch/elapsed-ms (meta result)))))))
+
+(deftest test-wrap-logging-non-blocking
+  (testing "wrap-logging adds < 30ms p95 to the hot path
+            (measured warm-JVM, async sqlite3 spawn).
+            Regression guard: if this fails, the INSERT is no longer
+            fire-and-forget — check ProcessBuilder.start behavior and
+            that :out/:err are :discard."
+    (let [handler (fn [_] {:decision :allow :reason "ok"})
+          wrapped (mw/wrap-logging handler)
+          input   {:hook_event_name "PreToolUse"
+                   :tool_name       "Edit"
+                   :tool_input      {:file_path "/tmp/t"}
+                   :session_id      "test"
+                   :cch/hook-name   "regression"}
+          ;; warmup
+          _ (dotimes [_ 5] (wrapped input))
+          samples (vec (repeatedly 20
+                         #(let [start (System/nanoTime)]
+                            (wrapped input)
+                            (/ (- (System/nanoTime) start) 1e6))))
+          sorted  (vec (sort samples))
+          p95     (nth sorted 18)]
+      (is (< p95 30.0)
+          (format "wrap-logging p95 = %.2fms (samples: %s)"
+                  p95 (vec (map #(format "%.1f" %) sorted)))))))
