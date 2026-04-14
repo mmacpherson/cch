@@ -19,6 +19,7 @@
   Google Fonts (Roboto / Roboto Condensed). No client JS — filter
   changes are plain GET form submits."
   (:require [cch.config :as config]
+            [cch.config-db :as cdb]
             [cch.log :as log]
             [cch.protocol :as proto]
             [cheshire.core :as json]
@@ -496,7 +497,7 @@
        :body    (json/generate-string {:error (.getMessage e)})})))
 
 (defn- parse-query
-  "Parse httpkit's :query-string into a keyword-keyed map. Returns {} if nil."
+  "Parse httpkit's :query-string into a keyword-keyed map. {} when blank."
   [qs]
   (if (str/blank? qs)
     {}
@@ -524,6 +525,260 @@
            {:status "ok"
             :hooks (mapv (fn [[n h]] {:name n :ns (:ns h) :description (:description h)})
                          (sort-by first hooks))})})
+
+;; --- Config CRUD (JSON API) ---
+
+(defn- handle-config-list
+  "GET /api/config — return all hook_config rows."
+  [_req]
+  {:status  200
+   :headers {"Content-Type" "application/json"}
+   :body    (json/generate-string (or (cdb/list-all) []))})
+
+(defn- parse-body
+  "Parse request body as JSON. Returns {} on blank/malformed."
+  [req]
+  (try
+    (let [s (slurp (:body req))]
+      (if (str/blank? s) {} (json/parse-string s true)))
+    (catch Exception _ {})))
+
+(defn- parse-form
+  "Parse application/x-www-form-urlencoded body into a keyword-keyed map."
+  [req]
+  (let [s (slurp (:body req))]
+    (if (str/blank? s)
+      {}
+      (->> (str/split s #"&")
+           (keep (fn [pair]
+                   (let [[k v] (str/split pair #"=" 2)]
+                     (when (and k v)
+                       [(keyword (java.net.URLDecoder/decode k "UTF-8"))
+                        (java.net.URLDecoder/decode v "UTF-8")]))))
+           (into {})))))
+
+(defn- content-type [req]
+  (or (get-in req [:headers "content-type"])
+      (get-in req [:headers "Content-Type"])
+      ""))
+
+(defn- form? [req]
+  (str/includes? (content-type req) "application/x-www-form-urlencoded"))
+
+(defn- truthy-str? [s]
+  (contains? #{"true" "on" "1" "yes"} (str/lower-case (str s))))
+
+(defn- handle-config-upsert
+  "POST /api/config — upsert a row. Accepts JSON or form body.
+  Required: hook (or hook-name), scope, enabled.
+  Optional: options (JSON object)."
+  [req]
+  (try
+    (let [body      (if (form? req) (parse-form req) (parse-body req))
+          hook-name (or (:hook-name body) (:hook body))
+          scope     (:scope body)
+          enabled   (if (form? req)
+                      (truthy-str? (:enabled body))
+                      (boolean (:enabled body)))
+          options   (:options body)]
+      (if (or (str/blank? (str hook-name)) (str/blank? (str scope)))
+        {:status 400
+         :headers {"Content-Type" "application/json"}
+         :body (json/generate-string {:error "hook and scope are required"})}
+        (do
+          (cdb/upsert! {:hook-name hook-name
+                        :scope     scope
+                        :enabled   enabled
+                        :options   options})
+          {:status  200
+           :headers {"Content-Type" "application/json"}
+           :body    (json/generate-string {:ok true
+                                           :hook hook-name
+                                           :scope scope
+                                           :enabled enabled})})))
+    (catch Exception e
+      {:status  500
+       :headers {"Content-Type" "application/json"}
+       :body    (json/generate-string {:error (.getMessage e)})})))
+
+(defn- handle-config-delete
+  "DELETE /api/config?hook=X&scope=Y — remove a row."
+  [req]
+  (let [q (parse-query (:query-string req))
+        hook-name (or (:hook q) (:hook-name q))
+        scope     (:scope q)]
+    (if (or (str/blank? (str hook-name)) (str/blank? (str scope)))
+      {:status  400
+       :headers {"Content-Type" "application/json"}
+       :body    (json/generate-string {:error "hook and scope query params required"})}
+      (do
+        (cdb/delete! hook-name scope)
+        {:status  200
+         :headers {"Content-Type" "application/json"}
+         :body    (json/generate-string {:ok true})}))))
+
+;; --- Hook matrix page ---
+
+(defn- effective-entry
+  "Resolve the effective hook-config entry for one (hook, scope) pair.
+  For global scope, reads directly from DB + defaults (no YAML). For repo
+  scopes, runs the full load-effective-config to include YAML-authoritative
+  precedence."
+  [hook-name scope]
+  (if (= scope cdb/global-scope)
+    ;; Global: DB global row if present, else default
+    (let [row (cdb/get-row hook-name cdb/global-scope)]
+      (if row
+        {:enabled? (:enabled row)
+         :options  (:options row)
+         :source   :db-global}
+        {:enabled? true :options nil :source :default}))
+    (let [repo-root (subs scope 5) ; strip "repo:"
+          cfg (config/load-effective-config repo-root)]
+      (get-in cfg [:hooks hook-name]
+              {:enabled? true :options nil :source :default}))))
+
+(defn- repo-yaml-present?
+  "True if the repo at scope 'repo:/path' has a .cch-config.yaml."
+  [scope]
+  (when (str/starts-with? scope "repo:")
+    (let [repo-root (subs scope 5)
+          cfg (config/load-effective-config repo-root)]
+      (some? (:yaml-path cfg)))))
+
+(defn- all-scopes
+  "Scopes to show as matrix columns: 'global' plus every repo cch has
+  seen in events. Returns a seq of {:scope :label :yaml?}."
+  []
+  (let [repos (distinct-repos)]
+    (cons {:scope cdb/global-scope :label "global" :yaml? false}
+          (for [[path label] repos
+                :let [scope (cdb/repo-scope path)]]
+            {:scope scope :label label :yaml? (repo-yaml-present? scope)}))))
+
+(def ^:private type-badge-colors
+  {:code   "#6c757d"
+   :prompt "#7c3aed"
+   :agent  "#059669"})
+
+(defn- type-badge [t]
+  [:span.type-badge
+   {:style (str "background:" (get type-badge-colors t "#495057"))}
+   (name t)])
+
+(defn- toggle-form
+  "Render the enable/disable toggle form cell for (hook, scope)."
+  [hook-name scope current-enabled? source yaml-managed?]
+  (if yaml-managed?
+    [:span.cell-yaml
+     {:data-tooltip "managed by .cch-config.yaml — edit the file to change"}
+     (if current-enabled? "✓ yaml" "✗ yaml")]
+    [:form {:method "post" :action "/hooks/toggle" :class "toggle-form"}
+     [:input {:type "hidden" :name "hook"    :value hook-name}]
+     [:input {:type "hidden" :name "scope"   :value scope}]
+     [:input {:type "hidden" :name "enabled" :value (if current-enabled? "false" "true")}]
+     [:button.toggle {:type "submit"
+                      :class (if current-enabled? "on" "off")
+                      :data-source (name source)
+                      :title (str "source: " (name source)
+                                  " — click to "
+                                  (if current-enabled? "disable" "enable"))}
+      (if current-enabled? "on" "off")]]))
+
+(def ^:private matrix-css
+  "table.matrix { border-collapse: collapse; margin: 1em 0; }
+   table.matrix th, table.matrix td { padding: 0.4em 0.8em; text-align: left; font-size: 0.9em; border-bottom: 1px solid var(--pico-muted-border-color); }
+   table.matrix th { font-family: 'Roboto Condensed', sans-serif; color: var(--pico-muted-color); font-weight: 500; }
+   table.matrix td.hook-name { font-weight: 500; }
+   .type-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; color: white; font-size: 0.7em; letter-spacing: 0.02em; text-transform: lowercase; }
+   .toggle-form { display: inline; margin: 0; }
+   button.toggle { padding: 2px 10px; font-size: 0.8em; border-radius: 3px; border: 1px solid var(--pico-muted-border-color); cursor: pointer; font-family: inherit; min-width: 3em; }
+   button.toggle.on  { background: #059669; color: white; border-color: #059669; }
+   button.toggle.off { background: transparent; color: var(--pico-muted-color); }
+   button.toggle.on[data-source=\"db-repo\"]   { background: #047857; }
+   button.toggle.on[data-source=\"repo-yaml\"] { background: #7c3aed; }
+   .cell-yaml { color: var(--pico-muted-color); font-size: 0.85em; font-style: italic; cursor: help; }
+   .cell-readonly { color: var(--pico-muted-color); font-size: 0.85em; font-style: italic; }
+   td.scope-global { background: rgba(100,100,100,0.05); }")
+
+(defn- matrix-row
+  [{:keys [name entry]} scopes]
+  (let [t (registry/hook-type entry)]
+    [:tr
+     [:td.hook-name name]
+     [:td (type-badge t)]
+     [:td.description (:description entry)]
+     (for [{:keys [scope yaml?]} scopes]
+       [:td {:class (when (= scope cdb/global-scope) "scope-global")}
+        (if (= :code t)
+          (let [{:keys [enabled? source]} (effective-entry name scope)]
+            (toggle-form name scope enabled? source yaml?))
+          [:span.cell-readonly "native"])])]))
+
+(defn- hooks-matrix-html
+  [_q]
+  (let [scopes (all-scopes)
+        entries (for [[n e] (registry/list-hooks)] {:name n :entry e})]
+    (str "<!doctype html>\n"
+         (hic/html
+           [:html {:lang "en"}
+            [:head
+             [:meta {:charset "utf-8"}]
+             [:title "cch · hooks"]
+             [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
+             [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
+             [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
+             [:link {:rel "stylesheet"
+                     :href "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&family=Roboto+Condensed:wght@500;700&family=Roboto+Mono&display=swap"}]
+             [:link {:rel "stylesheet"
+                     :href "https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"}]
+             [:style (hic/raw dashboard-css)]
+             [:style (hic/raw matrix-css)]]
+            [:body
+             [:main.container
+              [:h1 "cch · hooks"]
+              [:p.subtitle
+               "Enable or disable each hook per scope. "
+               "Per-repo .cch-config.yaml files take precedence over DB rows — those cells are shown read-only."]
+              [:p.meta
+               [:a {:href "/"} "← events"]
+               " · "
+               [:a {:href "/hooks"} "↻ refresh"]]
+              [:table.matrix
+               [:thead
+                [:tr
+                 [:th "hook"]
+                 [:th "type"]
+                 [:th "description"]
+                 (for [{:keys [label]} scopes]
+                   [:th label])]]
+               [:tbody
+                (for [entry entries]
+                  (matrix-row entry scopes))]]
+              [:p.meta
+               [:small
+                (format "%d hook(s) · %d scope(s)"
+                        (count entries) (count scopes))]]]]]))))
+
+(defn- handle-hooks-page [req]
+  (let [q (parse-query (:query-string req))]
+    {:status  200
+     :headers {"Content-Type" "text/html; charset=utf-8"}
+     :body    (hooks-matrix-html q)}))
+
+(defn- handle-hooks-toggle
+  "POST /hooks/toggle — form endpoint. Upserts the row then redirects to /hooks."
+  [req]
+  (let [form (parse-form req)
+        hook-name (:hook form)
+        scope     (:scope form)
+        enabled   (truthy-str? (:enabled form))]
+    (when (and (not (str/blank? (str hook-name)))
+               (not (str/blank? (str scope))))
+      (cdb/upsert! {:hook-name hook-name :scope scope :enabled enabled}))
+    {:status  303
+     :headers {"Location" "/hooks"}
+     :body    ""}))
 
 (def ^:private debug-html
   "Bare-minimum HTML: no external CSS, no Pico, no Google Fonts, no JS,
@@ -572,6 +827,21 @@
 
       (and (= request-method :get) (= uri "/health"))
       (handle-health hooks)
+
+      (and (= request-method :get) (= uri "/api/config"))
+      (handle-config-list req)
+
+      (and (= request-method :post) (= uri "/api/config"))
+      (handle-config-upsert req)
+
+      (and (= request-method :delete) (= uri "/api/config"))
+      (handle-config-delete req)
+
+      (and (= request-method :get) (= uri "/hooks"))
+      (handle-hooks-page req)
+
+      (and (= request-method :post) (= uri "/hooks/toggle"))
+      (handle-hooks-toggle req)
 
       (and (= request-method :get) (= uri "/debug"))
       {:status 200

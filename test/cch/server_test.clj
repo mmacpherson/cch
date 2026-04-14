@@ -187,6 +187,90 @@
     (testing "all-nil → nil"
       (is (nil? (reconcile [nil nil]))))))
 
+;; --- Config CRUD API ---
+
+(deftest test-config-api-list
+  (testing "GET /api/config returns an array"
+    (let [resp (http/get (url "/api/config"))
+          body (json/parse-string (:body resp) true)]
+      (is (= 200 (:status resp)))
+      (is (sequential? body))
+      ;; Fixture enables the four code hooks at global scope
+      (is (<= 4 (count body))))))
+
+(deftest test-config-api-upsert-and-delete
+  (testing "POST /api/config upserts a row; DELETE removes it"
+    (let [upsert-resp (http/post (url "/api/config")
+                                 {:body (json/generate-string
+                                          {:hook-name "scope-lock"
+                                           :scope     "repo:/tmp/test-crud"
+                                           :enabled   false
+                                           :options   {:note "ui-crud-test"}})
+                                  :headers {"Content-Type" "application/json"}})]
+      (is (= 200 (:status upsert-resp)))
+      (let [all (json/parse-string (:body (http/get (url "/api/config"))) true)
+            row (first (filter #(and (= "scope-lock" (:hook-name %))
+                                     (= "repo:/tmp/test-crud" (:scope %)))
+                               all))]
+        (is (false? (:enabled row)))
+        (is (= {:note "ui-crud-test"} (:options row))))
+
+      (let [del-resp (http/delete (url "/api/config?hook=scope-lock&scope=repo%3A%2Ftmp%2Ftest-crud")
+                                  {:throw false})]
+        (is (= 200 (:status del-resp))))
+
+      (let [all (json/parse-string (:body (http/get (url "/api/config"))) true)]
+        (is (nil? (first (filter #(and (= "scope-lock" (:hook-name %))
+                                       (= "repo:/tmp/test-crud" (:scope %)))
+                                 all))))))))
+
+(deftest test-config-api-upsert-form-body
+  (testing "POST /api/config accepts form-encoded body (for UI)"
+    (let [resp (http/post (url "/api/config")
+                          {:body    "hook=protect-files&scope=repo%3A%2Ftmp%2Fformtest&enabled=true"
+                           :headers {"Content-Type" "application/x-www-form-urlencoded"}})]
+      (is (= 200 (:status resp)))
+      (let [row (cdb/get-row "protect-files" "repo:/tmp/formtest")]
+        (is (true? (:enabled row)))))
+    ;; cleanup
+    (cdb/delete! "protect-files" "repo:/tmp/formtest")))
+
+(deftest test-config-api-upsert-missing-fields
+  (testing "POST /api/config without required fields → 400"
+    (let [resp (http/post (url "/api/config")
+                          {:body (json/generate-string {:hook-name "x"})
+                           :headers {"Content-Type" "application/json"}
+                           :throw false})]
+      (is (= 400 (:status resp))))))
+
+;; --- Hook matrix page ---
+
+(deftest test-hooks-matrix-renders
+  (let [resp (http/get (url "/hooks"))]
+    (is (= 200 (:status resp)))
+    (is (str/includes? (get-in resp [:headers "content-type"]) "text/html"))
+    (is (str/includes? (:body resp) "cch · hooks"))
+    ;; Table has our registered hooks
+    (is (str/includes? (:body resp) "scope-lock"))
+    (is (str/includes? (:body resp) "protect-files"))
+    ;; Global column always present
+    (is (str/includes? (:body resp) "global"))
+    ;; Type badge is rendered
+    (is (str/includes? (:body resp) "type-badge"))))
+
+(deftest test-hooks-toggle-form-post
+  (testing "POST /hooks/toggle upserts the row"
+    (http/post (url "/hooks/toggle")
+               {:body    "hook=protect-files&scope=global&enabled=false"
+                :headers {"Content-Type" "application/x-www-form-urlencoded"}
+                :throw   false})
+    ;; bb http-client follows 303s by default; we can't easily observe the
+    ;; Location header. The visible behavior is that the row is updated.
+    (let [row (cdb/get-row "protect-files" cdb/global-scope)]
+      (is (false? (:enabled row))))
+    ;; restore so later tests aren't affected
+    (cdb/upsert! {:hook-name "protect-files" :scope cdb/global-scope :enabled true})))
+
 ;; --- Dashboard renders ---
 
 (deftest test-dashboard-renders
