@@ -1,21 +1,25 @@
 (ns cch.server
   "Long-lived HTTP dispatcher for cch hooks.
 
-  Runs on localhost and exposes three kinds of endpoints:
+  Runs on localhost and exposes:
 
-    POST /hooks/<name>   → dispatch to the named hook's composed handler
-    GET  /               → server-rendered dashboard HTML (events table + filters)
-    GET  /health         → liveness + registered hooks (JSON)
+    POST /dispatch/<event> → fan out to every :code hook in the registry
+                             that subscribes to <event>, matches the
+                             tool_name (for tool events), and is enabled
+                             in effective config. Reconcile their results
+                             into a single protocol-shaped response.
+    GET  /                 → server-rendered dashboard HTML (events + filters)
+    GET  /health           → liveness + registered hooks (JSON)
 
-  Dispatch goes to the same `composed` handler that command-mode uses
+  Dispatch goes to the same `composed` handler command mode uses
   (defined by defhook in cch.core). Logging/timing/error semantics are
-  identical across command and HTTP modes.
+  identical whether a hook is invoked via HTTP or directly.
 
   Dashboard is server-rendered via hiccup, styled with Pico.css +
   Google Fonts (Roboto / Roboto Condensed). No client JS — filter
-  changes are plain GET form submits, auto-refresh via
-  <meta http-equiv=\"refresh\">."
-  (:require [cch.log :as log]
+  changes are plain GET form submits."
+  (:require [cch.config :as config]
+            [cch.log :as log]
             [cch.protocol :as proto]
             [cheshire.core :as json]
             [cli.registry :as registry]
@@ -27,28 +31,46 @@
 ;; --- Hook registration ---
 
 (defn- load-hook
-  "Require a hook's namespace and return {:name :composed :description}.
-  Returns nil if the namespace can't be loaded."
-  [hook-name {:keys [ns description]}]
-  (try
-    (require (symbol ns))
-    (let [composed (ns-resolve (symbol ns) 'composed)]
-      (when composed
-        {:name     hook-name
-         :ns       ns
-         :description description
-         :composed @composed}))
-    (catch Exception e
-      (binding [*out* *err*]
-        (println (format "cch.server: failed to load hook '%s' (%s): %s"
-                         hook-name ns (.getMessage e))))
-      nil)))
+  "Require a hook's namespace and return {:name :composed :description
+  :events [{:event :matcher} ...]}. Returns nil if the namespace can't
+  load. Only :type :code entries are loaded — prompt/agent run natively."
+  [hook-name {:keys [ns description] :as reg-entry}]
+  (when (= :code (registry/hook-type reg-entry))
+    (try
+      (require (symbol ns))
+      (let [composed (ns-resolve (symbol ns) 'composed)]
+        (when composed
+          {:name        hook-name
+           :ns          ns
+           :description description
+           :composed    @composed
+           :events      (registry/hook-events reg-entry)}))
+      (catch Exception e
+        (binding [*out* *err*]
+          (println (format "cch.server: failed to load hook '%s' (%s): %s"
+                           hook-name ns (.getMessage e))))
+        nil))))
 
 (defn- build-registry
-  "Load every hook in cli.registry that resolves. Returns a name→entry map."
+  "Load every :code hook in cli.registry that resolves. Returns name→entry map."
   []
   (into {} (keep (fn [[n h]] (some-> (load-hook n h) (as-> e [n e])))
                  (registry/list-hooks))))
+
+(defn- build-event-index
+  "From the loaded-hooks map, build {event-name → [{:name :composed :matcher} ...]}
+  so a request for event E can find its candidate hooks in one lookup."
+  [hooks]
+  (reduce-kv
+    (fn [idx name {:keys [composed events]}]
+      (reduce (fn [i {:keys [event matcher]}]
+                (update i event (fnil conj [])
+                        {:name     name
+                         :composed composed
+                         :matcher  matcher}))
+              idx events))
+    {}
+    hooks))
 
 ;; --- Dashboard (server-rendered HTML via hiccup) ---
 
@@ -408,29 +430,70 @@
 
 ;; --- Handlers ---
 
-(defn- handle-hook-dispatch
-  "POST /hooks/<name> — parse body, run composed handler, serialize response."
-  [hooks name req]
-  (if-let [{:keys [composed]} (get hooks name)]
-    (try
-      (let [body-str (slurp (:body req))
-            input    (-> (json/parse-string body-str true)
-                         (assoc :cch/hook-name name))
-            event    (or (:hook_event_name input) "PreToolUse")
-            result   (composed input)
-            json-out (proto/->response event result)]
-        {:status 200
-         :headers {"Content-Type" "application/json"}
-         :body (or json-out "")})
-      (catch Exception e
-        (binding [*out* *err*]
-          (println (format "cch.server: /hooks/%s error: %s" name (.getMessage e))))
-        {:status 500
-         :headers {"Content-Type" "application/json"}
-         :body (json/generate-string {:error (.getMessage e)})}))
-    {:status 404
-     :headers {"Content-Type" "application/json"}
-     :body (json/generate-string {:error (str "unknown hook: " name)})}))
+(defn- reconcile
+  "Combine multiple hook results into one.
+
+  Precedence (first match wins):
+    1. :decision :deny
+    2. :decision :ask
+    3. :decision :allow with :updated-input (PreToolUse-only semantic)
+    4. concatenated :context across all results (events that support
+       additionalContext; the protocol renderer decides whether this
+       shape emits anything for the event)
+    5. nil"
+  [results]
+  (let [non-nil (remove nil? results)]
+    (or (first (filter #(= :deny  (:decision %)) non-nil))
+        (first (filter #(= :ask   (:decision %)) non-nil))
+        (first (filter #(and (= :allow (:decision %)) (:updated-input %)) non-nil))
+        (let [contexts (keep :context non-nil)]
+          (when (seq contexts)
+            {:context (str/join "\n\n" contexts)})))))
+
+(defn- run-hook
+  "Invoke a single hook's composed handler with the input, catching and
+  logging exceptions. Returns the decision map (or nil)."
+  [{:keys [name composed]} input event]
+  (try
+    (composed (assoc input :cch/hook-name name))
+    (catch Exception e
+      (binding [*out* *err*]
+        (println (format "cch.server: hook '%s' on event '%s' threw: %s"
+                         name event (.getMessage e))))
+      nil)))
+
+(defn- applicable-hooks
+  "Filter an event's candidate hooks down to those enabled in effective
+  config and whose matcher matches the tool_name (if any)."
+  [candidates tool-name effective-config]
+  (filter (fn [{:keys [name matcher]}]
+            (and (get-in effective-config [:hooks name :enabled?] false)
+                 (registry/matcher-matches? matcher tool-name)))
+          candidates))
+
+(defn- handle-dispatch
+  "POST /dispatch/<event> — fan out to matching enabled :code hooks,
+  reconcile, serialize."
+  [event-idx event req]
+  (try
+    (let [body-str  (slurp (:body req))
+          input     (json/parse-string body-str true)
+          cwd       (:cwd input)
+          effective (config/load-effective-config cwd)
+          candidates (get event-idx event [])
+          apps      (applicable-hooks candidates (:tool_name input) effective)
+          results   (mapv #(run-hook % input event) apps)
+          reconciled (reconcile results)
+          json-out  (proto/->response event reconciled)]
+      {:status  200
+       :headers {"Content-Type" "application/json"}
+       :body    (or json-out "")})
+    (catch Exception e
+      (binding [*out* *err*]
+        (println (format "cch.server: /dispatch/%s error: %s" event (.getMessage e))))
+      {:status  500
+       :headers {"Content-Type" "application/json"}
+       :body    (json/generate-string {:error (.getMessage e)})})))
 
 (defn- parse-query
   "Parse httpkit's :query-string into a keyword-keyed map. Returns {} if nil."
@@ -500,12 +563,12 @@
 
 (defn- route
   "Top-level request router. Reads path + method; dispatches."
-  [hooks req]
+  [hooks event-idx req]
   (let [{:keys [request-method uri]} req
-        [_ hook-path] (re-matches #"/hooks/(.+)" uri)]
+        [_ dispatch-event] (re-matches #"/dispatch/(.+)" uri)]
     (cond
-      (and (= request-method :post) hook-path)
-      (handle-hook-dispatch hooks hook-path req)
+      (and (= request-method :post) dispatch-event)
+      (handle-dispatch event-idx dispatch-event req)
 
       (and (= request-method :get) (= uri "/health"))
       (handle-health hooks)
@@ -526,14 +589,17 @@
 (defn start!
   "Start the httpkit server. Returns a stop-fn that gracefully shuts it down."
   [{:keys [port host] :or {port 8888 host "127.0.0.1"}}]
-  (let [hooks (build-registry)
-        stop-fn (httpkit/run-server (fn [req] (route hooks req))
-                                    {:port port :ip host})]
-    (println (format "cch serve listening on http://%s:%d (%d hook(s) loaded)"
+  (registry/validate-registry!)
+  (let [hooks     (build-registry)
+        event-idx (build-event-index hooks)
+        stop-fn   (httpkit/run-server (fn [req] (route hooks event-idx req))
+                                      {:port port :ip host})]
+    (println (format "cch serve listening on http://%s:%d (%d code hook(s) loaded)"
                      host port (count hooks)))
     (doseq [[n h] (sort-by first hooks)]
-      (println (format "  → /hooks/%-14s %s" n (:description h))))
+      (println (format "  → %-16s %s" n (:description h))))
     (println)
+    (println (format "Dispatcher: http://%s:%d/dispatch/<event>" host port))
     (println (format "Dashboard:  http://%s:%d/" host port))
     {:stop stop-fn :hooks hooks}))
 

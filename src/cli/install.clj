@@ -1,13 +1,26 @@
 (ns cli.install
-  "cch install/uninstall — manage hooks in settings.json."
-  (:require [cli.registry :as registry]
+  "cch install / uninstall — bootstrap and cleanup under the dispatcher model.
+
+  `cch install [--global]` writes universal dispatch entries to settings.json
+  (one per event cch code hooks care about), plus native settings.json
+  entries for every prompt/agent hook in the registry. Enables every
+  :code hook in the DB at global scope so they run by default.
+
+  `cch uninstall [--global]` removes every cch-owned entry from settings.json
+  and clears the hook_config table.
+
+  Per-hook enable/disable (at global or per-repo scope) is handled via
+  the web UI's config CRUD, not via install/uninstall."
+  (:require [babashka.process :as p]
+            [cch.config-db :as cdb]
+            [cch.log :as log]
+            [cli.registry :as registry]
             [cli.settings :as settings]
             [clojure.string :as str]))
 
-(defn- server-reachable?
+(defn server-reachable?
   "Fast TCP connect probe. Returns true if `cch serve` appears to be up
-  at the given host:port within a short timeout. Used purely for a
-  pre-flight warning on `--http` installs — never blocks the install."
+  at host:port within a short timeout. Used for a post-install warning."
   [host port]
   (try
     (with-open [s (java.net.Socket.)]
@@ -33,102 +46,89 @@
           [#{} {} []]
           args))
 
-(defn- select-events
-  "Resolve the events this install should subscribe to.
-  Single-event hook: [{:event ... :matcher ...}].
-  Multi-event hook with optional exclusion list: filter :events."
-  [hook exclude-set]
-  (if-let [events (:events hook)]
-    (remove #(contains? exclude-set (:event %)) events)
-    [{:event (:event hook) :matcher (:matcher hook)}]))
+(defn- clear-hook-config!
+  "Delete every row from hook_config. Used by uninstall."
+  []
+  (let [path (log/db-path)]
+    (log/ensure-db! path)
+    (p/sh ["sqlite3" path "DELETE FROM hook_config;"])
+    nil))
 
-(defn run [& args]
-  (let [[flags kvs rest-args] (parse-flags args)
-        hook-name             (first rest-args)
-        global?               (contains? flags "--global")
-        http?                 (contains? flags "--http")
-        mode                  (if http? :http :command)
-        exclude-set           (->> (or (:exclude kvs) "")
-                                   (#(str/split % #","))
-                                   (remove str/blank?)
-                                   set)]
+(defn- install-dispatch-entries!
+  "For every event cch handles, write a universal dispatch entry."
+  [settings-path]
+  (registry/validate-registry!)
+  (doseq [{:keys [event matcher]} (registry/dispatcher-events)]
+    (settings/add-dispatch-entry! settings-path event :matcher matcher)))
 
-    (when-not hook-name
-      (println "Usage: cch install <hook-name> [--global] [--http] [--exclude=Event1,Event2]")
+(defn- install-prompt-and-agent-entries!
+  "For every :prompt / :agent registry entry, write its native settings.json entry."
+  [settings-path]
+  (doseq [[hook-name entry] (registry/list-hooks)
+          :let [t (registry/hook-type entry)]
+          :when (contains? #{:prompt :agent} t)]
+    (case t
+      :prompt (settings/add-prompt-entry! settings-path (:event entry) (:matcher entry)
+                                          hook-name entry)
+      :agent  (settings/add-agent-entry!  settings-path (:event entry) (:matcher entry)
+                                          hook-name entry))))
+
+(defn- enable-code-hooks-globally!
+  "Flip enabled=true in hook_config at global scope for every :code hook.
+  Idempotent (upsert)."
+  []
+  (doseq [[hook-name entry] (registry/list-hooks)
+          :when (= :code (registry/hook-type entry))]
+    (cdb/upsert! {:hook-name hook-name
+                  :scope     cdb/global-scope
+                  :enabled   true})))
+
+(defn run
+  "cch install [--global] — bootstrap cch in the current repo (default)
+  or globally. Writes dispatcher entries, prompt/agent entries, and
+  enables all :code hooks at global scope."
+  [& args]
+  (let [[flags _kvs _pos] (parse-flags args)
+        global? (contains? flags "--global")
+        path    (if global?
+                  (settings/global-settings-path)
+                  (settings/project-settings-path "."))]
+    (install-dispatch-entries! path)
+    (install-prompt-and-agent-entries! path)
+    (enable-code-hooks-globally!)
+    (println (format "Installed cch to %s" path))
+    (println (format "  %d dispatcher entries written"
+                     (count (registry/dispatcher-events))))
+    (let [n-code   (count (filter #(= :code   (registry/hook-type (second %)))
+                                  (registry/list-hooks)))
+          n-prompt (count (filter #(= :prompt (registry/hook-type (second %)))
+                                  (registry/list-hooks)))
+          n-agent  (count (filter #(= :agent  (registry/hook-type (second %)))
+                                  (registry/list-hooks)))]
+      (println (format "  %d code hook(s) enabled globally (via dispatcher)" n-code))
+      (when (pos? n-prompt)
+        (println (format "  %d native prompt entries written" n-prompt)))
+      (when (pos? n-agent)
+        (println (format "  %d native agent entries written" n-agent))))
+    (when-not (server-reachable? "127.0.0.1" 8888)
       (println)
-      (println "Available hooks:")
-      (doseq [[name {:keys [description]}] (registry/list-hooks)]
-        (println (format "  %-16s %s" name description)))
-      (System/exit 1))
+      (println "⚠  cch serve is not reachable at http://127.0.0.1:8888.")
+      (println "   Code-hook dispatch will fail with ECONNREFUSED until the server is running.")
+      (println "   For persistent setup:")
+      (println "       cch install-service")
+      (println "   Or start a one-off session with:")
+      (println "       cch serve &"))))
 
-    (if-let [hook (registry/get-hook hook-name)]
-      (let [path   (if global?
-                     (settings/global-settings-path)
-                     (settings/project-settings-path "."))
-            events (select-events hook exclude-set)]
-        (doseq [{:keys [event matcher]} events]
-          (settings/add-hook! path event matcher (:ns hook) :mode mode))
-        (println (format "Installed '%s' in %s (%s mode)"
-                         hook-name path (name mode)))
-        (when (and http? (not (server-reachable? "127.0.0.1" 8888)))
-          (println)
-          (println "⚠  cch serve is not reachable at http://127.0.0.1:8888.")
-          (println "   Hooks installed in HTTP mode will fail with ECONNREFUSED")
-          (println "   until the server is running. For persistent setup:")
-          (println "       cch install-service")
-          (println "       systemctl --user enable --now cch  # Linux")
-          (println "       launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.cch.server.plist  # macOS")
-          (println "   Or start a one-off session with:")
-          (println "       cch serve &")
-          (println))
-        (if (:events hook)
-          (do
-            (println (format "  Subscribed to %d event(s):" (count events)))
-            (doseq [{:keys [event matcher]} events]
-              (println (format "    %s%s" event (if matcher (str "  [" matcher "]") ""))))
-            (when (seq exclude-set)
-              (println (format "  Excluded: %s" (str/join ", " (sort exclude-set))))))
-          (do
-            (println (format "  Event:   %s" (:event hook)))
-            (println (format "  Matcher: %s" (:matcher hook))))))
-      (do
-        (println (format "Unknown hook: '%s'" hook-name))
-        (println "Run 'cch list' to see available hooks.")
-        (System/exit 1)))))
-
-(defn run-uninstall [& args]
-  (let [[flags _kvs rest-args] (parse-flags args)
-        hook-name              (first rest-args)
-        global?                (contains? flags "--global")]
-
-    (when-not hook-name
-      (println "Usage: cch uninstall <hook-name> [--global]")
-      (System/exit 1))
-
-    (let [hook (registry/get-hook hook-name)
-          path (if global?
-                 (settings/global-settings-path)
-                 (settings/project-settings-path "."))]
-      (cond
-        ;; Multi-event registered hook: remove from every declared event.
-        (:events hook)
-        (do
-          (doseq [{:keys [event]} (:events hook)]
-            (settings/remove-hook! path event hook-name))
-          (println (format "Uninstalled '%s' from %s (%d event(s))"
-                           hook-name path (count (:events hook)))))
-
-        ;; Legacy single-event hook.
-        hook
-        (do
-          (settings/remove-hook! path (:event hook) hook-name)
-          (println (format "Uninstalled '%s' from %s" hook-name path)))
-
-        ;; Hook no longer in registry — scan all event types for the cch tag.
-        :else
-        (let [s           (settings/read-settings path)
-              event-types (keys (:hooks s))]
-          (doseq [et event-types]
-            (settings/remove-hook! path (name et) hook-name))
-          (println (format "Uninstalled '%s' from %s (scanned all event types)"
-                           hook-name path)))))))
+(defn run-uninstall
+  "cch uninstall [--global] — remove every cch-owned settings.json entry
+  and clear the hook_config table."
+  [& args]
+  (let [[flags _kvs _pos] (parse-flags args)
+        global? (contains? flags "--global")
+        path    (if global?
+                  (settings/global-settings-path)
+                  (settings/project-settings-path "."))]
+    (settings/remove-all-cch! path)
+    (clear-hook-config!)
+    (println (format "Uninstalled cch from %s" path))
+    (println "  hook_config table cleared")))
