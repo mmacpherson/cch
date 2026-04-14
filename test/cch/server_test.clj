@@ -250,13 +250,13 @@
     (is (= 200 (:status resp)))
     (is (str/includes? (get-in resp [:headers "content-type"]) "text/html"))
     (is (str/includes? (:body resp) "cch · hooks"))
-    ;; Table has our registered hooks
     (is (str/includes? (:body resp) "scope-lock"))
     (is (str/includes? (:body resp) "protect-files"))
-    ;; Global column always present
     (is (str/includes? (:body resp) "global"))
-    ;; Type badge is rendered
-    (is (str/includes? (:body resp) "type-badge"))))
+    (testing "uses Bulma table classes"
+      (is (str/includes? (:body resp) "table is-hoverable is-fullwidth")))
+    (testing "type badges rendered as Bulma tags"
+      (is (str/includes? (:body resp) "tag")))))
 
 (deftest test-hooks-toggle-form-post
   (testing "POST /hooks/toggle upserts the row"
@@ -278,7 +278,13 @@
     (is (= 200 (:status resp)))
     (is (str/includes? (get-in resp [:headers "content-type"]) "text/html"))
     (is (str/includes? (:body resp) "cch · events"))
-    (is (str/includes? (:body resp) "event-list"))))
+    (is (str/includes? (:body resp) "event-list"))
+    (testing "uses Bulma + Inter/JetBrains Mono"
+      (is (str/includes? (:body resp) "bulma@"))
+      (is (str/includes? (:body resp) "Inter"))
+      (is (str/includes? (:body resp) "JetBrains+Mono"))
+      (is (str/includes? (:body resp) "class=\"section\"")
+          "outer wrapper uses Bulma section"))))
 
 (deftest test-dashboard-filters-applied
   (testing "filter query params flow through to query-events"

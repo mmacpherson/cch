@@ -218,7 +218,7 @@ Templates live under `resources/service/` as real `.template` files — reviewab
 
 ### Web dashboard
 
-The same HTTP server renders a read-only dashboard at `/`. Server-rendered HTML via `hiccup2.core`, styled with Pico.css + Google Fonts (Roboto / Roboto Condensed), **zero client JS**. Filters are plain `<form method="get">` submits; auto-refresh uses `<meta http-equiv="refresh">`; click-to-expand is native `<details>`/`<summary>`. The entire dashboard lives in `cch.server/dashboard-html` — no separate templates, no build step.
+The same HTTP server renders a read-only dashboard at `/`. Server-rendered HTML via `hiccup2.core`, styled with Bulma 1.0 + Google Fonts (Inter / JetBrains Mono), **zero client JS**. Filters are plain `<form method="get">` submits; click-to-expand is native `<details>`/`<summary>`. Dark mode follows `prefers-color-scheme` via CSS variables. The entire dashboard lives in `cch.server/dashboard-html` — no separate templates, no build step.
 
 ### The universal observer
 

@@ -148,12 +148,26 @@
    "command-audit" {:color   "#059669"
                     :tooltip "Bash audit log — records every command; flags configured patterns"}})
 
+(defn- nav-bar
+  "Primary nav at the top of every page. `active` is :events or :hooks —
+  that tab renders as a non-link active label; the other renders as an
+  ordinary link."
+  [active]
+  [:div.nav-wrap
+   [:h1.nav-brand "cch"]
+   [:div.tabs
+    [:ul
+     [:li {:class (when (= active :events) "is-active")}
+      (if (= active :events) [:a "events"] [:a {:href "/"} "events"])]
+     [:li {:class (when (= active :hooks) "is-active")}
+      (if (= active :hooks) [:a "hooks"] [:a {:href "/hooks"} "hooks"])]]]])
+
 (defn- badge
   [hook-name]
   (let [{:keys [color tooltip]} (get hook-metadata hook-name)]
-    [:span.badge
-     (cond-> {:style (str "background:" (or color "#495057"))}
-       tooltip (assoc :data-tooltip tooltip))
+    [:span.tag.is-light
+     (cond-> {:style (str "background:" (or color "#495057") ";color:white;")}
+       tooltip (assoc :title tooltip))
      hook-name]))
 
 (defn- pretty-extra
@@ -256,66 +270,108 @@
                         (apply str (take 8 sid)))])
          (take 30 uniq))))
 
+(defn- select-field
+  "One Bulma .field column wrapping a labeled <select>."
+  [label name current options]
+  [:div.column
+   [:div.field
+    [:label.label.is-small label]
+    [:div.control
+     [:div.select.is-small.is-fullwidth
+      (select-with-options name current options)]]]])
+
+(defn- input-field
+  "One Bulma .field column wrapping a labeled <input>."
+  [label input-map]
+  [:div.column
+   [:div.field
+    [:label.label.is-small label]
+    [:div.control
+     [:input.input.is-small input-map]]]])
+
 (defn- filter-form
   [q repos]
   [:form.filters {:method "get"}
-   [:div.grid
-    [:label "Repo"
-     (select-with-options "cwd-prefix" (:cwd-prefix q "")
-       (cons ["" "all"] repos))]
-    [:label "Hook"
-     (select-with-options "hook" (:hook q "")
-       [["" "all"]
-        ["event-log" "event-log"]
-        ["scope-lock" "scope-lock"]
-        ["command-audit" "command-audit"]])]
-    [:label "Event"
-     (select-with-options "event" (:event q "")
-       (cons ["" "all"]
-             (for [e (hook-scoped-events (:hook q))] [e e])))]
-    [:label "Decision"
-     (select-with-options "decision" (:decision q "")
-       [["" "all"] ["allow" "allow"] ["ask" "ask"] ["deny" "deny"] ["block" "block"]])]]
-   [:div.grid
-    [:label "Session"
-     (select-with-options "session" (:session q "")
-       (cons ["" "all"] (distinct-sessions (:cwd-prefix q))))]
-    [:label "Since (SQLite ts)"
-     [:input {:type "text" :name "since" :value (:since q "")
-              :placeholder "2026-04-12"}]]
-    [:label "Limit"
-     [:input {:type "number" :name "limit" :value (:limit q "50")
-              :min "1" :max "500"}]]
-    [:label (hic/raw "&nbsp;")
-     [:button {:type "submit"} "Apply"]]]])
+   [:div.columns
+    (select-field "Repo"     "cwd-prefix" (:cwd-prefix q "")
+                  (cons ["" "all"] repos))
+    (select-field "Hook"     "hook"       (:hook q "")
+                  [["" "all"]
+                   ["event-log" "event-log"]
+                   ["scope-lock" "scope-lock"]
+                   ["command-audit" "command-audit"]])
+    (select-field "Event"    "event"      (:event q "")
+                  (cons ["" "all"]
+                        (for [e (hook-scoped-events (:hook q))] [e e])))
+    (select-field "Decision" "decision"   (:decision q "")
+                  [["" "all"] ["allow" "allow"] ["ask" "ask"]
+                   ["deny" "deny"] ["block" "block"]])]
+   [:div.columns
+    (select-field "Session" "session" (:session q "")
+                  (cons ["" "all"] (distinct-sessions (:cwd-prefix q))))
+    (input-field  "Since (SQLite ts)"
+                  {:type "text" :name "since" :value (:since q "")
+                   :placeholder "2026-04-13"})
+    (input-field  "Limit"
+                  {:type "number" :name "limit" :value (:limit q "50")
+                   :min "1" :max "500"})
+    [:div.column
+     [:div.field
+      [:label.label.is-small (hic/raw "&nbsp;")]
+      [:div.control
+       [:button.button.is-small.is-primary
+        {:type "submit"} "Apply"]]]]]])
 
 (def dashboard-css
   ":root {
-     --pico-font-family: 'Roboto', system-ui, sans-serif;
-     --pico-font-family-monospace: 'Roboto Mono', monospace;
+     --bulma-family-primary: 'Inter', system-ui, sans-serif;
+     --bulma-family-secondary: 'Inter', system-ui, sans-serif;
+     --bulma-family-code: 'JetBrains Mono', ui-monospace, monospace;
+     --bulma-body-family: var(--bulma-family-primary);
    }
-   h1, h2, h3, h4, h5, th {
-     font-family: 'Roboto Condensed', sans-serif;
-     letter-spacing: 0.01em;
+   @media (prefers-color-scheme: dark) {
+     :root:not([data-theme=\"light\"]) {
+       color-scheme: dark;
+       --bulma-scheme-main: hsl(221, 14%, 10%);
+       --bulma-scheme-main-bis: hsl(221, 14%, 13%);
+       --bulma-scheme-main-ter: hsl(221, 14%, 16%);
+       --bulma-scheme-invert: hsl(221, 14%, 96%);
+       --bulma-scheme-invert-bis: hsl(221, 14%, 92%);
+       --bulma-background: hsl(221, 14%, 16%);
+       --bulma-body-background-color: var(--bulma-scheme-main);
+       --bulma-body-color: hsl(221, 14%, 86%);
+       --bulma-text: hsl(221, 14%, 86%);
+       --bulma-text-weak: hsl(221, 14%, 66%);
+       --bulma-text-strong: hsl(221, 14%, 96%);
+       --bulma-border: hsl(221, 14%, 22%);
+       --bulma-border-weak: hsl(221, 14%, 18%);
+       --bulma-code-background: hsl(221, 14%, 13%);
+       --bulma-code: hsl(221, 14%, 86%);
+       --bulma-pre-background: hsl(221, 14%, 13%);
+       --bulma-link: hsl(209, 100%, 70%);
+       --bulma-link-hover: hsl(209, 100%, 80%);
+     }
    }
-   h1 { margin-bottom: 0.2em; }
-   .subtitle { color: var(--pico-muted-color); margin-top: 0; }
-   .filters { margin: 1.5em 0; }
-   .filters label { font-size: 0.85em; }
-   .meta { color: var(--pico-muted-color); font-size: 0.85em; }
 
-   /* --- Badges --- */
-   .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; color: white; font-size: 0.75em; font-weight: 500; letter-spacing: 0.02em; cursor: help; white-space: nowrap; }
-   .badge[data-tooltip] { border-bottom: none !important; }
+   /* Inter covers body + display; give headings weight and tighter tracking
+      for rhythm without pulling in a second face. */
+   h1, h2, h3, h4, h5, h6, th { font-family: var(--bulma-family-primary); font-weight: 600; letter-spacing: -0.01em; }
+   h1 { margin-bottom: 0.2em; letter-spacing: -0.02em; }
 
-   /* --- Event list --- */
-   .event-list article.event { margin: 0; padding: 0; border-radius: 4px; border: none; }
+   /* Top nav: product name on the left, tabs on the right. Tabs component
+      from Bulma handles active-state styling; we only need layout. */
+   .nav-wrap { display: flex; align-items: baseline; gap: 1.5em; margin-bottom: 0.6em; }
+   .nav-brand { font-size: 1.4em; font-weight: 700; letter-spacing: -0.02em; color: var(--bulma-text-strong); margin: 0; }
+   .nav-wrap .tabs { margin-bottom: 0 !important; flex: 1; }
+   .nav-wrap .tabs ul { border-bottom: none; }
+   .subtitle { color: var(--bulma-text-weak); margin-top: 0; }
+   .meta { color: var(--bulma-text-weak); font-size: 0.85em; }
+
+   /* --- Event list (bespoke grid — Bulma doesn't express this shape) --- */
+   .event-list article.event { margin: 0; padding: 0; border-radius: 4px; border: none; background: transparent; }
    .event-list article.event + article.event { margin-top: 2px; }
    .event-list details { margin: 0; }
 
-   /* Summary is itself the CSS grid — chevron is the first column, all
-      other cells fill the remaining row width. Long values truncate with
-      ellipsis instead of wrapping the row. */
    .event-list details summary {
      display: grid;
      grid-template-columns: 1em 11em 7em 10em 6em 5em minmax(10em, 1fr) minmax(8em, 2fr);
@@ -327,40 +383,36 @@
      font-size: 0.88em;
      list-style: none;
    }
-   /* Suppress browser disclosure marker AND Pico's own ::after chevron —
-      otherwise both compete with our <span.chev>. */
    .event-list details summary::-webkit-details-marker { display: none; }
    .event-list details summary::marker { display: none; }
    .event-list details summary::after { display: none; }
    .event-list details summary .chev {
-     color: var(--pico-muted-color);
+     color: var(--bulma-text-weak);
      transition: transform 0.1s;
      font-size: 0.9em;
      display: inline-block;
    }
    .event-list details[open] summary .chev { transform: rotate(90deg); }
-   .event-list details summary:hover { background: var(--pico-code-background-color); }
+   .event-list details summary:hover { background: var(--bulma-background); }
    .event-list article.observed summary { opacity: 0.65; }
    .event-list article.acted summary { font-weight: 500; }
 
-   /* Ellipsis on any grid cell whose content can be long. Exclude
-      .badge — it hosts the Pico tooltip pseudo-element, which Pico
-      positions via bottom:100% relative to the badge; overflow:hidden
-      on the badge would clip the tooltip above it. */
-   .event-list details summary > *:not(.badge) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-   .event-list details summary .badge { overflow: visible; }
-   .event-list details summary .ts { font-family: 'Roboto Mono', monospace; color: var(--pico-muted-color); font-size: 0.85em; }
+   .event-list details summary > *:not(.tag) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+   .event-list details summary .tag { overflow: visible; }
+   .event-list details summary .ts { font-family: var(--bulma-family-code); color: var(--bulma-text-weak); font-size: 0.85em; }
    .event-list details summary .evt { font-weight: 500; }
-   .event-list details summary .file { font-family: 'Roboto Mono', monospace; font-size: 0.85em; color: var(--pico-muted-color); }
-   .event-list details summary .reason { color: var(--pico-muted-color); font-size: 0.85em; font-style: italic; }
+   .event-list details summary .file { font-family: var(--bulma-family-code); font-size: 0.85em; color: var(--bulma-text-weak); }
+   .event-list details summary .reason { color: var(--bulma-text-weak); font-size: 0.85em; font-style: italic; }
 
-   /* Detail panel — shown when <details open> */
-   .event-list .detail { padding: 0.8em 1.2em 1em 2em; background: var(--pico-code-background-color); border-radius: 0 0 4px 4px; font-size: 0.9em; }
+   .event-list .detail { padding: 0.8em 1.2em 1em 2em; background: var(--bulma-background); border-radius: 0 0 4px 4px; font-size: 0.9em; }
    .event-list .detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.3em 1em; margin: 0 0 1em 0; }
-   .event-list .detail dt { font-family: 'Roboto Condensed', sans-serif; color: var(--pico-muted-color); font-size: 0.85em; margin: 0; }
-   .event-list .detail dd { margin: 0; font-family: 'Roboto Mono', monospace; font-size: 0.85em; word-break: break-all; }
-   .event-list .detail h5 { margin: 1em 0 0.3em 0; font-size: 0.85em; color: var(--pico-muted-color); }
-   .event-list .detail pre { font-size: 0.8em; white-space: pre-wrap; word-break: break-word; max-height: 30em; overflow: auto; background: var(--pico-background-color); padding: 0.7em; border-radius: 4px; margin: 0; }")
+   .event-list .detail dt { font-family: var(--bulma-family-secondary); color: var(--bulma-text-weak); font-size: 0.85em; margin: 0; }
+   .event-list .detail dd { margin: 0; font-family: var(--bulma-family-code); font-size: 0.85em; word-break: break-all; }
+   .event-list .detail h5 { margin: 1em 0 0.3em 0; font-size: 0.85em; color: var(--bulma-text-weak); }
+   .event-list .detail pre { font-size: 0.8em; white-space: pre-wrap; word-break: break-word; max-height: 30em; overflow: auto; background: var(--bulma-scheme-main-bis); padding: 0.7em; border-radius: 4px; margin: 0; }
+
+   /* Filter form spacing under Bulma .columns. */
+   .filters { margin: 1.5em 0; }")
 
 (defn- encode-query
   "Build a `?k=v&...` query string from a keyword-keyed map, dropping
@@ -406,28 +458,29 @@
              [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
              [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
              [:link {:rel "stylesheet"
-                     :href "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&family=Roboto+Condensed:wght@500;700&family=Roboto+Mono&display=swap"}]
+                     :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
              [:link {:rel "stylesheet"
-                     :href "https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"}]
+                     :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
              [:style (hic/raw dashboard-css)]]
             [:body
-             [:main.container
-              [:h1 "cch · events"]
-              [:p.subtitle
-               "Centralized log of every Claude Code event cch is subscribed to. "
-               "Refresh the page (Cmd+R) to load newer events."]
-              (filter-form q repos)
-              [:p.meta
-               (format "%d event(s) · " (count events))
-               [:a {:href self-url} "↻ refresh"]
-               " · "
-               (if open-all?
-                 [:a {:href close-url} "close all"]
-                 [:a {:href open-url} "open all"])
-               " · "
-               [:a {:href "/"} "clear filters"]]
-              [:div.event-list
-               (for [e events] (event-card open-all? e))]]]]))))
+             [:section.section
+              [:div.container
+               (nav-bar :events)
+               [:p.subtitle
+                "Centralized log of every Claude Code event cch is subscribed to. "
+                "Refresh the page (Cmd+R) to load newer events."]
+               (filter-form q repos)
+               [:p.meta
+                (format "%d event(s) · " (count events))
+                [:a {:href self-url} "↻ refresh"]
+                " · "
+                (if open-all?
+                  [:a {:href close-url} "close all"]
+                  [:a {:href open-url} "open all"])
+                " · "
+                [:a {:href "/"} "clear filters"]]
+               [:div.event-list
+                (for [e events] (event-card open-all? e))]]]]]))))
 
 ;; --- Handlers ---
 
@@ -662,16 +715,16 @@
    :agent  "#059669"})
 
 (defn- type-badge [t]
-  [:span.type-badge
-   {:style (str "background:" (get type-badge-colors t "#495057"))}
+  [:span.tag
+   {:style (str "background:" (get type-badge-colors t "#495057") ";color:white;")}
    (name t)])
 
 (defn- toggle-form
   "Render the enable/disable toggle form cell for (hook, scope)."
   [hook-name scope current-enabled? source yaml-managed?]
   (if yaml-managed?
-    [:span.cell-yaml
-     {:data-tooltip "managed by .cch-config.yaml — edit the file to change"}
+    [:span.tag.is-warning.is-light
+     {:title "managed by .cch-config.yaml — edit the file to change"}
      (if current-enabled? "✓ yaml" "✗ yaml")]
     [:form {:method "post" :action "/hooks/toggle" :class "toggle-form"}
      [:input {:type "hidden" :name "hook"    :value hook-name}]
@@ -686,34 +739,41 @@
       (if current-enabled? "on" "off")]]))
 
 (def ^:private matrix-css
-  "table.matrix { border-collapse: collapse; margin: 1em 0; }
-   table.matrix th, table.matrix td { padding: 0.4em 0.8em; text-align: left; font-size: 0.9em; border-bottom: 1px solid var(--pico-muted-border-color); }
-   table.matrix th { font-family: 'Roboto Condensed', sans-serif; color: var(--pico-muted-color); font-weight: 500; }
-   table.matrix td.hook-name { font-weight: 500; }
-   .type-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; color: white; font-size: 0.7em; letter-spacing: 0.02em; text-transform: lowercase; }
+  "/* Scope-as-rows layout — first column is the scope label; every other
+      column is a hook. Stacked column header: hook name over type badge. */
+   table.matrix th .hook-head { display: flex; flex-direction: column; gap: 0.2em; align-items: flex-start; }
+   table.matrix th .hook-name { font-weight: 600; font-size: 0.9em; }
+   table.matrix th .hook-type { font-size: 0.7em; }
+   table.matrix td.scope-name { font-weight: 500; font-family: var(--bulma-family-code); font-size: 0.85em; white-space: nowrap; }
+   table.matrix td.scope-name .yaml-badge { color: var(--bulma-text-weak); font-style: italic; font-weight: 400; font-family: var(--bulma-family-primary); }
+   table.matrix tr.scope-global { background: rgba(100, 100, 100, 0.05); }
    .toggle-form { display: inline; margin: 0; }
-   button.toggle { padding: 2px 10px; font-size: 0.8em; border-radius: 3px; border: 1px solid var(--pico-muted-border-color); cursor: pointer; font-family: inherit; min-width: 3em; }
+   button.toggle { padding: 2px 10px; font-size: 0.8em; border-radius: 3px; border: 1px solid var(--bulma-border); cursor: pointer; font-family: inherit; min-width: 3em; background: transparent; color: var(--bulma-text-weak); }
    button.toggle.on  { background: #059669; color: white; border-color: #059669; }
-   button.toggle.off { background: transparent; color: var(--pico-muted-color); }
-   button.toggle.on[data-source=\"db-repo\"]   { background: #047857; }
-   button.toggle.on[data-source=\"repo-yaml\"] { background: #7c3aed; }
-   .cell-yaml { color: var(--pico-muted-color); font-size: 0.85em; font-style: italic; cursor: help; }
-   .cell-readonly { color: var(--pico-muted-color); font-size: 0.85em; font-style: italic; }
-   td.scope-global { background: rgba(100,100,100,0.05); }")
+   button.toggle.on[data-source=\"db-repo\"]   { background: #047857; border-color: #047857; }
+   button.toggle.on[data-source=\"repo-yaml\"] { background: #7c3aed; border-color: #7c3aed; }
+   .cell-readonly { color: var(--bulma-text-weak); font-size: 0.85em; font-style: italic; }")
+
+(defn- matrix-cell
+  "Render one (scope, hook) cell."
+  [scope yaml? {:keys [name entry]}]
+  (let [t (registry/hook-type entry)]
+    [:td
+     (if (= :code t)
+       (let [{:keys [enabled? source]} (effective-entry name scope)]
+         (toggle-form name scope enabled? source yaml?))
+       [:span.cell-readonly "native"])]))
 
 (defn- matrix-row
-  [{:keys [name entry]} scopes]
-  (let [t (registry/hook-type entry)]
-    [:tr
-     [:td.hook-name name]
-     [:td (type-badge t)]
-     [:td.description (:description entry)]
-     (for [{:keys [scope yaml?]} scopes]
-       [:td {:class (when (= scope cdb/global-scope) "scope-global")}
-        (if (= :code t)
-          (let [{:keys [enabled? source]} (effective-entry name scope)]
-            (toggle-form name scope enabled? source yaml?))
-          [:span.cell-readonly "native"])])]))
+  "One row per scope. First cell is the scope label; remaining cells are
+  one per hook."
+  [{:keys [scope label yaml?]} entries]
+  [:tr {:class (when (= scope cdb/global-scope) "scope-global")}
+   [:td.scope-name
+    label
+    (when yaml? [:span.yaml-badge " · yaml"])]
+   (for [entry entries]
+     (matrix-cell scope yaml? entry))])
 
 (defn- hooks-matrix-html
   [_q]
@@ -729,36 +789,36 @@
              [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
              [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
              [:link {:rel "stylesheet"
-                     :href "https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&family=Roboto+Condensed:wght@500;700&family=Roboto+Mono&display=swap"}]
+                     :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
              [:link {:rel "stylesheet"
-                     :href "https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css"}]
+                     :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
              [:style (hic/raw dashboard-css)]
              [:style (hic/raw matrix-css)]]
             [:body
-             [:main.container
-              [:h1 "cch · hooks"]
-              [:p.subtitle
-               "Enable or disable each hook per scope. "
-               "Per-repo .cch-config.yaml files take precedence over DB rows — those cells are shown read-only."]
-              [:p.meta
-               [:a {:href "/"} "← events"]
-               " · "
-               [:a {:href "/hooks"} "↻ refresh"]]
-              [:table.matrix
-               [:thead
-                [:tr
-                 [:th "hook"]
-                 [:th "type"]
-                 [:th "description"]
-                 (for [{:keys [label]} scopes]
-                   [:th label])]]
-               [:tbody
-                (for [entry entries]
-                  (matrix-row entry scopes))]]
-              [:p.meta
-               [:small
-                (format "%d hook(s) · %d scope(s)"
-                        (count entries) (count scopes))]]]]]))))
+             [:section.section
+              [:div.container
+               (nav-bar :hooks)
+               [:p.subtitle
+                "Enable or disable each hook per scope. "
+                "Per-repo .cch-config.yaml files take precedence over DB rows — those cells are shown read-only."]
+               [:p.meta
+                [:a {:href "/hooks"} "↻ refresh"]]
+               [:table.table.is-hoverable.is-fullwidth.matrix
+                [:thead
+                 [:tr
+                  [:th "scope"]
+                  (for [{:keys [name entry]} entries]
+                    [:th {:title (:description entry)}
+                     [:div.hook-head
+                      [:div.hook-name name]
+                      [:div.hook-type (type-badge (registry/hook-type entry))]]])]]
+                [:tbody
+                 (for [scope scopes]
+                   (matrix-row scope entries))]]
+               [:p.meta
+                [:small
+                 (format "%d hook(s) · %d scope(s)"
+                         (count entries) (count scopes))]]]]]]))))
 
 (defn- handle-hooks-page [req]
   (let [q (parse-query (:query-string req))]

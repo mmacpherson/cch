@@ -109,7 +109,7 @@ cch serve &
 cch install event-log --global --http   # now fires against http://127.0.0.1:8888/hooks/event-log
 ```
 
-**Dashboard** at `http://127.0.0.1:8888/` — server-rendered (no client JS), styled with Pico.css + Roboto. Filter by repo, hook, event type, session, decision, or time range. Click a row to expand the full event payload. `?open=all` expands every row at once; refresh manually with the link in the meta area.
+**Dashboard** at `http://127.0.0.1:8888/` — server-rendered (no client JS), styled with Bulma 1.0 + Inter. Filter by repo, hook, event type, session, decision, or time range. Click a row to expand the full event payload. `?open=all` expands every row at once; refresh manually with the link in the meta area. Dark mode follows your OS preference.
 
 **Server routes:**
 
