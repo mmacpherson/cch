@@ -1,40 +1,44 @@
 (ns cli.list-cmd
-  "cch list — show available and installed hooks."
-  (:require [cli.registry :as registry]
-            [cli.settings :as settings]))
+  "cch list — show registered hooks and their global enablement state.
 
-(defn installed-hooks
-  "Return set of hook names currently installed in a settings file."
-  [path]
-  (let [s (settings/read-settings path)]
-    (->> (vals (:hooks s))
-         (mapcat identity)
-         (mapcat :hooks)
-         (keep :command)
-         (keep #(second (re-find #"# cch:(\S+)" %)))
-         set)))
+  Under the dispatcher model, hooks are not 'installed per-project' anymore;
+  they're registered in code (cli.registry) and enabled per scope in the
+  hook_config DB table (toggled by `cch install` / the web UI's matrix
+  page). This command is a quick at-a-glance view of what cch knows
+  about and which ones are on at the global default."
+  (:require [cch.config-db :as cdb]
+            [cli.registry :as registry]))
 
 (defn- event-summary
   "One-line summary of a hook's event subscription(s)."
   [{:keys [event matcher events]}]
   (cond
-    events (format "%d events" (count events))
+    events  (format "%d events (observer)" (count events))
     matcher (format "%s on %s" event matcher)
-    :else event))
+    :else   event))
+
+(defn- enabled-globally?
+  [hook-name global-rows]
+  (let [row (first (filter #(= hook-name (:hook-name %)) global-rows))]
+    (cond
+      (nil? row)               true   ; default-on (hardcoded-defaults)
+      (true? (:enabled row))   true
+      :else                    false)))
 
 (defn run [& _args]
-  (let [global-path  (settings/global-settings-path)
-        project-path (settings/project-settings-path ".")
-        global-installed  (installed-hooks global-path)
-        project-installed (installed-hooks project-path)]
-    (println "Available hooks:")
+  (let [global-rows (cdb/list-for-scope cdb/global-scope)
+        hooks       (registry/list-hooks)]
+    (println (format "Registered hooks (%d):" (count hooks)))
     (println)
-    (doseq [[name hook] (registry/list-hooks)]
-      (let [status (cond
-                     (project-installed name) "[project]"
-                     (global-installed name)  "[global] "
-                     :else                    "         ")]
-        (println (format "  %s %-16s %s" status name (:description hook)))
-        (println (format "             %s" (event-summary hook)))))
+    (doseq [[name hook] hooks
+            :let [t       (registry/hook-type hook)
+                  on?     (enabled-globally? name global-rows)
+                  marker  (if on? "✓" "·")]]
+      (println (format "  %s  %-15s  [%s]  %s"
+                       marker name (clojure.core/name t) (:description hook)))
+      (println (format "                       %s" (event-summary hook))))
     (println)
-    (println "Install: cch install <hook-name> [--global] [--exclude=Event1,...]")))
+    (println "  ✓ enabled globally   · disabled globally")
+    (println)
+    (println "Bootstrap:    cch install [--global]")
+    (println "Per-repo:     enable/disable in the dashboard at /hooks")))

@@ -502,7 +502,7 @@
    .event-list details summary > *:not(.tag) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
    .event-list details summary .tag { overflow: visible; }
    .event-list details summary .ts { font-family: var(--bulma-family-code); color: var(--bulma-text-weak); }
-   .event-list details summary .repo { color: var(--bulma-text-weak); cursor: help; }
+   .event-list details summary .repo { color: var(--bulma-text-weak); }
    .event-list details summary .evt { font-weight: 500; }
    .event-list details summary .ctx { color: var(--bulma-text-weak); font-style: italic; cursor: help; }
 
