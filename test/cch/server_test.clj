@@ -13,7 +13,8 @@
             [cch.server :as server]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing use-fixtures]]))
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [hooks.scope-lock]))
 
 (def ^:dynamic *port* nil)
 (def ^:dynamic *tmp-db* nil)
@@ -158,6 +159,34 @@
       ;; PreToolUse/Read except event-log (observer, nil response). Empty.
       (is (= 200 status))
       (is (str/blank? body)))))
+
+;; --- Live re-eval (nREPL-style hot-reload) ---
+
+(deftest test-hook-redef-is-live
+  (testing "redefining a hook's composed var takes effect on the next dispatch"
+    (let [payload {:hook_event_name "PreToolUse"
+                   :cwd             "/home/example/projects/claude-code-hooks"
+                   :tool_name       "Edit"
+                   :tool_input      {:file_path "/etc/passwd"}}]
+      (testing "baseline: scope-lock asks for /etc/passwd (out of worktree)"
+        (let [{:keys [status parsed]} (dispatch! "PreToolUse" payload)]
+          (is (= 200 status))
+          (is (= "ask" (get-in parsed [:hookSpecificOutput :permissionDecision])))))
+
+      (testing "after with-redefs, the new behavior shows up immediately"
+        ;; If the dispatcher captured `composed` by value at startup, this
+        ;; test fails: the old fn keeps returning :ask. With the var
+        ;; lookup happening per-dispatch, the redef wins and dispatch
+        ;; returns empty (no other hook denies /etc/passwd).
+        (with-redefs [hooks.scope-lock/composed (fn [_input] nil)]
+          (let [{:keys [status body]} (dispatch! "PreToolUse" payload)]
+            (is (= 200 status))
+            (is (str/blank? body)
+                "redefined composed should be picked up on next dispatch"))))
+
+      (testing "original behavior restored after with-redefs scope ends"
+        (let [{:keys [parsed]} (dispatch! "PreToolUse" payload)]
+          (is (= "ask" (get-in parsed [:hookSpecificOutput :permissionDecision]))))))))
 
 ;; --- Non-tool events still dispatch (event-log observes silently) ---
 

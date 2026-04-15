@@ -1,1 +1,8 @@
-{:lint-as {cch.core/defhook clojure.core/defn}}
+{:lint-as {cch.core/defhook clojure.core/defn}
+ ;; defhook generates `composed` (and `-main`) under each hook ns; clj-kondo
+ ;; only sees the leading `defn`-style def. Tests + REPL-style code that
+ ;; refer to those generated vars would otherwise trigger unresolved-var.
+ :linters {:unresolved-var {:exclude [hooks.scope-lock/composed
+                                      hooks.protect-files/composed
+                                      hooks.command-audit/composed
+                                      hooks.event-log/composed]}}}

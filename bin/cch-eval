@@ -1,0 +1,88 @@
+#!/usr/bin/env bb
+;; cch-eval — bencode-over-TCP nREPL eval client.
+;;
+;; Usage:
+;;   bin/cch-eval '(count @cch.events/subscribers)'
+;;   bin/cch-eval --port 7888 '(load-file "src/cch/server.clj")'
+;;
+;; Port resolution (first hit wins):
+;;   --port <n> arg
+;;   $CCH_NREPL_PORT
+;;   ./.nrepl-port  (auto-discovered when cch serve --nrepl wrote it)
+;;
+;; Prints any :out / :err chunks; final line is the eval :value.
+;; Exits non-zero on connection refused or eval error.
+
+(require '[bencode.core :as b]
+         '[clojure.string :as str]
+         '[babashka.fs :as fs])
+
+(defn- die [msg]
+  (binding [*out* *err*] (println msg))
+  (System/exit 1))
+
+(defn- resolve-port [args]
+  (let [from-arg (some->> args
+                          (drop-while #(not= "--port" %))
+                          second)
+        from-env (System/getenv "CCH_NREPL_PORT")
+        from-file (when (fs/exists? ".nrepl-port")
+                    (str/trim (slurp ".nrepl-port")))]
+    (or (some-> (or from-arg from-env from-file)
+                str/trim
+                (->> (re-matches #"\d+"))
+                Long/parseLong)
+        (die "cch-eval: no nREPL port (--port / $CCH_NREPL_PORT / .nrepl-port)"))))
+
+(defn- exprs [args]
+  (let [skip (set ["--port"])
+        skip-next (atom false)]
+    (vec
+      (for [a args
+            :when (cond
+                    @skip-next (do (reset! skip-next false) false)
+                    (skip a)   (do (reset! skip-next true) false)
+                    :else      true)]
+        a))))
+
+(defn- read-loop
+  "Drain bencode messages until one carries status containing 'done'.
+  Print :out, :err, :value as encountered. Returns last :value seen."
+  [in]
+  (loop [last-val nil]
+    (let [msg (b/read-bencode in)
+          decode #(when % (String. ^bytes % "UTF-8"))
+          status (when-let [s (get msg "status")]
+                   (set (map decode s)))]
+      (when-let [out (decode (get msg "out"))]
+        (.print System/out out))
+      (when-let [err (decode (get msg "err"))]
+        (.print System/err err))
+      (when-let [ex (decode (get msg "ex"))]
+        (binding [*out* *err*] (println "ex:" ex)))
+      (let [v (decode (get msg "value"))]
+        (when v (println v))
+        (if (and status (status "done"))
+          (or v last-val)
+          (recur (or v last-val)))))))
+
+(defn -main [& args]
+  (let [port  (resolve-port args)
+        codes (exprs args)]
+    (when (empty? codes)
+      (die "cch-eval: no expression(s) given"))
+    (try
+      (with-open [sock (java.net.Socket. "127.0.0.1" (int port))]
+        (let [out (.getOutputStream sock)
+              in  (java.io.PushbackInputStream. (.getInputStream sock))]
+          (doseq [code codes]
+            (b/write-bencode out {"op"   "eval"
+                                  "code" code
+                                  "id"   (str (random-uuid))})
+            (.flush out)
+            (read-loop in))))
+      (catch java.net.ConnectException _
+        (die (str "cch-eval: connection refused at 127.0.0.1:" port
+                  " (is `cch serve --nrepl " port "` running?)"))))))
+
+(apply -main *command-line-args*)

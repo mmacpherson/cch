@@ -18,7 +18,9 @@
   Dashboard is server-rendered via hiccup, styled with Pico.css +
   Google Fonts (Roboto / Roboto Condensed). No client JS — filter
   changes are plain GET form submits."
-  (:require [cch.config :as config]
+  (:require [babashka.fs :as fs]
+            [babashka.nrepl.server :as nrepl]
+            [cch.config :as config]
             [cch.config-db :as cdb]
             [cch.events :as events]
             [cch.log :as log]
@@ -33,20 +35,24 @@
 ;; --- Hook registration ---
 
 (defn- load-hook
-  "Require a hook's namespace and return {:name :composed :description
+  "Require a hook's namespace and return {:name :composed-var :description
   :events [{:event :matcher} ...]}. Returns nil if the namespace can't
-  load. Only :type :code entries are loaded — prompt/agent run natively."
+  load. Only :type :code entries are loaded — prompt/agent run natively.
+
+  We hold the *var* (not its current value) so nREPL redefs of the
+  hook's `composed` show up on the next dispatch — call sites must
+  deref via @composed-var to get the live fn."
   [hook-name {:keys [ns description] :as reg-entry}]
   (when (= :code (registry/hook-type reg-entry))
     (try
       (require (symbol ns))
-      (let [composed (ns-resolve (symbol ns) 'composed)]
-        (when composed
-          {:name        hook-name
-           :ns          ns
-           :description description
-           :composed    @composed
-           :events      (registry/hook-events reg-entry)}))
+      (let [composed-var (ns-resolve (symbol ns) 'composed)]
+        (when composed-var
+          {:name         hook-name
+           :ns           ns
+           :description  description
+           :composed-var composed-var
+           :events       (registry/hook-events reg-entry)}))
       (catch Exception e
         (binding [*out* *err*]
           (println (format "cch.server: failed to load hook '%s' (%s): %s"
@@ -60,16 +66,18 @@
                  (registry/list-hooks))))
 
 (defn- build-event-index
-  "From the loaded-hooks map, build {event-name → [{:name :composed :matcher} ...]}
-  so a request for event E can find its candidate hooks in one lookup."
+  "From the loaded-hooks map, build {event-name → [{:name :composed-var :matcher} ...]}
+  so a request for event E can find its candidate hooks in one lookup.
+  Holds the var, not the value — the dispatcher deref's it per call so
+  nREPL redefs are picked up live."
   [hooks]
   (reduce-kv
-    (fn [idx name {:keys [composed events]}]
+    (fn [idx name {:keys [composed-var events]}]
       (reduce (fn [i {:keys [event matcher]}]
                 (update i event (fnil conj [])
-                        {:name     name
-                         :composed composed
-                         :matcher  matcher}))
+                        {:name         name
+                         :composed-var composed-var
+                         :matcher      matcher}))
               idx events))
     {}
     hooks))
@@ -604,10 +612,13 @@
 
 (defn- run-hook
   "Invoke a single hook's composed handler with the input, catching and
-  logging exceptions. Returns the decision map (or nil)."
-  [{:keys [name composed]} input event]
+  logging exceptions. Returns the decision map (or nil).
+
+  Deref's :composed-var per call so nREPL redefs of a hook's `composed`
+  show up immediately on the next dispatch."
+  [{:keys [name composed-var]} input event]
   (try
-    (composed (assoc input :cch/hook-name name))
+    (@composed-var (assoc input :cch/hook-name name))
     (catch Exception e
       (binding [*out* *err*]
         (println (format "cch.server: hook '%s' on event '%s' threw: %s"
@@ -1110,6 +1121,26 @@
 
 ;; --- Lifecycle ---
 
+(defn- start-nrepl!
+  "Start an in-process nREPL bound to 127.0.0.1:<port> and write a
+  .nrepl-port file in cwd so editor tooling auto-discovers it. Returns
+  the server map that babashka.nrepl.server/stop-server! consumes, or
+  nil when port is nil/blank."
+  [port]
+  (when port
+    (let [server (nrepl/start-server! {:host "127.0.0.1" :port port})]
+      (try (spit ".nrepl-port" (str port))
+           (catch Exception _ nil))
+      (println (format "nREPL server: 127.0.0.1:%d  (.nrepl-port written)" port))
+      server)))
+
+(defn- stop-nrepl!
+  "Best-effort shutdown — silences exceptions, deletes .nrepl-port."
+  [server]
+  (when server
+    (try (nrepl/stop-server! server) (catch Exception _ nil))
+    (try (fs/delete-if-exists ".nrepl-port") (catch Exception _ nil))))
+
 (defn start!
   "Start the httpkit server. Returns a stop-fn that gracefully shuts it down.
 
@@ -1117,15 +1148,19 @@
   the queued path (sub-millisecond) instead of forking sqlite3 per call.
   The returned :stop drains and closes the writer.
 
+  When :nrepl-port is set (or arrives via -main's --nrepl flag), also
+  starts an in-process nREPL on 127.0.0.1 for live re-eval of any ns.
+
   Default host '::' binds all interfaces dual-stack on Linux/macOS so
   both `localhost` (often resolves to IPv6 ::1 first) and 127.0.0.1
   work without the browser eating a connection-refused retry loop.
   Pass --host 127.0.0.1 via start args to restrict to IPv4 loopback."
-  [{:keys [port host] :or {port 8888 host "::"}}]
+  [{:keys [port host nrepl-port] :or {port 8888 host "::"}}]
   (registry/validate-registry!)
   (log/start-writer!)
   (let [hooks     (build-registry)
         event-idx (build-event-index hooks)
+        nrepl     (start-nrepl! nrepl-port)
         stop-fn   (httpkit/run-server (fn [req] (route hooks event-idx req))
                                       {:port port :ip host})]
     (println (format "cch serve listening on http://%s:%d (%d code hook(s) loaded)"
@@ -1138,15 +1173,33 @@
     {:stop  (fn shutdown [& args]
               ;; httpkit's stop-fn takes &{:as opts}, e.g. (stop :timeout 100)
               (try (apply stop-fn args) (catch Exception _ nil))
+              (stop-nrepl! nrepl)
               (log/stop-writer!))
-     :hooks hooks}))
+     :hooks hooks
+     :nrepl nrepl}))
+
+(defn- parse-int-opt
+  "Pull an integer-valued flag out of args; falls back to env-var if
+  unset; nil if neither present."
+  [args flag env-var]
+  (let [v (or (some->> args (drop-while #(not= flag %)) second)
+              (System/getenv env-var))]
+    (when (and v (re-matches #"\d+" (str v)))
+      (Long/parseLong (str v)))))
 
 (defn -main
-  "Foreground server with graceful shutdown."
+  "Foreground server with graceful shutdown.
+
+  Flags:
+    --port <n>     HTTP dispatcher port (default 8888)
+    --host <h>     bind address (default :: dual-stack)
+    --nrepl <n>    optional nREPL port; off when omitted.
+                   Falls back to env CCH_NREPL_PORT."
   [& args]
-  (let [port  (or (some->> args (drop-while #(not= "--port" %)) second Long/parseLong) 8888)
-        host  (or (some->> args (drop-while #(not= "--host" %)) second) "::")
-        {:keys [stop]} (start! {:port port :host host})
+  (let [port       (or (parse-int-opt args "--port"  "CCH_PORT")  8888)
+        host       (or (some->> args (drop-while #(not= "--host" %)) second) "::")
+        nrepl-port (parse-int-opt args "--nrepl" "CCH_NREPL_PORT")
+        {:keys [stop]} (start! {:port port :host host :nrepl-port nrepl-port})
         latch (promise)]
     (.addShutdownHook (Runtime/getRuntime)
                       (Thread. (fn []
