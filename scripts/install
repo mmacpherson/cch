@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Install the cch + cch-eval shims into a chosen bin directory.
+# Usage: scripts/install [bin-dir]   (default: ~/bin)
+set -euo pipefail
+
+bin="${1:-$HOME/bin}"
+bin="${bin/#\~/$HOME}"
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+
+mkdir -p "$bin" "$HOME/.local/share/cch"
+
+# cch — bash shim that invokes bb with the right classpath.
+cat > "$bin/cch" <<EOF
+#!/usr/bin/env bash
+exec bb -cp "\$HOME/.local/share/cch/repo/src:\$HOME/.local/share/cch/repo/resources" -m cli.cch "\$@"
+EOF
+chmod +x "$bin/cch"
+
+# cch-eval — symlink so edits in the repo flow through immediately.
+ln -sf "$repo/bin/cch-eval" "$bin/cch-eval"
+
+# Repo symlink: ~/.local/share/cch/repo → this checkout.
+ln -sfn "$repo" "$HOME/.local/share/cch/repo"
+
+echo "Installed:"
+echo "  $bin/cch        (bash shim)"
+echo "  $bin/cch-eval   -> $repo/bin/cch-eval"
+echo "  ~/.local/share/cch/repo  -> $repo"
+
+if ! command -v cch >/dev/null 2>&1; then
+  echo
+  echo "⚠  $bin is not on your PATH. Add to your shell rc:"
+  echo "    export PATH=\"$bin:\$PATH\""
+fi

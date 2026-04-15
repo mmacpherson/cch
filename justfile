@@ -68,6 +68,15 @@ doctor:
         exit 1
     fi
 
+# Install cch + cch-eval shims (default: ~/bin).
+# Use:  just install ~/.local/bin
+install bin="~/bin":
+    scripts/install {{bin}}
+
+# Remove the cch + cch-eval shims from `bin` (default: ~/bin).
+uninstall bin="~/bin":
+    scripts/uninstall {{bin}}
+
 # Remove generated files
 clean:
     rm -rf .cpcache .nrepl-port

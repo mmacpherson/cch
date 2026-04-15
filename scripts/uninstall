@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Remove cch + cch-eval shims from a chosen bin directory.
+# Leaves ~/.local/share/cch/repo so a running cch.service keeps working.
+# Usage: scripts/uninstall [bin-dir]   (default: ~/bin)
+set -euo pipefail
+
+bin="${1:-$HOME/bin}"
+bin="${bin/#\~/$HOME}"
+
+rm -fv "$bin/cch" "$bin/cch-eval"
