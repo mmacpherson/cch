@@ -67,7 +67,7 @@
   ;; Ensure warm DB for the main measurement
   (log/ensure-db! (log/db-path))
 
-  (println "Warm DB (async fire-and-forget):")
+  (println "Warm DB, NO writer (per-call sqlite3 spawn):")
   (bench "bare no-op handler"    1000 #(no-op sample-input))
   (bench "wrap-timing only"      1000 #((mw/wrap-timing no-op) sample-input))
   (let [wrapped (mw/wrap-logging no-op)]
@@ -76,6 +76,18 @@
                          no-op
                          (reverse mw/default-middleware))]
     (bench "full stack (reused)"   1000 #(composed sample-input)))
+
+  (println "\nWarm DB, WITH background writer (queue offer):")
+  (log/start-writer!)
+  (try
+    (let [wrapped (mw/wrap-logging no-op)]
+      (bench "wrap-logging queued"    1000 #(wrapped sample-input)))
+    (let [composed (reduce (fn [h wrap] (wrap h))
+                           no-op
+                           (reverse mw/default-middleware))]
+      (bench "full stack queued"      1000 #(composed sample-input)))
+    (finally
+      (log/stop-writer!)))
 
   (println "\nIsolating the cost within wrap-logging:")
   (bench "ensure-db! (warm)"     1000 #(log/ensure-db! (log/db-path)))

@@ -1113,12 +1113,17 @@
 (defn start!
   "Start the httpkit server. Returns a stop-fn that gracefully shuts it down.
 
+  Also boots the cch.log background writer so dispatcher inserts ride
+  the queued path (sub-millisecond) instead of forking sqlite3 per call.
+  The returned :stop drains and closes the writer.
+
   Default host '::' binds all interfaces dual-stack on Linux/macOS so
   both `localhost` (often resolves to IPv6 ::1 first) and 127.0.0.1
   work without the browser eating a connection-refused retry loop.
   Pass --host 127.0.0.1 via start args to restrict to IPv4 loopback."
   [{:keys [port host] :or {port 8888 host "::"}}]
   (registry/validate-registry!)
+  (log/start-writer!)
   (let [hooks     (build-registry)
         event-idx (build-event-index hooks)
         stop-fn   (httpkit/run-server (fn [req] (route hooks event-idx req))
@@ -1130,7 +1135,11 @@
     (println)
     (println (format "Dispatcher: http://%s:%d/dispatch/<event>" host port))
     (println (format "Dashboard:  http://%s:%d/" host port))
-    {:stop stop-fn :hooks hooks}))
+    {:stop  (fn shutdown [& args]
+              ;; httpkit's stop-fn takes &{:as opts}, e.g. (stop :timeout 100)
+              (try (apply stop-fn args) (catch Exception _ nil))
+              (log/stop-writer!))
+     :hooks hooks}))
 
 (defn -main
   "Foreground server with graceful shutdown."

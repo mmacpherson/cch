@@ -1,20 +1,23 @@
 (ns cch.log
-  "SQLite event logging via fire-and-forget sqlite3 CLI.
+  "SQLite event logging.
 
-  Every hook invocation is logged as a row in ~/.local/share/cch/events.db.
-  The sqlite3 process is spawned with `p/process` (returns immediately, no
-  wait on exit) so the INSERT itself doesn't block the hook response.
+  Two write paths:
 
-  What DOES happen on the hot path: `ProcessBuilder.start` to fork+exec the
-  sqlite3 binary. Measured warm-JVM cost in bench/log_overhead.clj:
-    p50 ~3ms  p95 ~6ms  p99 ~8ms  (per wrap-logging call)
-  That's the fork+exec itself; ensure-db! adds ~3μs (warm stat) and is
-  cached via delay so repeated calls are free.
+    1. **Background writer (preferred).** When `start-writer!` has been
+       called (cch serve does this in start!), inserts are queued onto a
+       bounded LinkedBlockingQueue and a daemon thread pipes them to one
+       long-lived `sqlite3` subprocess via stdin. Per-call cost is just
+       the queue offer + a few-byte write — sub-millisecond. WAL is
+       enabled on the writer's connection so the dashboard's read
+       queries don't block writes.
 
-  Under sustained load, async sqlite3 processes can pile up and serialize
-  on the DB lock (PRAGMA busy_timeout=5000). That's fine for interactive
-  hook firing but is a known weakness for bursty high-volume use — a
-  future background-queue optimization is tracked separately."
+    2. **Per-call fallback.** When no writer is registered (legacy
+       `bb -m hooks.X` subprocess invocation, tests without setup),
+       log-event! spawns a fresh `sqlite3` per insert via `p/process`.
+       Measured at p50 ~3ms / p99 ~8ms — same as before.
+
+  CCH_LOG_SYNC=1 forces synchronous `p/sh` regardless of the writer,
+  so tests can assert on rows immediately after a log call."
   (:require [babashka.process :as p]
             [babashka.fs :as fs]
             [cheshire.core :as json]
@@ -63,42 +66,108 @@
     "NULL"
     (str "'" (escape-sql (str v)) "'")))
 
+;; --- Background writer ---
+
+;; When non-nil, holds {:proc <bb-process> :queue <BlockingQueue> :thread <Thread>}.
+;; Set by start-writer!, cleared by stop-writer!. log-event! checks this to
+;; decide between queued and per-call modes.
+(defonce ^:private writer-state (atom nil))
+
+(def ^:private writer-queue-capacity 4096)
+
+(defn- writer-loop
+  "Drain queue → write SQL to sqlite3 stdin. Runs on a daemon thread.
+  Sets a one-time PRAGMA before the loop. ::stop sentinel breaks out."
+  [^java.io.OutputStream out ^java.util.concurrent.BlockingQueue queue]
+  (try
+    (.write out (.getBytes "PRAGMA journal_mode=WAL;\n" "UTF-8"))
+    (.flush out)
+    (loop []
+      (let [item (.take queue)]
+        (when-not (identical? item ::stop)
+          (try
+            (.write out (.getBytes (str item "\n") "UTF-8"))
+            (.flush out)
+            (catch Exception _ nil))
+          (recur))))
+    (catch InterruptedException _ nil)
+    (catch Exception _ nil)))
+
+(defn start-writer!
+  "Spin up the background writer. Idempotent — no-op if already running.
+  Returns the writer-state map for callers that want to introspect."
+  []
+  (or @writer-state
+      (let [path  (db-path)
+            _     (ensure-db-once! path)
+            proc  (p/process ["sqlite3" path]
+                             {:in :write :out :discard :err :discard})
+            queue (java.util.concurrent.LinkedBlockingQueue. writer-queue-capacity)
+            thread (Thread. ^Runnable #(writer-loop (:in proc) queue))]
+        (.setDaemon thread true)
+        (.setName thread "cch-sqlite-writer")
+        (.start thread)
+        (reset! writer-state {:proc proc :queue queue :thread thread}))))
+
+(defn stop-writer!
+  "Shut the writer down. Sends a stop sentinel so any queued events
+  drain before stdin is closed. Idempotent."
+  []
+  (when-let [{:keys [proc queue thread]} @writer-state]
+    (try (.put queue ::stop) (catch Exception _ nil))
+    (try (.join thread 1000) (catch Exception _ nil))
+    (try (.close ^java.io.Closeable (:in proc)) (catch Exception _ nil))
+    (reset! writer-state nil)))
+
+;; --- log-event! ---
+
 (defn log-event!
-  "Fire-and-forget: spawn sqlite3 to insert an event row. Non-blocking.
+  "Insert an event row. Non-blocking.
 
   event is a map with keys:
     :hook-name, :event-type, :tool-name, :file-path, :cwd,
     :session-id, :decision, :reason, :elapsed-ms, :extra
 
-  When CCH_LOG_SYNC=1 in the environment, runs sqlite3 synchronously via
-  p/sh instead of fire-and-forget. Used by tests that need to assert on
-  rows immediately after a hook invocation."
+  Path selection:
+    - CCH_LOG_SYNC=1     → synchronous p/sh (test backdoor)
+    - writer running     → enqueue SQL onto the background writer (~µs)
+    - otherwise          → fire-and-forget per-call sqlite3 subprocess"
   [{:keys [hook-name event-type tool-name file-path cwd
            session-id decision reason elapsed-ms extra]}]
-  (let [path (db-path)
+  (let [path  (db-path)
         sync? (= "1" (System/getenv "CCH_LOG_SYNC"))
-        sql  (format
-               ;; busy_timeout lets concurrent hook runs serialize instead of
-               ;; SQLITE_BUSY-failing. PRAGMA is per-connection and each
-               ;; sqlite3 CLI call gets its own, so set it inline every time.
-               "PRAGMA busy_timeout=5000; INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
-               (sql-value session-id)
-               (sql-value hook-name)
-               (sql-value event-type)
-               (sql-value tool-name)
-               (sql-value file-path)
-               (sql-value cwd)
-               (sql-value (when decision (name decision)))
-               (sql-value reason)
-               (sql-value elapsed-ms)
-               (sql-value extra))]
+        ;; Insert SQL. PRAGMA busy_timeout matters only on the per-call
+        ;; fallback path (concurrent sqlite3 procs); the writer thread
+        ;; sets WAL once at startup and is the sole writer.
+        insert (format
+                 "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                 (sql-value session-id)
+                 (sql-value hook-name)
+                 (sql-value event-type)
+                 (sql-value tool-name)
+                 (sql-value file-path)
+                 (sql-value cwd)
+                 (sql-value (when decision (name decision)))
+                 (sql-value reason)
+                 (sql-value elapsed-ms)
+                 (sql-value extra))
+        fallback-sql (str "PRAGMA busy_timeout=5000; " insert)]
     (try
       (ensure-db-once! path)
-      (if sync?
-        (p/sh ["sqlite3" path sql])
+      (cond
+        sync?
+        (p/sh ["sqlite3" path fallback-sql])
+
+        @writer-state
+        (let [{:keys [^java.util.concurrent.BlockingQueue queue]} @writer-state]
+          (when-not (.offer queue insert)
+            (binding [*out* *err*]
+              (println "cch.log: writer queue full; dropping event"))))
+
+        :else
         ;; Discard subprocess stdio — inheriting would corrupt the hook's
         ;; JSON response on stdout that Claude Code parses.
-        (p/process ["sqlite3" path sql]
+        (p/process ["sqlite3" path fallback-sql]
                    {:out :discard :err :discard}))
       (catch Exception _e
         nil))))

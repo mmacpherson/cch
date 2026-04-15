@@ -3,7 +3,8 @@
             [cch.log :as log]
             [cheshire.core :as json]
             [babashka.fs :as fs]
-            [babashka.process :as p]))
+            [babashka.process :as p]
+            [clojure.string]))
 
 (deftest test-ensure-db
   (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-test-"}))
@@ -77,3 +78,60 @@
     (is (= "'hello'" (#'log/sql-value "hello"))))
   (testing "quotes are escaped"
     (is (= "'it''s'" (#'log/sql-value "it's")))))
+
+;; --- Background writer ---
+
+(deftest test-writer-roundtrip
+  (testing "queued events land in the DB after stop-writer! drains"
+    (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-writer-"}))
+          db      (str tmp-dir "/test.db")]
+      (try
+        (with-redefs [log/db-path (fn [] db)]
+          (log/ensure-db! db)
+          (log/start-writer!)
+          (try
+            (dotimes [i 25]
+              (log/log-event!
+                {:hook-name "writer-test"
+                 :event-type "PreToolUse"
+                 :tool-name "Edit"
+                 :file-path (str "/tmp/" i ".txt")
+                 :cwd "/tmp"
+                 :session-id "s1"
+                 :decision nil
+                 :reason nil
+                 :elapsed-ms nil
+                 :extra "{}"}))
+            (finally
+              ;; stop-writer! sends ::stop and joins the drain thread,
+              ;; so by the time it returns sqlite3 has consumed everything.
+              (log/stop-writer!)))
+          (let [n (-> (p/sh ["sqlite3" db "SELECT count(*) FROM events WHERE hook_name = 'writer-test';"])
+                      :out
+                      str
+                      clojure.string/trim
+                      Long/parseLong)]
+            (is (= 25 n) "all queued inserts must reach the DB after stop-writer!")))
+        (finally
+          (fs/delete-tree tmp-dir))))))
+
+(deftest test-writer-start-is-idempotent
+  (testing "calling start-writer! twice doesn't spawn a second writer"
+    (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-writer-idem-"}))
+          db      (str tmp-dir "/test.db")]
+      (try
+        (with-redefs [log/db-path (fn [] db)]
+          (log/ensure-db! db)
+          (let [w1 (log/start-writer!)
+                w2 (log/start-writer!)]
+            (try
+              (is (identical? w1 w2)
+                  "second start-writer! should return the existing writer-state map")
+              (finally
+                (log/stop-writer!)))))
+        (finally
+          (fs/delete-tree tmp-dir))))))
+
+(deftest test-writer-stop-is-idempotent
+  (testing "calling stop-writer! when no writer is running is a no-op"
+    (is (nil? (log/stop-writer!)))))
