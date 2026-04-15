@@ -152,6 +152,36 @@
           ;; Stop: non-cch entry untouched
           (is (= 1 (count (get-in s [:hooks :Stop])))))))))
 
+(deftest test-remove-all-cch-cleans-legacy-entries
+  (with-tmp-settings
+    (fn [tmp]
+      ;; Simulate a pre-dispatcher install: per-hook command + http entries
+      ;; sharing matcher groups with non-cch hooks.
+      (settings/write-settings!
+        tmp
+        {:hooks
+         {:PermissionRequest
+          [{:hooks [{:type "command"
+                     :command "bb -cp x -m hooks.event-log # cch:event-log"}]}]
+          :PreToolUse
+          [{:matcher "Edit|Write"
+            :hooks [{:type "command" :command "ruff format --quiet"}
+                    {:type "command"
+                     :command "bb -m hooks.scope-lock # cch:scope-lock"}
+                    {:type "http"
+                     :url "http://127.0.0.1:8888/hooks/protect-files"
+                     :timeout 5}]}]}})
+
+      (testing "recognizes both legacy command tags and legacy /hooks/ URLs"
+        (settings/remove-all-cch! tmp)
+        (let [s (settings/read-settings tmp)]
+          ;; PermissionRequest: only cch-tagged entry was present → empty
+          (is (empty? (get-in s [:hooks :PermissionRequest])))
+          ;; PreToolUse: ruff survives, both legacy cch entries removed
+          (let [hooks (get-in s [:hooks :PreToolUse])]
+            (is (= 1 (count hooks)))
+            (is (re-find #"ruff" (get-in (first hooks) [:hooks 0 :command])))))))))
+
 ;; --- URL helper ---
 
 (deftest test-dispatch-url

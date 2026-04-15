@@ -68,10 +68,22 @@
         (str/includes? url (str "/dispatch/" event "#")))))
 
 (defn- cch-owned?
-  "True if a hook map is any kind of cch-owned entry (dispatch, prompt, agent)."
+  "True if a hook map is any kind of cch-owned entry.
+  Recognizes:
+    - current dispatcher HTTP entries (URL contains '/dispatch/')
+    - current prompt/agent entries (have a :__cch tag)
+    - legacy pre-dispatcher per-hook entries, both shapes:
+        * command entries with '# cch:<name>' shell-comment tag
+        * HTTP entries whose URL contains '/hooks/<name>'
+  Legacy recognition lets `cch uninstall` clean up pre-dispatcher installs
+  so `cch install` can re-provision from a clean slate."
   [hook-map]
-  (or (and (:url hook-map) (str/includes? (:url hook-map) "/dispatch/"))
-      (some? (:__cch hook-map))))
+  (let [url (:url hook-map)
+        cmd (:command hook-map)]
+    (or (some? (:__cch hook-map))
+        (and url (str/includes? url "/dispatch/"))
+        (and url (str/includes? url "/hooks/"))
+        (and cmd (re-find #"#\s*cch:[\w.-]+" cmd)))))
 
 ;; --- Dispatch entries (per event) ---
 
