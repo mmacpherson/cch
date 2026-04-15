@@ -21,16 +21,13 @@
   fail-closed option; surfacing the error in-context is the best we can
   do to prompt the user to fix their config."
   (:require [cch.core :refer [defhook]]
-            [cch.config :as config]
-            [clojure.string :as str]
-            [babashka.process :as p]))
+            [cch.config :as config]))
 
 (defn- worktree-root
-  "Git worktree root for cwd, or nil if not in a repo."
+  "Git worktree root for cwd. Thin passthrough to the memoized
+  cch.config/worktree-root so repeated calls share a single cache."
   [cwd]
-  (let [result (p/sh ["git" "-C" (or cwd ".") "rev-parse" "--show-toplevel"])]
-    (when (zero? (:exit result))
-      (str/trim (:out result)))))
+  (config/worktree-root cwd))
 
 (defn- compile-patterns
   "Compile pattern strings to {:raw string :re Pattern} pairs.

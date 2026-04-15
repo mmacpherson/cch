@@ -12,17 +12,15 @@
             [cch.config :as config]
             [cch.protocol :as proto]
             [clojure.string :as str]
-            [babashka.process :as p]
             [babashka.fs :as fs]))
 
 (defn worktree-root
-  "Returns the git worktree root for the given cwd, or nil if not in a repo.
-  Uses git -C to query from the correct directory regardless of where
-  bb was launched from."
+  "Git worktree root for cwd, or nil if cwd isn't in a repo.
+  Thin passthrough to the memoized cch.config/worktree-root — shares
+  the cache with the dispatcher so the same cwd isn't re-shelled-out
+  per hook invocation."
   [cwd]
-  (let [result (p/sh ["git" "-C" (or cwd ".") "rev-parse" "--show-toplevel"])]
-    (when (zero? (:exit result))
-      (str/trim (:out result)))))
+  (config/worktree-root cwd))
 
 (defn- normalize-path
   "Canonicalize a path, resolving symlinks and .."

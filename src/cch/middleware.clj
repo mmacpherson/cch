@@ -3,7 +3,8 @@
 
   Each middleware wraps a handler: (fn [handler] (fn [input] result)).
   The chain is pre-composed at load time via comp for zero runtime cost."
-  (:require [cch.log :as log]
+  (:require [cch.events :as events]
+            [cch.log :as log]
             [cheshire.core :as json]))
 
 (defn wrap-timing
@@ -28,7 +29,9 @@
          :reason   (str "cch hook error: " (.getMessage e))}))))
 
 (defn wrap-logging
-  "Fire-and-forget event logging to SQLite.
+  "Fire-and-forget event logging to SQLite, plus pub/sub publish for
+  live-dashboard subscribers.
+
   Reads :cch/elapsed-ms from result metadata if present (set by wrap-timing).
   Degrades gracefully to nil elapsed time if timing middleware is absent.
 
@@ -36,23 +39,43 @@
   marker) as JSON in the `extra` column so every row carries
   event-specific fields that don't map to structured columns —
   trigger for PreCompact, reason for SessionEnd, prompt for
-  UserPromptSubmit, etc."
+  UserPromptSubmit, etc.
+
+  After logging, publishes the event to cch.events so SSE subscribers
+  (dashboard live-stream clients) can push a card into their .event-list."
   [handler]
   (fn [input]
-    (let [result (handler input)]
+    (let [result    (handler input)
+          extra     (json/generate-string (dissoc input :cch/hook-name))
+          ;; SQLite-column shape — matches cch.log/query-events output
+          ;; so the server's event-card renderer can consume either a
+          ;; freshly-logged row or a historical one without divergence.
+          pub-event {:id          nil
+                     :timestamp   (str (java.time.Instant/now))
+                     :session_id  (:session_id input)
+                     :hook_name   (or (:cch/hook-name input)
+                                      (:hook_event_name input))
+                     :event_type  (or (:hook_event_name input) "PreToolUse")
+                     :tool_name   (:tool_name input)
+                     :file_path   (or (get-in input [:tool_input :file_path])
+                                      (get-in input [:tool_params :file_path]))
+                     :cwd         (:cwd input)
+                     :decision    (some-> (:decision result) name)
+                     :reason      (:reason result)
+                     :elapsed_ms  (:cch/elapsed-ms (meta result))
+                     :extra       extra}]
       (log/log-event!
-        {:hook-name  (or (:cch/hook-name input)
-                         (:hook_event_name input))
-         :event-type (or (:hook_event_name input) "PreToolUse")
-         :tool-name  (:tool_name input)
-         :file-path  (or (get-in input [:tool_input :file_path])
-                         (get-in input [:tool_params :file_path]))
-         :cwd        (:cwd input)
-         :session-id (:session_id input)
+        {:hook-name  (:hook_name pub-event)
+         :event-type (:event_type pub-event)
+         :tool-name  (:tool_name pub-event)
+         :file-path  (:file_path pub-event)
+         :cwd        (:cwd pub-event)
+         :session-id (:session_id pub-event)
          :decision   (:decision result)
-         :reason     (:reason result)
-         :elapsed-ms (:cch/elapsed-ms (meta result))
-         :extra      (json/generate-string (dissoc input :cch/hook-name))})
+         :reason     (:reason pub-event)
+         :elapsed-ms (:elapsed_ms pub-event)
+         :extra      extra})
+      (events/publish! pub-event)
       result)))
 
 (def default-middleware

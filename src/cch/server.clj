@@ -20,6 +20,7 @@
   changes are plain GET form submits."
   (:require [cch.config :as config]
             [cch.config-db :as cdb]
+            [cch.events :as events]
             [cch.log :as log]
             [cch.protocol :as proto]
             [cheshire.core :as json]
@@ -75,16 +76,67 @@
 
 ;; --- Dashboard (server-rendered HTML via hiccup) ---
 
-(defn- worktree-root-of
-  "Infer a worktree root from a cwd. Best-effort — if the path isn't a git
-  repo or shell-out fails, returns the cwd itself."
-  [cwd]
+(defn- git-out
+  "Run a git subcommand in cwd; return trimmed stdout on exit 0, nil otherwise."
+  [cwd & args]
   (try
-    (let [result (shell/sh "git" "-C" (or cwd ".") "rev-parse" "--show-toplevel")]
-      (if (zero? (:exit result))
-        (str/trim (:out result))
-        cwd))
-    (catch Exception _ cwd)))
+    (let [result (apply shell/sh "git" "-C" (or cwd ".") args)]
+      (when (zero? (:exit result))
+        (str/trim (:out result))))
+    (catch Exception _ nil)))
+
+(defn- parse-origin-name
+  "Pull a repo name out of a remote URL.
+    git@github.com:user/repo.git → 'repo'
+    https://github.com/user/repo  → 'repo'
+  Strips a trailing .git. Returns nil if we can't find anything."
+  [url]
+  (when-not (str/blank? url)
+    (let [stripped (-> url str/trim (str/replace #"\.git/?$" "") (str/replace #"/$" ""))
+          last-seg (last (str/split stripped #"[/:]"))]
+      (when-not (str/blank? last-seg) last-seg))))
+
+(defonce ^:private git-meta-cache (atom {}))
+(def ^:private git-meta-ttl-ms 30000)
+
+(defn git-meta
+  "Resolve {:root, :repo-name, :branch, :in-repo?} for a cwd. Caches
+  for 30s so renders + streams don't re-shell-out per event, but
+  branch switches become visible without restarting the server.
+
+  :root       — worktree root path; falls back to cwd when git fails
+                (cwd moved, deleted, or never was a repo)
+  :repo-name  — origin-derived repo identity (last segment of the URL,
+                sans .git). nil when the cwd has no remote.origin.url
+                (bare checkouts, fresh inits, deleted dirs) — callers
+                fall back to a path-based label.
+  :branch     — HEAD's abbrev-ref (e.g. 'main', 'feat/x'); nil if
+                detached or not in a repo
+  :in-repo?   — true only if git rev-parse --show-toplevel succeeded;
+                lets callers distinguish 'git repo with no origin' from
+                'not in any repo at all'"
+  [cwd]
+  (let [now (System/currentTimeMillis)
+        entry (get @git-meta-cache cwd)]
+    (if (and entry (< (- now (:at entry)) git-meta-ttl-ms))
+      (:meta entry)
+      (let [toplevel (git-out cwd "rev-parse" "--show-toplevel")
+            root     (or toplevel cwd)
+            origin   (git-out cwd "config" "--get" "remote.origin.url")
+            branch   (let [b (git-out cwd "rev-parse" "--abbrev-ref" "HEAD")]
+                       (when (and b (not= "HEAD" b)) b))
+            meta     {:root      root
+                      :repo-name (parse-origin-name origin)
+                      :branch    branch
+                      :in-repo?  (some? toplevel)}]
+        (swap! git-meta-cache assoc cwd {:at now :meta meta})
+        meta))))
+
+(defn- worktree-root-of
+  "Back-compat shim — just the :root from git-meta. Used by distinct-repos
+  and the hook matrix's scope-to-cwd resolver."
+  [cwd]
+  (:root (git-meta cwd)))
 
 (defn- repo-label
   "Short human-readable label for a worktree root path. Usually the
@@ -111,27 +163,45 @@
       (str/starts-with? path "/var/folders/")))
 
 (defn- distinct-cwds
-  "All distinct cwds from the events table (not limited to recent rows).
-  Small cardinality in practice — one entry per project cch has seen."
+  "All distinct cwds from the events table. SQL DISTINCT via
+  log/distinct-cwds — avoids pulling the full events table just to
+  populate the Repo dropdown."
   []
-  (->> (log/query-events :limit 100000)
-       (keep :cwd)
-       distinct))
+  (log/distinct-cwds))
+
+(defn- repo-dropdown-label
+  "Dropdown label for a cwd: prefer origin-derived repo name. When this
+  is a linked worktree (worktree basename differs from repo-name), suffix
+  with ' · <worktree>' so linked copies stay distinguishable. Non-origin
+  repos fall back to the path-based repo-label."
+  [cwd]
+  (let [{:keys [root repo-name]} (git-meta cwd)
+        wt-name (last (remove str/blank? (str/split (or root "") #"/")))]
+    (cond
+      (not repo-name)             (repo-label root)
+      (= repo-name wt-name)       repo-name
+      :else                       (str repo-name " · " wt-name))))
 
 (defn- distinct-repos
   "Distinct cwds from events → worktree roots → filtered → [value label] pairs.
-  Label is the basename (or last-two-segments for worktree layouts)."
+  Value is the worktree root (used by the cwd-prefix filter). Drops
+  ephemeral tmp paths AND paths that aren't inside any git repo so the
+  Repo dropdown only lists actual repos."
   []
-  (let [roots (->> (distinct-cwds)
+  (let [cwds  (distinct-cwds)
+        roots (->> cwds
+                   (filter #(:in-repo? (git-meta %)))
                    (map worktree-root-of)
                    (remove ephemeral-path?)
                    (into (sorted-set)))]
-    (map (fn [r] [r (repo-label r)]) roots)))
+    (map (fn [r] [r (repo-dropdown-label r)]) roots)))
 
 (defn- select-with-options
-  "Render a <select> from [[value label] ...] pairs, marking `current` selected."
+  "Render a <select> from [[value label] ...] pairs, marking `current`
+  selected. Auto-submits its parent form on change so filter changes
+  apply immediately — no Apply button needed."
   [name current options]
-  [:select {:name name}
+  [:select {:name name :onchange "this.form.submit()"}
    (for [[v label] options]
      [:option (cond-> {:value v}
                 (= v current) (assoc :selected "selected"))
@@ -148,13 +218,27 @@
    "command-audit" {:color   "#059669"
                     :tooltip "Bash audit log — records every command; flags configured patterns"}})
 
+(def ^:private nav-hook-svg
+  "Inline version of the favicon glyph, sized for the nav brand. Uses
+  currentColor so CSS in .nav-icon controls its color."
+  [:svg {:xmlns "http://www.w3.org/2000/svg"
+         :width 22 :height 22 :viewBox "0 0 24 24"
+         :fill "none" :stroke "currentColor" :stroke-width 2
+         :stroke-linecap "round" :stroke-linejoin "round"
+         :aria-hidden "true"}
+   [:path {:d "m17.586 11.414-5.93 5.93a1 1 0 0 1-8-8l3.137-3.137a.707.707 0 0 1 1.207.5V10"}]
+   [:path {:d "M20.414 8.586 22 7"}]
+   [:circle {:cx 19 :cy 10 :r 2}]])
+
 (defn- nav-bar
   "Primary nav at the top of every page. `active` is :events or :hooks —
   that tab renders as a non-link active label; the other renders as an
   ordinary link."
   [active]
   [:div.nav-wrap
-   [:h1.nav-brand "cch"]
+   [:div.nav-title
+    [:span.nav-icon nav-hook-svg]
+    [:h1.nav-brand "cch"]]
    [:div.tabs
     [:ul
      [:li {:class (when (= active :events) "is-active")}
@@ -190,7 +274,27 @@
                      file_path cwd decision reason elapsed_ms extra]}]
   (let [observation? (and (= hook_name "event-log") (nil? decision))
         short-ts     (apply str (take 19 (or timestamp "")))
-        short-reason (if reason (apply str (take 80 reason)) "")]
+        {:keys [root repo-name branch in-repo?]} (when cwd (git-meta cwd))
+        ;; Prefer origin-derived name + branch. If origin isn't set (bare
+        ;; checkout or fresh init), use the path-based repo-label (which
+        ;; handles `foo-worktrees/bar` layouts). Outside any repo, mark
+        ;; the row as "(no repo)" rather than pretending.
+        repo-display (cond
+                       (and repo-name branch)  (str repo-name " · " branch)
+                       repo-name               repo-name
+                       (and in-repo? root)     (repo-label root)
+                       cwd                     "(no repo)"
+                       :else                   "—")
+        ;; Trailing context cell: prefer the hook's reason (when a
+        ;; decision fired), else the basename of the file being
+        ;; touched, else nothing. Full values live in the expanded
+        ;; detail so the summary stays skimmable.
+        file-basename (when-not (str/blank? file_path)
+                        (last (remove str/blank? (str/split file_path #"/"))))
+        context      (cond
+                       (not (str/blank? reason)) (apply str (take 100 reason))
+                       file-basename             file-basename
+                       :else                     "")]
     [:article.event {:class (if observation? "observed" "acted")}
      [:details (when open-all? {:open "open"})
       ;; summary is itself the CSS grid. The chevron is a real span (not
@@ -198,12 +302,11 @@
       [:summary
        [:span.chev "▸"]
        [:span.ts short-ts]
+       [:span.repo {:title cwd} repo-display]
        (badge hook_name)
        [:span.evt event_type]
        [:span.tool (dash tool_name)]
-       [:span.dec (dash decision)]
-       [:span.file (dash file_path)]
-       [:span.reason short-reason]]
+       [:span.ctx {:title file_path} context]]
       [:div.detail
        [:dl
         [:dt "id"]         [:dd id]
@@ -248,27 +351,19 @@
     (or (events-for-hook current-hook) [])))
 
 (defn- distinct-sessions
-  "Return up to the 30 most-recently-active session IDs as [[id label]...]
-  pairs, optionally scoped to a cwd prefix. Cascades from the Repo
-  filter: if a repo is selected, Session only shows that repo's
-  sessions. Label is 'YYYY-MM-DDTHH:MM · <uuid-prefix>…'."
+  "Return up to 30 most-recently-active session IDs as [[id label]...]
+  pairs, optionally scoped to a cwd prefix. SQL does the GROUP BY +
+  ORDER BY so we receive only ~30 rows rather than 2000. Label is
+  'YYYY-MM-DDTHH:MM · <uuid-prefix>…'."
   [cwd-prefix]
-  (let [events (log/query-events :limit 2000
-                                 :cwd-prefix (when-not (str/blank? cwd-prefix)
-                                               cwd-prefix))
-        uniq   (second
-                 (reduce (fn [[seen out] {:keys [session_id timestamp]}]
-                           (if (or (nil? session_id) (contains? seen session_id))
-                             [seen out]
-                             [(conj seen session_id)
-                              (conj out [session_id timestamp])]))
-                         [#{} []]
-                         events))]
-    (map (fn [[sid ts]]
-           [sid (format "%s · %s…"
-                        (apply str (take 16 (or ts "")))
-                        (apply str (take 8 sid)))])
-         (take 30 uniq))))
+  (->> (log/recent-sessions :limit 30
+                            :cwd-prefix (when-not (str/blank? cwd-prefix)
+                                          cwd-prefix))
+       (map (fn [{:keys [session_id timestamp]}]
+              [session_id
+               (format "%s · %s…"
+                       (apply str (take 16 (or timestamp "")))
+                       (apply str (take 8 session_id)))]))))
 
 (defn- select-field
   "One Bulma .field column wrapping a labeled <select>."
@@ -309,18 +404,13 @@
    [:div.columns
     (select-field "Session" "session" (:session q "")
                   (cons ["" "all"] (distinct-sessions (:cwd-prefix q))))
+    ;; Text/number inputs still need an explicit trigger — submit on Enter.
     (input-field  "Since (SQLite ts)"
                   {:type "text" :name "since" :value (:since q "")
                    :placeholder "2026-04-13"})
     (input-field  "Limit"
                   {:type "number" :name "limit" :value (:limit q "50")
-                   :min "1" :max "500"})
-    [:div.column
-     [:div.field
-      [:label.label.is-small (hic/raw "&nbsp;")]
-      [:div.control
-       [:button.button.is-small.is-primary
-        {:type "submit"} "Apply"]]]]]])
+                   :min "1" :max "500"})]])
 
 (def dashboard-css
   ":root {
@@ -358,9 +448,13 @@
    h1, h2, h3, h4, h5, h6, th { font-family: var(--bulma-family-primary); font-weight: 600; letter-spacing: -0.01em; }
    h1 { margin-bottom: 0.2em; letter-spacing: -0.02em; }
 
-   /* Top nav: product name on the left, tabs on the right. Tabs component
-      from Bulma handles active-state styling; we only need layout. */
-   .nav-wrap { display: flex; align-items: baseline; gap: 1.5em; margin-bottom: 0.6em; }
+   /* Top nav: hook glyph + product name on the left, tabs on the right.
+      Tabs component from Bulma handles active-state styling; we only
+      need layout. */
+   .nav-wrap { display: flex; align-items: center; gap: 1.5em; margin-bottom: 0.6em; }
+   .nav-title { display: flex; align-items: center; gap: 0.45em; }
+   .nav-icon { color: #059669; display: inline-flex; align-items: center; }
+   .nav-icon svg { display: block; }
    .nav-brand { font-size: 1.4em; font-weight: 700; letter-spacing: -0.02em; color: var(--bulma-text-strong); margin: 0; }
    .nav-wrap .tabs { margin-bottom: 0 !important; flex: 1; }
    .nav-wrap .tabs ul { border-bottom: none; }
@@ -374,7 +468,7 @@
 
    .event-list details summary {
      display: grid;
-     grid-template-columns: 1em 11em 7em 10em 6em 5em minmax(10em, 1fr) minmax(8em, 2fr);
+     grid-template-columns: 1em 11em 20em 7em 10em 6em minmax(10em, 1fr);
      gap: 0.7em;
      align-items: center;
      cursor: pointer;
@@ -399,10 +493,10 @@
 
    .event-list details summary > *:not(.tag) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
    .event-list details summary .tag { overflow: visible; }
-   .event-list details summary .ts { font-family: var(--bulma-family-code); color: var(--bulma-text-weak); font-size: 0.85em; }
+   .event-list details summary .ts { font-family: var(--bulma-family-code); color: var(--bulma-text-weak); }
+   .event-list details summary .repo { color: var(--bulma-text-weak); cursor: help; }
    .event-list details summary .evt { font-weight: 500; }
-   .event-list details summary .file { font-family: var(--bulma-family-code); font-size: 0.85em; color: var(--bulma-text-weak); }
-   .event-list details summary .reason { color: var(--bulma-text-weak); font-size: 0.85em; font-style: italic; }
+   .event-list details summary .ctx { color: var(--bulma-text-weak); font-style: italic; cursor: help; }
 
    .event-list .detail { padding: 0.8em 1.2em 1em 2em; background: var(--bulma-background); border-radius: 0 0 4px 4px; font-size: 0.9em; }
    .event-list .detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.3em 1em; margin: 0 0 1em 0; }
@@ -455,12 +549,15 @@
              ;; has opened and jumps the scroll position. Manual refresh
              ;; (Cmd+R, or the link in the meta area) until we have
              ;; something smarter like SSE-patched partial reloads.
+             [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
              [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
              [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
              [:link {:rel "stylesheet"
                      :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
              [:link {:rel "stylesheet"
                      :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
+             [:script {:type "module"
+                       :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}]
              [:style (hic/raw dashboard-css)]]
             [:body
              [:section.section
@@ -480,6 +577,7 @@
                 " · "
                 [:a {:href "/"} "clear filters"]]
                [:div.event-list
+                {:data-on-load "@get('/events/stream')"}
                 (for [e events] (event-card open-all? e))]]]]]))))
 
 ;; --- Handlers ---
@@ -578,6 +676,94 @@
            {:status "ok"
             :hooks (mapv (fn [[n h]] {:name n :ns (:ns h) :description (:description h)})
                          (sort-by first hooks))})})
+
+;; --- Favicon ---
+
+(def ^:private favicon-svg
+  "Lucide 'fishing-hook' glyph, stroke fixed to the same emerald we use
+  for enabled toggles so it reads on both light and dark tab bars."
+  (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" "
+       "viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#059669\" stroke-width=\"2\" "
+       "stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+       "<path d=\"m17.586 11.414-5.93 5.93a1 1 0 0 1-8-8l3.137-3.137a.707.707 0 0 1 1.207.5V10\"/>"
+       "<path d=\"M20.414 8.586 22 7\"/>"
+       "<circle cx=\"19\" cy=\"10\" r=\"2\"/>"
+       "</svg>"))
+
+(defn- handle-favicon [_req]
+  {:status  200
+   :headers {"Content-Type"  "image/svg+xml"
+             "Cache-Control" "public, max-age=86400"}
+   :body    favicon-svg})
+
+;; --- Live event stream (Datastar + SSE) ---
+
+(defn- event-fragment-frame
+  "Format one event as a Datastar patch-elements SSE frame (v1 protocol).
+  Selector is '.event-list'; mode 'prepend' inserts the new card at the
+  top while leaving existing cards (and any open <details>) untouched.
+
+  SSE field values cannot contain raw newlines (\\n terminates a field
+  per spec), so we substitute HTML numeric-entity &#10; for every
+  newline in the rendered fragment. Inside <pre> blocks the browser
+  still renders those entities as real line breaks — pretty-printed
+  JSON payloads look right in the expanded detail view."
+  [event]
+  (let [html (str/replace (str (hic/html (event-card false event)))
+                          "\n" "&#10;")]
+    (str "event: datastar-patch-elements\n"
+         "data: selector .event-list\n"
+         "data: mode prepend\n"
+         "data: elements " html "\n"
+         "\n")))
+
+(def ^:private sse-heartbeat-ms
+  "Interval between keep-alive comment frames so proxies / browsers
+  don't close idle SSE connections."
+  15000)
+
+(defn- handle-event-stream
+  "GET /events/stream — opens a long-lived SSE connection. Each new
+  hook invocation (via events/publish! from wrap-logging) is sent as
+  a Datastar merge-fragments frame that prepends a card to .event-list."
+  [req]
+  (let [unsub-ref (atom nil)
+        heartbeat (atom nil)]
+    (httpkit/as-channel
+      req
+      {:on-open
+       (fn [ch]
+         ;; First send establishes the response + SSE headers. No body
+         ;; yet — some SSE clients (notably Datastar) don't like a
+         ;; comment-only preamble before the first real event.
+         (httpkit/send! ch
+                        {:status  200
+                         :headers {"Content-Type"      "text/event-stream"
+                                   "Cache-Control"     "no-cache"
+                                   "X-Accel-Buffering" "no"}}
+                        false)
+         ;; Subscribe: each published event becomes an SSE frame.
+         (reset! unsub-ref
+                 (events/subscribe!
+                   (fn [event]
+                     (try
+                       (httpkit/send! ch (event-fragment-frame event) false)
+                       (catch Exception _ nil)))))
+         ;; Heartbeat: an SSE comment every 15s so middle boxes don't
+         ;; reap us as idle. httpkit sends are no-op on closed channels.
+         (reset! heartbeat
+                 (future
+                   (try
+                     (loop []
+                       (Thread/sleep sse-heartbeat-ms)
+                       (when (httpkit/send! ch ": heartbeat\n\n" false)
+                         (recur)))
+                     (catch InterruptedException _ nil)))))
+       :on-close
+       (fn [_ _]
+         (when-let [u @unsub-ref] (u))
+         (when-let [hb @heartbeat] (future-cancel hb)))})))
 
 ;; --- Config CRUD (JSON API) ---
 
@@ -786,6 +972,7 @@
              [:meta {:charset "utf-8"}]
              [:title "cch · hooks"]
              [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
+             [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
              [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
              [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
              [:link {:rel "stylesheet"
@@ -888,6 +1075,13 @@
       (and (= request-method :get) (= uri "/health"))
       (handle-health hooks)
 
+      (and (= request-method :get)
+           (contains? #{"/favicon.svg" "/favicon.ico"} uri))
+      (handle-favicon req)
+
+      (and (= request-method :get) (= uri "/events/stream"))
+      (handle-event-stream req)
+
       (and (= request-method :get) (= uri "/api/config"))
       (handle-config-list req)
 
@@ -917,8 +1111,13 @@
 ;; --- Lifecycle ---
 
 (defn start!
-  "Start the httpkit server. Returns a stop-fn that gracefully shuts it down."
-  [{:keys [port host] :or {port 8888 host "127.0.0.1"}}]
+  "Start the httpkit server. Returns a stop-fn that gracefully shuts it down.
+
+  Default host '::' binds all interfaces dual-stack on Linux/macOS so
+  both `localhost` (often resolves to IPv6 ::1 first) and 127.0.0.1
+  work without the browser eating a connection-refused retry loop.
+  Pass --host 127.0.0.1 via start args to restrict to IPv4 loopback."
+  [{:keys [port host] :or {port 8888 host "::"}}]
   (registry/validate-registry!)
   (let [hooks     (build-registry)
         event-idx (build-event-index hooks)
@@ -937,7 +1136,7 @@
   "Foreground server with graceful shutdown."
   [& args]
   (let [port  (or (some->> args (drop-while #(not= "--port" %)) second Long/parseLong) 8888)
-        host  (or (some->> args (drop-while #(not= "--host" %)) second) "127.0.0.1")
+        host  (or (some->> args (drop-while #(not= "--host" %)) second) "::")
         {:keys [stop]} (start! {:port port :host host})
         latch (promise)]
     (.addShutdownHook (Runtime/getRuntime)

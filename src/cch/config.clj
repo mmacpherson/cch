@@ -102,15 +102,23 @@
 
 ;; --- Effective config (nkp dispatcher) ---
 
-(defn worktree-root
-  "Git worktree root for cwd, or cwd itself if not in a repo.
-  Reused from hook-level helpers; centralized here since the dispatcher
-  needs it to locate repo-scoped config (YAML + DB rows)."
-  [cwd]
-  (let [result (p/sh ["git" "-C" (or cwd ".") "rev-parse" "--show-toplevel"])]
-    (if (zero? (:exit result))
-      (str/trim (:out result))
-      (or cwd "."))))
+(def worktree-root
+  "Git worktree root for cwd, or nil if cwd is not inside a git repo.
+
+  Memoized: worktree roots are stable for the lifetime of a directory,
+  and the dispatcher hot path calls this on the SAME cwd repeatedly
+  (once per load-effective-config, plus each hook that walks up from
+  the same cwd). A single `git rev-parse` costs ~5ms; caching eliminates
+  the repeat cost and makes per-dispatch latency closer to the SQLite
+  write floor.
+
+  Callers that want a fallback to cwd when not in a repo should spell
+  it explicitly, e.g. `(or (worktree-root cwd) cwd)`."
+  (memoize
+    (fn [cwd]
+      (let [result (p/sh ["git" "-C" (or cwd ".") "rev-parse" "--show-toplevel"])]
+        (when (zero? (:exit result))
+          (str/trim (:out result)))))))
 
 (defn- default-entry [_hook-name]
   {:enabled? true :options nil :source :default})
@@ -169,7 +177,7 @@
   tracked in scope-lock (fail closed at the hook level) while leaving
   the policy choice explicit at the dispatcher layer."
   [cwd]
-  (let [root       (worktree-root cwd)
+  (let [root       (or (worktree-root cwd) cwd)
         yaml-path  (find-config-up (or cwd root) ".cch-config.yaml" root)
         [yaml err] (try
                      [(load-yaml yaml-path) nil]

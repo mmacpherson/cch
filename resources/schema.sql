@@ -17,6 +17,8 @@ CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_hook      ON events(hook_name);
 CREATE INDEX IF NOT EXISTS idx_events_decision  ON events(decision);
+CREATE INDEX IF NOT EXISTS idx_events_cwd       ON events(cwd);
+CREATE INDEX IF NOT EXISTS idx_events_event     ON events(event_type);
 
 -- Per-hook configuration: which hooks are enabled at which scope, plus
 -- a free-form JSON options blob. scope is either the literal 'global'

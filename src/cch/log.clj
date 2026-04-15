@@ -103,6 +103,43 @@
       (catch Exception _e
         nil))))
 
+(defn- sqlite-json
+  "Run `sql` against the events DB via `sqlite3 -json`. Returns parsed
+  keyword-keyed maps on success, nil when the query produces no rows."
+  [sql]
+  (let [path   (db-path)
+        result (p/sh ["sqlite3" "-json" path sql])]
+    (when (zero? (:exit result))
+      (let [out (str/trim (:out result))]
+        (when-not (str/blank? out)
+          (json/parse-string out true))))))
+
+(defn distinct-cwds
+  "All distinct cwd values in the events table, in arbitrary order.
+  Done as a SQL DISTINCT — avoids pulling the full table into memory
+  for the dashboard's Repo dropdown. Returns a seq of strings."
+  []
+  (->> (sqlite-json "SELECT DISTINCT cwd FROM events WHERE cwd IS NOT NULL;")
+       (keep :cwd)))
+
+(defn recent-sessions
+  "Return up to `limit` most-recently-active session IDs as
+  [{:session_id :timestamp} ...] pairs, optionally filtered to
+  sessions whose events landed under `cwd-prefix`. Server-side
+  grouping + sort, no post-filtering in Clojure."
+  [& {:keys [limit cwd-prefix] :or {limit 30}}]
+  (let [where (if (str/blank? cwd-prefix)
+                ""
+                (str " WHERE cwd LIKE '" (escape-sql cwd-prefix) "%'"))
+        sql   (str "SELECT session_id, max(timestamp) AS timestamp "
+                   "FROM events"
+                   where
+                   " GROUP BY session_id "
+                   "ORDER BY timestamp DESC "
+                   "LIMIT " (int limit) ";")]
+    (->> (sqlite-json sql)
+         (filter :session_id))))
+
 (defn query-events
   "Query recent events. Returns a seq of maps.
   opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix"

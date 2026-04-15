@@ -8,6 +8,7 @@
             [babashka.http-client :as http]
             [babashka.process :as p]
             [cch.config-db :as cdb]
+            [cch.events :as cch-events]
             [cch.log :as log]
             [cch.server :as server]
             [cheshire.core :as json]
@@ -272,6 +273,62 @@
     (cdb/upsert! {:hook-name "protect-files" :scope cdb/global-scope :enabled true})))
 
 ;; --- Dashboard renders ---
+
+;; --- Live event stream (Datastar + SSE) ---
+
+(deftest test-event-stream-sse-headers
+  (testing "GET /events/stream returns text/event-stream and keeps the conn open"
+    (let [conn   (java.net.Socket. "127.0.0.1" (int *port*))
+          out    (.getOutputStream conn)
+          in     (.getInputStream conn)
+          req    (str "GET /events/stream HTTP/1.1\r\n"
+                      "Host: 127.0.0.1\r\n"
+                      "Connection: keep-alive\r\n\r\n")]
+      (try
+        (.write out (.getBytes req "UTF-8"))
+        (.flush out)
+        ;; Read a bit of the response and look for SSE content-type.
+        (Thread/sleep 200)
+        (let [buf     (byte-array 4096)
+              n       (.read in buf)
+              header  (String. buf 0 n "UTF-8")]
+          (is (re-find #"200 OK" header))
+          (is (re-find #"(?i)content-type:\s*text/event-stream" header)))
+        (finally
+          (.close conn))))))
+
+(deftest test-event-stream-receives-published-fragment
+  (testing "publishing an event reaches the SSE subscriber as a datastar frame"
+    (let [conn (java.net.Socket. "127.0.0.1" (int *port*))
+          out  (.getOutputStream conn)
+          in   (.getInputStream conn)
+          req  (str "GET /events/stream HTTP/1.1\r\n"
+                    "Host: 127.0.0.1\r\n"
+                    "Connection: keep-alive\r\n\r\n")]
+      (try
+        (.write out (.getBytes req "UTF-8"))
+        (.flush out)
+        (Thread/sleep 150)
+        ;; Drain the headers
+        (let [buf (byte-array 4096)]
+          (.read in buf))
+        ;; Publish an event; the subscriber should receive a Datastar
+        ;; merge-fragments frame for .event-list.
+        (cch-events/publish!
+          {:id 123 :timestamp "2026-04-14T00:00:00"
+           :hook_name "scope-lock" :event_type "PreToolUse"
+           :tool_name "Edit" :file_path "/tmp/x"
+           :decision "allow" :reason "ok"})
+        (Thread/sleep 150)
+        (let [buf  (byte-array 8192)
+              n    (.read in buf)
+              body (String. buf 0 n "UTF-8")]
+          (is (re-find #"event: datastar-patch-elements" body))
+          (is (re-find #"data: selector \.event-list" body))
+          (is (re-find #"data: mode prepend" body))
+          (is (re-find #"scope-lock" body)))
+        (finally
+          (.close conn))))))
 
 (deftest test-dashboard-renders
   (let [resp (http/get (url "/"))]
