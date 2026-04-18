@@ -78,6 +78,7 @@ cch log --limit=50               # More results
 |------|-------|---------|-------------|
 | `scope-lock` | PreToolUse | Edit\|Write | Enforce file edit scope per git worktree |
 | `command-audit` | PostToolUse | Bash | Log every Bash command; flag configured regex patterns as advisory context |
+| `push-gate` | PreToolUse | Bash | Run configured lint/test gates before `git push`; deny if any fail |
 | `event-log` | *(24 events)* | *(all)* | Universal observer — logs every Claude Code event to SQLite |
 
 Planned (not yet implemented): `protect-files`, `format-on-save`, `slow-confirm`.
@@ -235,6 +236,19 @@ hooks:
       - src/
       - .claude/
 ```
+
+### Example: push-gate
+
+```yaml
+# .cch-config.yaml
+hooks:
+  push-gate:
+    gates:
+      - just lint-all
+      - just test
+```
+
+Before Claude runs `git push`, cch runs each gate from the worktree root in order. A non-zero exit denies the push and surfaces the tail of the failing gate's output as the denial reason. No gates configured → pass-through. Only gates Claude-initiated pushes; you pushing from your own terminal is unaffected.
 
 ## Architecture
 

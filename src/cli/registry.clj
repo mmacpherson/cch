@@ -50,6 +50,13 @@
                     :event       "PostToolUse"
                     :matcher     "Bash"
                     :description "Logs Bash commands; flags configured regex patterns"}
+   "push-gate"     {:type           :code
+                    :ns             "hooks.push-gate"
+                    :event          "PreToolUse"
+                    :matcher        "Bash"
+                    :timeout        600
+                    :status-message "running push gates"
+                    :description    "Runs configured lint/test gates before `git push`"}
    "event-log"     {:type        :code
                     :ns          "hooks.event-log"
                     :events      [;; Tool events: matcher ".*" matches every tool.

@@ -1,0 +1,5 @@
+hooks:
+  push-gate:
+    gates:
+      - just lint-all
+      - just test
