@@ -59,8 +59,9 @@
                     :description    "Runs configured lint/test gates before `git push`"}
    "context-governor" {:type        :code
                     :ns          "hooks.context-governor"
-                    :events      [{:event "PreCompact"  :matcher nil}]
-                    :description "Injects repo-aware compaction preservation instructions"}
+                    :events      [{:event "PreCompact"        :matcher nil}
+                                  {:event "UserPromptSubmit"  :matcher nil}]
+                    :description "Budget-aware compaction governor with repo-specific preservation"}
    "event-log"     {:type        :code
                     :ns          "hooks.event-log"
                     :events      [;; Tool events: matcher ".*" matches every tool.

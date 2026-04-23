@@ -34,3 +34,18 @@ CREATE TABLE IF NOT EXISTS hook_config (
 );
 
 CREATE INDEX IF NOT EXISTS idx_hook_config_scope ON hook_config(scope);
+
+-- Per-turn context window snapshots fed by the statusLine command.
+-- The context-governor hook queries the latest row per session to
+-- decide whether to inject a "please compact" advisory.
+CREATE TABLE IF NOT EXISTS context_snapshots (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+  session_id     TEXT NOT NULL,
+  used_pct       REAL,
+  current_tokens INTEGER,
+  window_size    INTEGER,
+  model_id       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ctx_session ON context_snapshots(session_id);

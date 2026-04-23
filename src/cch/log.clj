@@ -32,14 +32,15 @@
        "/cch/events.db"))
 
 (defn ensure-db!
-  "Create the database and schema if they don't exist."
+  "Create the database directory if needed and apply the schema.
+  All CREATE statements use IF NOT EXISTS so this is idempotent —
+  safe to run on every startup even when the DB already exists."
   [path]
   (let [dir (fs/parent path)]
     (when-not (fs/exists? dir)
       (fs/create-dirs dir))
-    (when-not (fs/exists? path)
-      (let [schema (slurp (io/resource "schema.sql"))]
-        (p/sh ["sqlite3" path schema])))))
+    (let [schema (slurp (io/resource "schema.sql"))]
+      (p/sh ["sqlite3" path schema]))))
 
 (def ^:private ensured-paths
   "Set of DB paths we've already run ensure-db! against in this process.
@@ -232,3 +233,35 @@
       (let [out (str/trim (:out result))]
         (when-not (str/blank? out)
           (json/parse-string out true))))))
+
+;; --- Context snapshots ---
+
+(defn log-context-snapshot!
+  "Insert a context window snapshot. Non-blocking, same write-path as log-event!."
+  [{:keys [session-id used-pct current-tokens window-size model-id]}]
+  (let [path   (db-path)
+        insert (format
+                 "INSERT INTO context_snapshots (session_id, used_pct, current_tokens, window_size, model_id) VALUES (%s,%s,%s,%s,%s);"
+                 (sql-value session-id)
+                 (if used-pct (str used-pct) "NULL")
+                 (if current-tokens (str (long current-tokens)) "NULL")
+                 (if window-size (str (long window-size)) "NULL")
+                 (sql-value model-id))
+        fallback-sql (str "PRAGMA busy_timeout=5000; " insert)]
+    (try
+      (ensure-db-once! path)
+      (if-let [{:keys [^java.util.concurrent.BlockingQueue queue]} @writer-state]
+        (when-not (.offer queue insert)
+          (binding [*out* *err*]
+            (println "cch.log: writer queue full; dropping context snapshot")))
+        (p/process ["sqlite3" path fallback-sql]
+                   {:out :discard :err :discard}))
+      (catch Exception _ nil))))
+
+(defn latest-context-snapshot
+  "Most recent context snapshot for a session. Returns a map or nil."
+  [session-id]
+  (first
+    (sqlite-json
+      (format "SELECT used_pct, current_tokens, window_size, model_id, timestamp FROM context_snapshots WHERE session_id = '%s' ORDER BY id DESC LIMIT 1;"
+              (escape-sql session-id)))))

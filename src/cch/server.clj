@@ -853,6 +853,23 @@
        :headers {"Content-Type" "application/json"}
        :body    (json/generate-string {:error (.getMessage e)})})))
 
+(defn- handle-context-snapshot
+  "POST /context-snapshot — store a context window snapshot from the status line."
+  [req]
+  (try
+    (let [body (parse-body req)]
+      (log/log-context-snapshot!
+        {:session-id     (:session_id body)
+         :used-pct       (:used_pct body)
+         :current-tokens (:current_tokens body)
+         :window-size    (:window_size body)
+         :model-id       (:model_id body)})
+      {:status 204 :headers {} :body ""})
+    (catch Exception e
+      {:status 500
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string {:error (.getMessage e)})})))
+
 (defn- handle-config-delete
   "DELETE /api/config?hook=X&scope=Y — remove a row."
   [req]
@@ -1109,6 +1126,9 @@
 
       (and (= request-method :post) (= uri "/hooks/toggle"))
       (handle-hooks-toggle req)
+
+      (and (= request-method :post) (= uri "/context-snapshot"))
+      (handle-context-snapshot req)
 
       (and (= request-method :get) (= uri "/debug"))
       {:status 200

@@ -1,13 +1,19 @@
 (ns hooks.context-governor
-  "PreCompact hook that injects repo-aware compaction instructions.
+  "Context budget governor with two responsibilities:
 
-  Reads .claude/compact-instructions.md from the project root (if present)
-  and returns it as customInstructions so the compaction preserves what
-  matters for that specific repo. Falls back to a sensible generic default."
+  1. PreCompact — injects repo-aware compaction preservation instructions
+     from .claude/compact-instructions.md (or a generic default).
+
+  2. UserPromptSubmit — checks the latest context snapshot (written by
+     the statusLine command via /context-snapshot) and injects an
+     advisory telling Claude to compact when usage exceeds a threshold."
   (:require [cch.core :refer [defhook]]
             [cch.config :as config]
+            [cch.log :as log]
             [babashka.fs :as fs]
             [clojure.string :as str]))
+
+(def ^:private default-compact-threshold-pct 80)
 
 (def ^:private default-instructions
   "Preserve in order of priority:
@@ -33,11 +39,36 @@ Drop aggressively:
       (when (fs/exists? path)
         (str/trim (slurp path))))))
 
-(defhook context-governor
-  "Inject repo-aware compaction preservation instructions."
-  {}
+(defn- compact-threshold
+  "Read the threshold from .cch-config.yaml, or use the default."
+  [cwd]
+  (let [root (config/worktree-root cwd)
+        cfg-path (when root (config/find-config-up (or cwd root) ".cch-config.yaml" root))
+        cfg (try (config/load-yaml cfg-path) (catch Exception _ nil))]
+    (or (get-in cfg [:hooks :context-governor :compact-threshold-pct])
+        default-compact-threshold-pct)))
+
+(defn- handle-pre-compact
   [input]
   (let [cwd          (:cwd input)
         repo-instructions (find-compact-instructions cwd)
         instructions (or repo-instructions default-instructions)]
     {:hook-specific-output {:customInstructions instructions}}))
+
+(defn- handle-user-prompt-submit
+  [input]
+  (let [session-id (:session_id input)
+        snapshot   (when session-id (log/latest-context-snapshot session-id))]
+    (when-let [pct (:used_pct snapshot)]
+      (let [threshold (compact-threshold (:cwd input))]
+        (when (> pct threshold)
+          {:context (format "CONTEXT BUDGET WARNING: Context usage is at %.0f%% (threshold: %d%%). Please run /compact before continuing to avoid excessive token consumption." pct threshold)})))))
+
+(defhook context-governor
+  "Budget-aware compaction governor with repo-specific preservation."
+  {}
+  [input]
+  (case (:hook_event_name input)
+    "PreCompact"       (handle-pre-compact input)
+    "UserPromptSubmit" (handle-user-prompt-submit input)
+    nil))
