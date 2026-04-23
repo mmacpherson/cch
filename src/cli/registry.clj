@@ -50,6 +50,11 @@
                     :event       "PostToolUse"
                     :matcher     "Bash"
                     :description "Logs Bash commands; flags configured regex patterns"}
+   "command-guard" {:type        :code
+                    :ns          "hooks.command-guard"
+                    :event       "PreToolUse"
+                    :matcher     "Bash"
+                    :description "Hard-denies destructive commands (rm -rf, fork bombs, curl|sh)"}
    "push-gate"     {:type           :code
                     :ns             "hooks.push-gate"
                     :event          "PreToolUse"
