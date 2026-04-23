@@ -238,15 +238,16 @@
 
 (defn log-context-snapshot!
   "Insert a context window snapshot. Non-blocking, same write-path as log-event!."
-  [{:keys [session-id used-pct current-tokens window-size model-id]}]
+  [{:keys [session-id used-pct current-tokens window-size model-id payload]}]
   (let [path   (db-path)
         insert (format
-                 "INSERT INTO context_snapshots (session_id, used_pct, current_tokens, window_size, model_id) VALUES (%s,%s,%s,%s,%s);"
+                 "INSERT INTO context_snapshots (session_id, used_pct, current_tokens, window_size, model_id, payload) VALUES (%s,%s,%s,%s,%s,%s);"
                  (sql-value session-id)
                  (if used-pct (str used-pct) "NULL")
                  (if current-tokens (str (long current-tokens)) "NULL")
                  (if window-size (str (long window-size)) "NULL")
-                 (sql-value model-id))
+                 (sql-value model-id)
+                 (sql-value payload))
         fallback-sql (str "PRAGMA busy_timeout=5000; " insert)]
     (try
       (ensure-db-once! path)

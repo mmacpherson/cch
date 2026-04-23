@@ -854,16 +854,21 @@
        :body    (json/generate-string {:error (.getMessage e)})})))
 
 (defn- handle-context-snapshot
-  "POST /context-snapshot — store a context window snapshot from the status line."
+  "POST /context-snapshot — store a context window snapshot from the status line.
+  Accepts the full statusLine JSON payload; extracts indexed columns and
+  stores the entire payload as a JSON blob."
   [req]
   (try
-    (let [body (parse-body req)]
+    (let [body-str (slurp (:body req))
+          body     (json/parse-string body-str true)
+          ctx      (:context_window body)]
       (log/log-context-snapshot!
         {:session-id     (:session_id body)
-         :used-pct       (:used_pct body)
-         :current-tokens (:current_tokens body)
-         :window-size    (:window_size body)
-         :model-id       (:model_id body)})
+         :used-pct       (:used_percentage ctx)
+         :current-tokens (:current_usage ctx)
+         :window-size    (:context_window_size ctx)
+         :model-id       (get-in body [:model :id])
+         :payload        body-str})
       {:status 204 :headers {} :body ""})
     (catch Exception e
       {:status 500

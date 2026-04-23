@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
   used_pct       REAL,
   current_tokens INTEGER,
   window_size    INTEGER,
-  model_id       TEXT
+  model_id       TEXT,
+  payload        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_ctx_session ON context_snapshots(session_id);
