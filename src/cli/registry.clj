@@ -57,6 +57,10 @@
                     :timeout        600
                     :status-message "running push gates"
                     :description    "Runs configured lint/test gates before `git push`"}
+   "context-governor" {:type        :code
+                    :ns          "hooks.context-governor"
+                    :events      [{:event "PreCompact"  :matcher nil}]
+                    :description "Injects repo-aware compaction preservation instructions"}
    "event-log"     {:type        :code
                     :ns          "hooks.event-log"
                     :events      [;; Tool events: matcher ".*" matches every tool.

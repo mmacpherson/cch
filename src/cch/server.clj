@@ -597,15 +597,17 @@
     1. :decision :deny
     2. :decision :ask
     3. :decision :allow with :updated-input (PreToolUse-only semantic)
-    4. concatenated :context across all results (events that support
+    4. :hook-specific-output escape hatch (first wins)
+    5. concatenated :context across all results (events that support
        additionalContext; the protocol renderer decides whether this
        shape emits anything for the event)
-    5. nil"
+    6. nil"
   [results]
   (let [non-nil (remove nil? results)]
     (or (first (filter #(= :deny  (:decision %)) non-nil))
         (first (filter #(= :ask   (:decision %)) non-nil))
         (first (filter #(and (= :allow (:decision %)) (:updated-input %)) non-nil))
+        (first (filter :hook-specific-output non-nil))
         (let [contexts (keep :context non-nil)]
           (when (seq contexts)
             {:context (str/join "\n\n" contexts)})))))
