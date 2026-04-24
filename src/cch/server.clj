@@ -23,6 +23,7 @@
             [cch.config :as config]
             [cch.config-db :as cdb]
             [cch.events :as events]
+            [cch.ewma :as ewma]
             [cch.log :as log]
             [cch.protocol :as proto]
             [cheshire.core :as json]
@@ -875,6 +876,20 @@
        :headers {"Content-Type" "application/json"}
        :body (json/generate-string {:error (.getMessage e)})})))
 
+(defn- handle-ewma
+  "GET /ewma — return current EWMA pace status for the statusLine.
+  Returns {} when there isn't enough data yet. Never blocks the caller
+  for long: one sqlite query on context_snapshots, small window."
+  [_req]
+  (try
+    {:status  200
+     :headers {"Content-Type" "application/json"}
+     :body    (json/generate-string (ewma/current-status))}
+    (catch Exception e
+      {:status  500
+       :headers {"Content-Type" "application/json"}
+       :body    (json/generate-string {:error (.getMessage e)})})))
+
 (defn- handle-config-delete
   "DELETE /api/config?hook=X&scope=Y — remove a row."
   [req]
@@ -1134,6 +1149,9 @@
 
       (and (= request-method :post) (= uri "/context-snapshot"))
       (handle-context-snapshot req)
+
+      (and (= request-method :get) (= uri "/ewma"))
+      (handle-ewma req)
 
       (and (= request-method :get) (= uri "/debug"))
       {:status 200
