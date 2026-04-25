@@ -158,8 +158,39 @@
 
 ;; --- Constrained linear regression on (t, pct) ---
 
+(defn- lag1-autocorr
+  "Lag-1 autocorrelation of a residual sequence.
+   ρ̂_1 = Σ(e_i · e_{i+1}) / Σ(e_i²)."
+  [residuals]
+  (let [es (vec residuals)
+        n  (count es)]
+    (if (< n 2)
+      0.0
+      (let [sum-prod (reduce + 0.0
+                             (map (fn [a b] (* a b)) es (rest es)))
+            sum-sq   (reduce + 0.0 (map #(* % %) es))]
+        (if (pos? sum-sq) (/ sum-prod sum-sq) 0.0)))))
+
+(defn- hac-variance-factor
+  "Newey-West-style autocorrelation correction for OLS variance.
+   Uses the (1+ρ)/(1-ρ) Bartlett-kernel limit at lag 1, capped to keep
+   the band sensible when adjacent residuals are nearly identical
+   (cumulative-usage data routinely has ρ → 0.95+).
+
+   Cumulative pct points are highly autocorrelated by construction, so
+   plain OLS underestimates σ² and produces overconfident bands. The
+   factor ranges from ~1 (independent residuals) to ~20 (very strong
+   positive autocorrelation) to inflate σ² accordingly."
+  [residuals]
+  (let [rho (lag1-autocorr residuals)]
+    (cond
+      (>= rho 0.95) 20.0
+      (<= rho 0.0)  1.0
+      :else         (/ (+ 1.0 rho) (- 1.0 rho)))))
+
 (defn- ols-fit
-  "OLS fit of y = a + b*x. Returns coefficients + dispersion stats."
+  "OLS fit of y = a + b*x. Returns coefficients + dispersion stats,
+   including a HAC autocorrelation correction factor for the variance."
   [pts]
   (let [n      (count pts)
         xs     (mapv first pts)
@@ -170,18 +201,21 @@
         sxy    (reduce + 0.0 (map (fn [x y] (* (- x x-bar) (- y y-bar))) xs ys))
         b      (if (pos? sxx) (/ sxy sxx) 0.0)
         a      (- y-bar (* b x-bar))
-        resid  (map (fn [x y] (- y (+ a (* b x)))) xs ys)
+        resid  (mapv (fn [x y] (- y (+ a (* b x)))) xs ys)
         sse    (reduce + 0.0 (map #(* % %) resid))
-        sigma2 (if (> n 2) (/ sse (- n 2)) 0.0)]
-    {:a a :b b :sxx sxx :x-bar x-bar :n n :sigma2 sigma2}))
+        sigma2 (if (> n 2) (/ sse (- n 2)) 0.0)
+        hac    (hac-variance-factor resid)]
+    {:a a :b b :sxx sxx :x-bar x-bar :n n :sigma2 sigma2 :hac hac}))
 
 (defn- ols-prediction
-  "Point estimate + 90% prediction-interval half-width at x_new."
-  [{:keys [a b sxx x-bar n sigma2]} x-new]
+  "Point estimate + 90% prediction-interval half-width at x_new.
+   The variance is inflated by the HAC factor stored on the fit
+   to account for autocorrelation in cumulative-pct residuals."
+  [{:keys [a b sxx x-bar n sigma2 hac] :or {hac 1.0}} x-new]
   (let [y-pred (+ a (* b x-new))
         se     (when (and (> n 2) (pos? sigma2) (pos? sxx))
                  (Math/sqrt
-                   (* sigma2
+                   (* sigma2 hac
                       (+ 1.0
                          (/ 1.0 n)
                          (/ (Math/pow (- x-new x-bar) 2) sxx)))))]
@@ -206,10 +240,11 @@
       raw
       (let [ys     (mapv second pts)
             y-bar  (/ (reduce + 0.0 ys) n)
-            resid  (map (fn [y] (- y y-bar)) ys)
+            resid  (mapv (fn [y] (- y y-bar)) ys)
             sse    (reduce + 0.0 (map #(* % %) resid))
-            sigma2 (if (> n 2) (/ sse (- n 2)) 0.0)]
-        {:a y-bar :b 0.0 :sxx sxx :x-bar x-bar :n n :sigma2 sigma2}))))
+            sigma2 (if (> n 2) (/ sse (- n 2)) 0.0)
+            hac    (hac-variance-factor resid)]
+        {:a y-bar :b 0.0 :sxx sxx :x-bar x-bar :n n :sigma2 sigma2 :hac hac}))))
 
 (defn linear-projection
   "Constrained linear regression with built-in monotonicity.
@@ -250,23 +285,46 @@
 (def ^:private bayes-prior-mu 0.55)
 (def ^:private bayes-prior-sigma 0.045)
 
-;; Floor on observed rate variance: pct is quantized to integer percent,
+;; Floor on observed rate noise: pct is quantized to integer percent,
 ;; so a 1-hour gap carries ±0.5%/hr quantization noise. Without this
 ;; floor, synthetic data with identical rates makes σ_ε → 0 and the
 ;; data overwhelms the prior.
 (def ^:private rate-noise-floor-sigma2 0.25)
 
+(defn- median
+  "Median of a numeric collection."
+  [xs]
+  (let [s (vec (sort xs))
+        n (count s)]
+    (cond
+      (zero? n) 0.0
+      (odd? n)  (double (nth s (quot n 2)))
+      :else     (/ (+ (double (nth s (quot n 2)))
+                      (double (nth s (dec (quot n 2)))))
+                   2.0))))
+
+(defn- robust-rate-variance
+  "MAD-based robust estimate of rate variance.
+   σ̂ ≈ 1.4826·MAD for Gaussian data, so σ̂² ≈ 2.198·MAD².
+   Much less sensitive than sample variance to bursty outlier rates
+   (a single hot session shouldn't blow up the credible interval over
+   a multi-day projection horizon)."
+  [rates]
+  (if (< (count rates) 2)
+    0.0
+    (let [med (median rates)
+          mad (median (map #(Math/abs (- (double %) med)) rates))]
+      (* 2.198 mad mad))))
+
 (defn- bayes-rate-posterior
   "Conjugate update for the *average* week-rate R ~ N(μ₀, σ₀²) given
-  observed inter-sample rates with empirical variance σ_ε². Returns
-  posterior {:mu :sigma2 :sigma-eps2 :tau-avg-hr}."
+  observed inter-sample rates with robust variance σ_ε² (MAD-based).
+  Returns posterior {:mu :sigma2 :sigma-eps2 :tau-avg-hr}."
   [rates dts mu0 sigma0]
   (let [n (count rates)
         r-mean (/ (reduce + 0.0 rates) (max 1 n))
         r-var  (if (> n 1)
-                 (/ (reduce + 0.0
-                            (map #(let [d (- % r-mean)] (* d d)) rates))
-                    (dec n))
+                 (robust-rate-variance rates)
                  (* sigma0 sigma0))
         sigma-eps2 (max r-var rate-noise-floor-sigma2)
         tau-avg    (if (zero? n) 1.0 (/ (reduce + 0.0 dts) n))

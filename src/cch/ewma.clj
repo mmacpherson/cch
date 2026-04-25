@@ -112,7 +112,10 @@
          :window-start window-start
          :now          now
          :last-pct     last-pct
-         :samples      (count obs-pairs)
+         ;; Show the raw write count, not the post-thinning count — the
+         ;; user wants to know how much data has actually been captured;
+         ;; the 15-min thinning is an internal detail of the fits.
+         :samples      (count raw)
          :projections  projs}))))
 
 (def ^:private window-config
