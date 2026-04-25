@@ -26,6 +26,7 @@
             [cch.ewma :as ewma]
             [cch.log :as log]
             [cch.protocol :as proto]
+            [cch.usage :as usage]
             [cheshire.core :as json]
             [cli.registry :as registry]
             [clojure.java.shell :as shell]
@@ -240,20 +241,22 @@
    [:circle {:cx 19 :cy 10 :r 2}]])
 
 (defn- nav-bar
-  "Primary nav at the top of every page. `active` is :events or :hooks —
-  that tab renders as a non-link active label; the other renders as an
-  ordinary link."
+  "Primary nav at the top of every page. `active` is :events, :hooks, or
+  :usage — the active tab renders as a non-link label; others render as
+  ordinary links."
   [active]
-  [:div.nav-wrap
-   [:div.nav-title
-    [:span.nav-icon nav-hook-svg]
-    [:h1.nav-brand "cch"]]
-   [:div.tabs
-    [:ul
-     [:li {:class (when (= active :events) "is-active")}
-      (if (= active :events) [:a "events"] [:a {:href "/"} "events"])]
-     [:li {:class (when (= active :hooks) "is-active")}
-      (if (= active :hooks) [:a "hooks"] [:a {:href "/hooks"} "hooks"])]]]])
+  (let [tab (fn [k label href]
+              [:li {:class (when (= active k) "is-active")}
+               (if (= active k) [:a label] [:a {:href href} label])])]
+    [:div.nav-wrap
+     [:div.nav-title
+      [:span.nav-icon nav-hook-svg]
+      [:h1.nav-brand "cch"]]
+     [:div.tabs
+      [:ul
+       (tab :events "events" "/")
+       (tab :hooks  "hooks"  "/hooks")
+       (tab :usage  "usage"  "/usage")]]]))
 
 (defn- badge
   [hook-name]
@@ -876,6 +879,45 @@
        :headers {"Content-Type" "application/json"}
        :body (json/generate-string {:error (.getMessage e)})})))
 
+(defn- usage-html
+  "Render the /usage page (server-side, hiccup → string)."
+  []
+  (let [data (usage/build-data)]
+    (str "<!doctype html>\n"
+         (hic/html
+           [:html {:lang "en"}
+            [:head
+             [:meta {:charset "utf-8"}]
+             [:title "cch · usage"]
+             [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
+             [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
+             [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
+             [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
+             [:link {:rel "stylesheet"
+                     :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
+             [:link {:rel "stylesheet"
+                     :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
+             [:style (hic/raw dashboard-css)]
+             [:style (hic/raw usage/page-css)]]
+            [:body
+             [:section.section
+              [:div.container
+               (nav-bar :usage)
+               [:p.subtitle
+                "Current 7-day rate-limit window: observed usage, "
+                "projected end-of-window from the slow EWMA, and a "
+                "fast/slow band as a cheap uncertainty proxy."]
+               [:p.meta
+                [:a {:href "/usage"} "↻ refresh"]]
+               (usage/page-body data)]]]]))))
+
+(defn- handle-usage
+  "GET /usage — server-rendered weekly window plot."
+  [_req]
+  {:status  200
+   :headers {"Content-Type" "text/html; charset=utf-8"}
+   :body    (usage-html)})
+
 (defn- handle-ewma
   "GET /ewma — return current EWMA pace status for the statusLine.
   Returns {} when there isn't enough data yet. Never blocks the caller
@@ -1152,6 +1194,9 @@
 
       (and (= request-method :get) (= uri "/ewma"))
       (handle-ewma req)
+
+      (and (= request-method :get) (= uri "/usage"))
+      (handle-usage req)
 
       (and (= request-method :get) (= uri "/debug"))
       {:status 200
