@@ -164,8 +164,9 @@
 
 (deftest test-hook-redef-is-live
   (testing "redefining a hook's composed var takes effect on the next dispatch"
-    (let [payload {:hook_event_name "PreToolUse"
-                   :cwd             "/home/example/projects/claude-code-hooks"
+    (let [repo-root (str/trim (:out (p/sh ["git" "rev-parse" "--show-toplevel"])))
+          payload {:hook_event_name "PreToolUse"
+                   :cwd             repo-root
                    :tool_name       "Edit"
                    :tool_input      {:file_path "/etc/passwd"}}]
       (testing "baseline: scope-lock asks for /etc/passwd (out of worktree)"

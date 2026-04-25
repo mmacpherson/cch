@@ -4,6 +4,22 @@
 
 `cch` is a Babashka-based framework for Claude Code hooks — the lifecycle events (PreToolUse, PostToolUse, SessionStart, etc.) that Claude Code fires as shell commands.
 
+## Public Repo — No Personal Info
+
+This is a **public open-source repo**. Keep all committed content free of personal information about the maintainer or anyone else. The only personal identifier that should appear is the standard git commit author line (name + GitHub noreply email), which is already public on every commit.
+
+This applies to **everything that ships in the repo**: source files, comments, docstrings, tests, fixtures, commit messages, README/CLAUDE.md/ARCHITECTURE.md, and beads issue bodies/notes/design (`.beads/issues.jsonl` is committed).
+
+Do not commit:
+- Real email addresses, phone numbers, physical addresses
+- Absolute paths that include a username (`/home/<user>/...`, `/Users/<user>/...`) — use `~`, `$HOME`, `(System/getProperty "user.home")`, or a tmp dir instead
+- Names of family, friends, colleagues, or non-public collaborators
+- Personal anecdotes, health/financial/relationship context
+- API keys, tokens, SSH/TLS material, credentials of any kind
+- Hostnames, internal URLs, or other infra identifiers from private systems
+
+When writing new code or beads issues, prefer portable references (`<repo-root>`, `~/.config/...`) over hardcoded local paths. When fixing bugs, the fix and the rationale go in the diff and commit message — not personal context about how it was discovered.
+
 ## Build & Test
 
 ```bash
