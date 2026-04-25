@@ -107,10 +107,15 @@
           sy   (scale-y y-top rect)
           {:keys [x0 y0 x1 y1]} rect
           obs-pts    (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)]) observed)
-          ;; LOESS-style smoothed curve: 80 evaluation points, kernel
-          ;; bandwidth ≈ 15% of the observed span. Falls back to raw
-          ;; points when there aren't enough samples.
-          smoothed   (some->> (proj/loess-smooth observed 80 0.15)
+          ;; LOESS-style smoothed curve. Bandwidth 0.08 of the observed
+          ;; span — tight enough that the line tracks raw data through
+          ;; sharp transitions (e.g. a long plateau followed by a jump
+          ;; up) instead of bowing over them and leaving raw points
+          ;; visibly under the line. drop-stale already enforces
+          ;; monotonicity on the input, so PAV inside loess-smooth is
+          ;; effectively a no-op here — kept for safety against future
+          ;; data sources where monotonicity isn't guaranteed.
+          smoothed   (some->> (proj/loess-smooth observed 80 0.08)
                               (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)])))
           proj-x0 (sx now)
           proj-x1 (sx resets-at)
