@@ -54,9 +54,44 @@
       0.0
       (let [v (- 1.0 (* au au au))] (* v v v)))))
 
+(defn- pav-merge
+  "If the top two PAV blocks violate monotonicity (top.mean < below.mean),
+   pop both and push the merged block; recurse until stable."
+  [stack]
+  (loop [s stack]
+    (if (< (count s) 2)
+      s
+      (let [top   (peek s)
+            below (peek (pop s))]
+        (if (< (:mean top) (:mean below))
+          (let [c (+ (:count below) (:count top))
+                m (/ (+ (* (:mean below) (:count below))
+                        (* (:mean top)   (:count top)))
+                     c)]
+            (recur (conj (pop (pop s)) {:count c :mean m})))
+          s)))))
+
+(defn isotonic-pav
+  "Pool Adjacent Violators: closest non-decreasing fit to `ys` in L2.
+   O(n). Used to constrain a kernel smoother of cumulative usage to be
+   monotone non-decreasing (used_percentage can only go up)."
+  [ys]
+  (let [yv (vec ys)
+        n  (count yv)]
+    (if (<= n 1)
+      yv
+      (->> (range n)
+           (reduce
+             (fn [stack i]
+               (pav-merge (conj stack {:count 1 :mean (double (yv i))})))
+             [])
+           (mapcat (fn [{:keys [count mean]}] (repeat count mean)))
+           vec))))
+
 (defn loess-smooth
   "Poor-man's LOESS: local-linear regression with tricube weights at
-   `n-eval` evenly-spaced eval points across the observed timespan.
+   `n-eval` evenly-spaced eval points, post-processed with isotonic
+   regression (PAV) so the output is monotone non-decreasing.
    `bandwidth-frac` is the kernel half-width as a fraction of the
    observed span (0.2 ~= each fit sees ~40% of the data).
    Returns [{:ts :pct} ...] or nil with too few points."
@@ -68,14 +103,16 @@
           xmax (apply max xs)
           span (double (max 1 (- xmax xmin)))
           h    (max 1.0 (* (double bandwidth-frac) span))
-          step (/ span (max 1 (dec n-eval)))]
-      (vec
-        (for [i (range n-eval)
-              :let [x*  (+ xmin (* i step))
-                    ws  (mapv #(tricube (/ (- % x*) h)) xs)
-                    y*  (weighted-local-linear xs ys ws x*)]
-              :when y*]
-          {:ts (long x*) :pct (max 0.0 y*)})))))
+          step (/ span (max 1 (dec n-eval)))
+          raw  (vec
+                 (for [i (range n-eval)
+                       :let [x* (+ xmin (* i step))
+                             ws (mapv #(tricube (/ (- % x*) h)) xs)
+                             y* (weighted-local-linear xs ys ws x*)]
+                       :when y*]
+                   {:ts (long x*) :raw (max 0.0 y*)}))
+          mono (isotonic-pav (mapv :raw raw))]
+      (mapv (fn [pt y] {:ts (:ts pt) :pct y}) raw mono))))
 
 (defn rate-samples
   "Inter-sample rates within the window, %/hr. Drops:

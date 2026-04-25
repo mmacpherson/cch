@@ -151,6 +151,35 @@
   (is (nil? (p/loess-smooth [(snap 0 0)] 10 0.2)))
   (is (nil? (p/loess-smooth [(snap 0 0) (snap 3600 1)] 10 0.2))))
 
+(deftest loess-smooth-is-monotone
+  (testing "smoothed curve never decreases — used_percentage can only go up"
+    (let [;; A curve with a real plateau followed by a rise — the kernel
+          ;; smoother on its own would bow downward at the boundary.
+          obs [(snap 0      0.0)
+               (snap 3600   1.0)
+               (snap 7200   2.0)
+               (snap 10800  2.0)
+               (snap 14400  2.0)
+               (snap 18000  2.0)
+               (snap 21600  2.0)
+               (snap 25200  3.0)
+               (snap 28800  4.5)
+               (snap 32400  6.0)]
+          smoothed (p/loess-smooth obs 60 0.2)
+          ys       (mapv :pct smoothed)]
+      (is (every? (fn [[a b]] (>= b a)) (partition 2 1 ys))
+          "every adjacent pair satisfies y_{i+1} >= y_i"))))
+
+(deftest isotonic-pav-known-cases
+  (testing "already-monotone input returns unchanged"
+    (is (= [1.0 2.0 3.0] (p/isotonic-pav [1.0 2.0 3.0]))))
+  (testing "single violating pair gets pooled to its mean"
+    (is (= [1.5 1.5 3.0] (p/isotonic-pav [2.0 1.0 3.0]))))
+  (testing "L2-closest non-decreasing fit on a small classic example"
+    ;; pool 4,2,3 → mean 3, then with 5,6 → 3,3,3,5,6
+    (is (= [3.0 3.0 3.0 5.0 6.0]
+           (p/isotonic-pav [4.0 2.0 3.0 5.0 6.0])))))
+
 ;; --- aggregator ---
 
 (deftest all-projections-filters-empty-methods
