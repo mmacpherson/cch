@@ -18,10 +18,6 @@
                   credible interval propagated forward
     :trailing-Nh  mean rate over the last N hours (dumb baseline)")
 
-(def ^:private target-pct-per-hr
-  "Linear pace for the 7-day window: 100% ÷ (7 days × 24 hours)."
-  (/ 100.0 (* 7 24)))
-
 (def ^:private z-90 1.645) ; standard-normal quantile for ~90% CI/PI
 
 ;; --- shared sample preparation ---
@@ -215,16 +211,14 @@
    the sample mean. Residuals are recomputed against the constrained line so
    the prediction interval reflects the actual model used."
   [pts]
-  (let [{:keys [a b sxx x-bar n] :as raw} (ols-fit pts)]
+  (let [{:keys [b sxx x-bar n] :as raw} (ols-fit pts)]
     (if (>= b 0)
       raw
-      (let [ys      (mapv second pts)
-            xs      (mapv first pts)
-            y-bar   (/ (reduce + 0.0 ys) n)
-            resid   (map (fn [y] (- y y-bar)) ys)
-            sse     (reduce + 0.0 (map #(* % %) resid))
-            sigma2  (if (> n 2) (/ sse (- n 2)) 0.0)]
-        ;; preserve sxx and x-bar so ols-prediction's PI math still works
+      (let [ys     (mapv second pts)
+            y-bar  (/ (reduce + 0.0 ys) n)
+            resid  (map (fn [y] (- y y-bar)) ys)
+            sse    (reduce + 0.0 (map #(* % %) resid))
+            sigma2 (if (> n 2) (/ sse (- n 2)) 0.0)]
         {:a y-bar :b 0.0 :sxx sxx :x-bar x-bar :n n :sigma2 sigma2}))))
 
 (defn ols-projection
@@ -232,7 +226,7 @@
    slope is impossible for cumulative usage, so we use b=0 and a=ȳ in that
    case). Forward-projects to resets_at with a Gaussian 90% PI, floored at
    the current pct."
-  [observed {:keys [now resets-at window-start last-pct]}]
+  [observed {:keys [resets-at window-start last-pct]}]
   (when (>= (count observed) 3)
     (let [to-x (fn [ts] (/ (- ts window-start) 3600.0))
           pts  (mapv (fn [{:keys [ts pct]}] [(to-x ts) pct]) observed)
