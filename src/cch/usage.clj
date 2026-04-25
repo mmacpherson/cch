@@ -228,7 +228,7 @@
 
 (defn- fmt-band [{:keys [lo hi]}]
   (when (and lo hi (not= lo hi))
-    (format " (band %.0f–%.0f%%)" (double lo) (double hi))))
+    (format " (%.0f%% — %.0f%%)" (double lo) (double hi))))
 
 (defn summary-stats
   "Right-rail readout. Lists each method's projected end-of-window
@@ -285,7 +285,7 @@
    div.method-row[data-method]:hover { background: var(--bulma-scheme-main-bis); }
    div.method-row .swatch { width: 0.9em; height: 0.5em; border-radius: 1px; }
    div.method-row .method-name { font-family: var(--bulma-family-primary); font-size: 0.8em; color: var(--bulma-text-weak); }
-   div.method-row .method-proj .aux { color: var(--bulma-text-weak); font-size: 0.75em; }")
+   div.method-row .method-proj .aux { color: var(--bulma-text-weak); font-size: 0.9em; }")
 
 (defn page-body
   "Hiccup body for the /usage page. Caller wraps with html/head/nav."
