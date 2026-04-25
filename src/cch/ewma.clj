@@ -14,6 +14,7 @@
   (:require [babashka.process :as p]
             [cheshire.core :as json]
             [cch.log :as log]
+            [cch.projections :as proj]
             [clojure.string :as str])
   (:import (java.time Instant)))
 
@@ -128,42 +129,40 @@
 
 (defn current-window
   "Data bundle for the /usage page: observed snapshots in the current
-   7d rate-limit window, plus EWMA-derived projection and confidence
-   band edges. Returns nil if there isn't enough data yet.
+   7d rate-limit window plus the full set of forward projections.
+   Returns nil if there isn't enough data yet.
 
    {:observed     [{:ts :pct} ...]   ; snapshots within window, oldest first
     :resets-at    epoch-seconds      ; when the 7d window rolls
     :window-start epoch-seconds      ; resets-at - 7d
     :now          epoch-seconds
     :last-pct     latest used %
-    :slow_x       slow EWMA / target pace
-    :fast_x       fast EWMA / target pace
-    :proj-pct     projected used % at reset (slow EWMA)
-    :proj-lo      lower band (min of fast/slow projections)
-    :proj-hi      upper band (max of fast/slow projections)
-    :samples      count of usable transitions}"
+    :samples      count of observed in window
+    :projections  [{:method :name :rate :proj :band {:lo :hi}?} ...]
+                   in display order; absent methods (insufficient data)
+                   are filtered out}"
   []
   (let [snaps (recent-snapshots window-size)]
     (when-let [latest (last snaps)]
       (let [resets-at    (:resets-at latest)
             window-start (- resets-at (* 7 86400))
-            in-window    (filterv #(>= (:ts %) window-start) snaps)]
-        (when-let [{:keys [fast slow last samples]} (fold-ewma in-window)]
-          (let [now           (-> (Instant/now) .getEpochSecond)
-                pct           (:pct last)
-                proj-slow     (project-end-of-window now pct slow resets-at)
-                proj-fast     (project-end-of-window now pct fast resets-at)]
-            {:observed     (mapv #(select-keys % [:ts :pct]) in-window)
-             :resets-at    resets-at
-             :window-start window-start
-             :now          now
-             :last-pct     pct
-             :slow_x       (/ slow target-pct-per-hr)
-             :fast_x       (/ fast target-pct-per-hr)
-             :proj-pct     proj-slow
-             :proj-lo      (min proj-slow proj-fast)
-             :proj-hi      (max proj-slow proj-fast)
-             :samples      samples}))))))
+            in-window    (filterv #(and (>= (:ts %) window-start)
+                                        (>= (:pct %) (:pct (first snaps) 0)))
+                                  snaps)
+            now          (-> (Instant/now) .getEpochSecond)
+            last-pct     (:pct (last in-window))
+            window-info  {:now now :resets-at resets-at
+                          :window-start window-start :last-pct last-pct}
+            obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
+            projs        (proj/all-projections obs-pairs window-info)]
+        (when (and last-pct (seq projs))
+          {:observed     obs-pairs
+           :resets-at    resets-at
+           :window-start window-start
+           :now          now
+           :last-pct     last-pct
+           :samples      (count obs-pairs)
+           :projections  projs})))))
 
 (defn current-status
   "Compute the current EWMA status from cch's events DB. Returns a map

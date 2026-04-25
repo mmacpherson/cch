@@ -916,9 +916,10 @@
               [:div.container
                (nav-bar :usage)
                [:p.subtitle
-                "Current 7-day rate-limit window: observed usage, "
-                "projected end-of-window from the slow EWMA, and a "
-                "fast/slow band as a cheap uncertainty proxy."]
+                "Current 7-day rate-limit window: observed usage and "
+                "five forward projections (EWMA, OLS, Bayesian conj.-Gaussian, "
+                "trailing 6h/24h). The Bayesian 90% credible interval is "
+                "drawn as a band; per-method bands appear in the side panel."]
                [:p.meta
                 [:a {:href "/usage"} "↻ refresh"]]
                (usage/page-body data)]]]]))))

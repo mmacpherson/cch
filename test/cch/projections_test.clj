@@ -1,0 +1,135 @@
+(ns cch.projections-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [cch.projections :as p]))
+
+;; --- helpers ---
+
+(defn- snap [ts pct] {:ts ts :pct (double pct)})
+
+(defn- linear-samples
+  "n samples spaced 1h apart, starting at pct=start with a constant
+  rate of `rate-per-hr` %/hr."
+  [n start rate-per-hr]
+  (mapv (fn [i] (snap (* i 3600) (+ start (* i rate-per-hr))))
+        (range n)))
+
+(defn- window-info
+  "Synthetic window info: now == last sample, reset is `hours-left`
+  hours later. last-pct is the last observed pct."
+  [observed hours-left]
+  (let [last (last observed)]
+    {:window-start 0
+     :now          (:ts last)
+     :resets-at    (+ (:ts last) (long (* hours-left 3600)))
+     :last-pct     (:pct last)}))
+
+;; --- rate-samples ---
+
+(deftest rate-samples-coalesces-and-skips-resets
+  (testing "anchor carries through tight (<15min) pairs; window-roll jumps anchor"
+    (let [obs [(snap 0 5)
+               (snap 60 5)        ; 1 min — coalesce, anchor stays at (0,5)
+               (snap 3600 6)      ; 1 hr → +1/hr
+               (snap 7200 5)      ; Δpct<0 — anchor jumps to (7200,5), no emit
+               (snap 10800 7)]    ; vs new anchor: 1hr → +2/hr
+          rs (p/rate-samples obs)]
+      (is (= 2 (count rs)))
+      (is (< 0.99 (:rate (first rs))  1.01))
+      (is (< 1.99 (:rate (second rs)) 2.01)))))
+
+;; --- ewma-projection ---
+
+(deftest ewma-on-constant-rate
+  (testing "constant 1%/hr should project 1%/hr forward"
+    (let [obs (linear-samples 10 0 1.0)
+          win (window-info obs 24)
+          {:keys [proj rate]} (p/ewma-projection obs win)]
+      (is (< 0.95 rate 1.05))
+      (is (< (+ 9.0 (* 24 0.95)) proj (+ 9.0 (* 24 1.05)))))))
+
+(deftest ewma-needs-at-least-two-rates
+  (is (nil? (p/ewma-projection [] (window-info [(snap 0 0)] 24))))
+  (is (nil? (p/ewma-projection [(snap 0 0) (snap 3600 1)]
+                               (window-info [(snap 0 0) (snap 3600 1)] 24)))
+      "two snapshots produce one rate; ewma-projection needs ≥2"))
+
+;; --- ols-projection ---
+
+(deftest ols-recovers-linear-trend
+  (testing "a perfectly linear series projects forward at the same rate"
+    ;; 10 samples at 1h spacing, rate 0.5 %/hr → t∈[0,9]hr, pct∈[0,4.5]
+    ;; reset is 24h after the last sample → x_new = 33hr
+    ;; pred = 0 + 0.5 * 33 = 16.5
+    (let [obs (linear-samples 10 0 0.5)
+          win (window-info obs 24)
+          {:keys [proj band]} (p/ols-projection obs win)]
+      (is (< 16.0 proj 17.0))
+      (is (<= (:lo band) proj (:hi band)))
+      (testing "perfect fit → tight band"
+        (is (< (- (:hi band) (:lo band)) 0.5))))))
+
+(deftest ols-needs-three-points
+  (is (nil? (p/ols-projection [(snap 0 0) (snap 3600 1)]
+                              (window-info [(snap 0 0) (snap 3600 1)] 24)))))
+
+;; --- bayes-projection ---
+
+(deftest bayes-shrinks-toward-prior-with-few-samples
+  (testing "with just a couple samples way above target, posterior is between target and observed"
+    (let [obs (linear-samples 3 0 5.0)              ;; well above 0.6 %/hr target
+          win (window-info obs 24)
+          {:keys [rate]} (p/bayes-projection obs win)]
+      (is (< 0.6 rate 5.0)))))
+
+(deftest bayes-band-widens-with-noisy-rates
+  (testing "noisy rates produce a wider credible interval than steady rates"
+    (let [steady [(snap 0 0) (snap 3600 1) (snap 7200 2) (snap 10800 3)
+                  (snap 14400 4) (snap 18000 5)]
+          noisy  [(snap 0 0) (snap 3600 1) (snap 7200 5) (snap 10800 6)
+                  (snap 14400 6) (snap 18000 12)]
+          win-s (window-info steady 24)
+          win-n (window-info noisy 24)
+          band-s (:band (p/bayes-projection steady win-s))
+          band-n (:band (p/bayes-projection noisy win-n))]
+      (is (< (- (:hi band-s) (:lo band-s))
+             (- (:hi band-n) (:lo band-n)))))))
+
+;; --- trailing-rate-projection ---
+
+(deftest trailing-rate-respects-window
+  (testing "6h window only sees the last 6h of samples"
+    (let [obs (concat (linear-samples 24 0 0.1)         ;; old slow segment
+                      [(snap (* 24 3600) 2.4)]
+                      (mapv (fn [h] (snap (+ (* 24 3600) (* h 3600)) (+ 2.4 (* h 2.0))))
+                            (range 1 7)))
+          last-ts (:ts (last obs))
+          win {:window-start 0
+               :now last-ts
+               :resets-at (+ last-ts (* 24 3600))
+               :last-pct (:pct (last obs))}
+          {:keys [rate]} (p/trailing-rate-projection obs win 6)]
+      (is (< 1.5 rate 2.5)
+          "should reflect the recent fast segment, not the slow tail of history"))))
+
+(deftest trailing-rate-floors-at-zero
+  (testing "negative trailing rate (window roll) → 0, not negative projection"
+    (let [obs [(snap 0 80) (snap 3600 5)] ;; reset between samples
+          win (window-info obs 12)
+          out (p/trailing-rate-projection obs win 6)]
+      (is (= 0.0 (:rate out))))))
+
+;; --- aggregator ---
+
+(deftest all-projections-filters-empty-methods
+  (testing "with too few samples, all-projections returns empty (no errors)"
+    (is (= [] (p/all-projections [(snap 0 0)]
+                                 {:window-start 0 :now 0 :resets-at 86400 :last-pct 0})))))
+
+(deftest all-projections-includes-multiple-methods-on-rich-data
+  (let [obs (linear-samples 12 0 0.6)
+        win (window-info obs 48)
+        methods (set (map :method (p/all-projections obs win)))]
+    (is (contains? methods :ewma))
+    (is (contains? methods :ols))
+    (is (contains? methods :bayes))
+    (is (contains? methods :trailing-24h))))
