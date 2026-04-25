@@ -932,14 +932,16 @@
    :body    (usage-html)})
 
 (defn- handle-ewma
-  "GET /ewma — return current EWMA pace status for the statusLine.
-  Returns {} when there isn't enough data yet. Never blocks the caller
-  for long: one sqlite query on context_snapshots, small window."
+  "GET /ewma — current pct + Bayesian projection + time-to-reset for
+  both the 5h and 7d rate-limit windows. The statusLine consumes this
+  to render compact, color-coded status. Returns {} when there isn't
+  enough data yet. Never blocks the caller for long: a couple of
+  bounded sqlite queries on context_snapshots."
   [_req]
   (try
     {:status  200
      :headers {"Content-Type" "application/json"}
-     :body    (json/generate-string (ewma/current-status))}
+     :body    (json/generate-string (ewma/statusline-stats))}
     (catch Exception e
       {:status  500
        :headers {"Content-Type" "application/json"}

@@ -318,13 +318,15 @@
 
    Monotonicity comes from clamping the posterior rate at 0 and the
    band lower edge at last_pct."
-  [observed {:keys [now resets-at last-pct]}]
+  [observed {:keys [now resets-at last-pct prior-mu prior-sigma]
+             :or   {prior-mu    bayes-prior-mu
+                    prior-sigma bayes-prior-sigma}}]
   (let [rs    (rate-samples observed)
         rates (mapv :rate rs)
         dts   (mapv :dt-hr rs)]
     (when (>= (count rates) 2)
       (let [{:keys [mu sigma2 sigma-eps2 tau-avg-hr]}
-            (bayes-rate-posterior rates dts bayes-prior-mu bayes-prior-sigma)
+            (bayes-rate-posterior rates dts prior-mu prior-sigma)
             dt-hr     (max 0.0 (/ (- resets-at now) 3600.0))
             mu*       (max 0.0 mu)            ; non-negative average rate
             sigma-bm2 (* sigma-eps2 tau-avg-hr)
