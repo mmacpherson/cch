@@ -96,10 +96,13 @@
     (let [resets-at    (:resets-at latest)
           window-start (- resets-at (* 7 86400))
           raw          (vec (snapshots-since (epoch->iso window-start)))
-          ;; Thin bursty regions to one sample per 15 minutes. statusLine
-          ;; can fire 100+ times in a minute during active use; OLS would
-          ;; otherwise count them all as independent observations.
-          in-window    (proj/thin-by-time raw 900)
+          ;; Strip stale reports from concurrent sessions before any
+          ;; downstream computation; thin bursty regions to one sample
+          ;; per 15 minutes (statusLine can fire 100+ times in a minute
+          ;; during active use, and OLS would otherwise count them all
+          ;; as independent observations).
+          fresh        (proj/drop-stale raw)
+          in-window    (proj/thin-by-time fresh 900)
           now          (-> (Instant/now) .getEpochSecond)
           last-pct     (:pct (last in-window))
           window-info  {:now now :resets-at resets-at
@@ -139,7 +142,8 @@
           ;; Bucket size: 15min for 7d, 1min for 5h (5h has finer time
           ;; resolution to play with — don't over-thin).
           bucket       (if (= window-key :seven-day) 900 60)
-          in-window    (proj/thin-by-time raw bucket)
+          fresh        (proj/drop-stale raw)
+          in-window    (proj/thin-by-time fresh bucket)
           now          (-> (Instant/now) .getEpochSecond)
           last-pct     (:pct (last in-window))
           window-info  {:now now :resets-at resets-at

@@ -110,6 +110,27 @@
           mono (isotonic-pav (mapv :raw raw))]
       (mapv (fn [pt y] {:ts (:ts pt) :pct y}) raw mono))))
 
+(defn drop-stale
+  "Forward-pass filter: keep only samples whose pct is at least the
+   running maximum so far (resetting on window roll, detected via
+   :resets-at change). Drops 'stale' reports — concurrent Claude Code
+   sessions cache their rate-limit view locally, so a quiet session
+   that fires statusLine after a busy session shows lower pct that
+   doesn't reflect the current global state.
+
+   Without this, OLS sees apparent dips and computes inflated residuals;
+   the chart shows confusing dots below the monotone smoothed line."
+  [observed]
+  (loop [xs observed, prev-resets nil, run-max 0.0, out (transient [])]
+    (if-let [s (first xs)]
+      (let [rolled? (and prev-resets (not= (:resets-at s) prev-resets))
+            rmax    (if rolled? 0.0 run-max)
+            pct     (:pct s)]
+        (if (>= pct rmax)
+          (recur (rest xs) (:resets-at s) pct (conj! out s))
+          (recur (rest xs) (:resets-at s) rmax out)))
+      (persistent! out))))
+
 (defn thin-by-time
   "Reduce a sequence of `{:ts :pct}` snapshots to one representative
    per `bucket-secs`-wide bucket. Helps when the snapshot stream is

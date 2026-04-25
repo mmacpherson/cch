@@ -159,6 +159,38 @@
     (is (= [3.0 3.0 3.0 5.0 6.0]
            (p/isotonic-pav [4.0 2.0 3.0 5.0 6.0])))))
 
+;; --- drop-stale ---
+
+(defn- snap-with-resets [ts pct resets-at]
+  {:ts ts :pct (double pct) :resets-at resets-at})
+
+(deftest drop-stale-removes-below-running-max
+  (testing "samples whose pct is below the running max are dropped as stale"
+    (let [r 1777518000
+          obs [(snap-with-resets 0    30 r)
+               (snap-with-resets 100  31 r)
+               (snap-with-resets 200  29 r)   ; stale
+               (snap-with-resets 300  32 r)
+               (snap-with-resets 400  30 r)]] ; stale
+      (is (= [30.0 31.0 32.0]
+             (mapv :pct (p/drop-stale obs)))))))
+
+(deftest drop-stale-resets-on-window-roll
+  (testing "a change in :resets-at clears the running max"
+    (let [r1 1777518000
+          r2 1778122800
+          obs [(snap-with-resets 0    95 r1)
+               (snap-with-resets 100  96 r1)
+               (snap-with-resets 200   3 r2)   ; new window — keep, do not flag stale
+               (snap-with-resets 300   5 r2)]]
+      (is (= [95.0 96.0 3.0 5.0]
+             (mapv :pct (p/drop-stale obs)))))))
+
+(deftest drop-stale-noop-on-monotone-data
+  (let [r 1777518000
+        obs (mapv #(snap-with-resets % (double %) r) (range 0 1000 100))]
+    (is (= obs (p/drop-stale obs)))))
+
 ;; --- thin-by-time ---
 
 (deftest thin-by-time-collapses-bursts
