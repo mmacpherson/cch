@@ -181,14 +181,27 @@
                   :stroke "none"
                   :class "band-region"
                   :data-method (name method)}])
-        (for [{:keys [method proj]} (ordered-projections projections)]
-          [:polyline {:points (points-attr (line-for proj))
-                      :fill "none"
-                      :stroke (method-color method)
-                      :stroke-width 1.75
-                      :stroke-dasharray "5 4"
-                      :class (str "proj-line proj-" (name method))
-                      :data-method (name method)}])]
+        ;; For each method: a fat transparent hit-track (continuous, ignores
+        ;; dashes) under the visible dashed line. The track is what the
+        ;; pointer interacts with — so the gaps in the dashed line don't
+        ;; create dead zones for hover.
+        (for [{:keys [method proj]} (ordered-projections projections)
+              :let [pts (points-attr (line-for proj))
+                    mname (name method)]]
+          [:g {:class "proj-group" :data-method mname}
+           [:polyline {:points pts
+                       :fill "none"
+                       :stroke "transparent"
+                       :stroke-width 14
+                       :class "proj-hit"
+                       :data-method mname}]
+           [:polyline {:points pts
+                       :fill "none"
+                       :stroke (method-color method)
+                       :stroke-width 2.75
+                       :stroke-dasharray "5 4"
+                       :class (str "proj-line proj-" mname)
+                       :data-method mname}]])]
        ;; --- observed: smoothed line + small raw dots ---
        (when (seq smoothed)
          [:polyline {:points (points-attr smoothed)
@@ -242,8 +255,13 @@
   "div.usage-grid { display: grid; grid-template-columns: 1fr 280px; gap: 1.5em; align-items: start; }
    div.usage-chart-block { background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 6px; padding: 0.75em; }
    svg.usage-chart .ref-100 { stroke: #dc2626; stroke-dasharray: none; }
-   /* Defaults: bands hidden, lines slim, transitions on. */
-   svg.usage-chart .proj-line { transition: stroke-width 0.18s ease; pointer-events: stroke; }
+   /* Defaults: bands hidden, lines normal width, transitions on.
+      Hit tracks are wide + transparent — they catch the pointer along
+      the line including the gaps between dashes. The visible line on
+      top is non-interactive (pointer-events: none) so all hovers go
+      through the hit track. */
+   svg.usage-chart .proj-line { transition: stroke-width 0.18s ease; pointer-events: none; }
+   svg.usage-chart .proj-hit { pointer-events: stroke; cursor: pointer; }
    svg.usage-chart .band-region { opacity: 0; transition: opacity 0.18s ease; pointer-events: none; }
    /* Legend layout */
    div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.6em; display: flex; flex-wrap: wrap; gap: 0.5em 1em; line-height: 1.6; }
