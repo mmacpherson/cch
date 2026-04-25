@@ -60,18 +60,21 @@
     (< fast-x (* slow-x 0.85)) "↘"
     :else "→"))
 
-(defn- recent-snapshots
-  "Pull (timestamp, payload) for the most recent `n` rows that have a
-  rate_limits.seven_day block. Returns oldest-first for fold."
-  [n]
+(defn- snapshots-since
+  "Pull (timestamp, payload) for rows newer than `since-iso` (an
+   ISO-8601 string in the same format the DB stores). Bursty writes
+   would blow past a fixed LIMIT N — querying by timestamp range
+   keeps the full window's worth of history regardless of density."
+  [since-iso]
   (let [path (log/db-path)
-        sql (format
-              (str "SELECT json_object('ts', timestamp, 'payload', payload) "
-                   "FROM (SELECT timestamp, payload FROM context_snapshots "
-                   "WHERE payload LIKE '%%rate_limits%%' "
-                   "AND session_id NOT LIKE 'test%%' "
-                   "ORDER BY id DESC LIMIT %d) ORDER BY timestamp ASC;")
-              n)
+        sql  (format
+               (str "SELECT json_object('ts', timestamp, 'payload', payload) "
+                    "FROM context_snapshots "
+                    "WHERE timestamp >= '%s' "
+                    "AND payload LIKE '%%rate_limits%%' "
+                    "AND session_id NOT LIKE 'test%%' "
+                    "ORDER BY timestamp ASC;")
+               since-iso)
         result (p/sh ["sqlite3" path sql])]
     (when (zero? (:exit result))
       (->> (str/split-lines (str/trim (:out result)))
@@ -82,10 +85,49 @@
                            p   (json/parse-string (:payload row) true)
                            sd  (get-in p [:rate_limits :seven_day])]
                        (when (and sd (:used_percentage sd) (:resets_at sd))
-                         {:ts          (iso->epoch-seconds (:ts row))
-                          :pct         (double (:used_percentage sd))
-                          :resets-at   (long (:resets_at sd))}))
+                         {:ts        (iso->epoch-seconds (:ts row))
+                          :pct       (double (:used_percentage sd))
+                          :resets-at (long (:resets_at sd))}))
                      (catch Exception _ nil))))))))
+
+(defn- latest-snapshot
+  "The single most-recent rate-limits snapshot — needed to discover
+   the current window boundaries before we know what range to query."
+  []
+  (let [path (log/db-path)
+        sql  (str "SELECT json_object('ts', timestamp, 'payload', payload) "
+                  "FROM context_snapshots "
+                  "WHERE payload LIKE '%rate_limits%' "
+                  "AND session_id NOT LIKE 'test%' "
+                  "ORDER BY id DESC LIMIT 1;")
+        result (p/sh ["sqlite3" path sql])]
+    (when (zero? (:exit result))
+      (when-let [line (-> result :out str/trim not-empty)]
+        (try
+          (let [row (json/parse-string line true)
+                p   (json/parse-string (:payload row) true)
+                sd  (get-in p [:rate_limits :seven_day])]
+            (when (and sd (:used_percentage sd) (:resets_at sd))
+              {:ts        (iso->epoch-seconds (:ts row))
+               :pct       (double (:used_percentage sd))
+               :resets-at (long (:resets_at sd))}))
+          (catch Exception _ nil))))))
+
+(defn- epoch->iso [secs]
+  (str (java.time.Instant/ofEpochSecond secs)))
+
+;; Back-compat shim: fold-ewma callers still pass 500-most-recent-style
+;; sequences. Build that from the timestamp-bounded loader.
+(defn- recent-snapshots
+  "All rate-limit snapshots within (or just before) the last 7 days,
+   oldest-first. Used by /ewma's fold which doesn't care about window
+   boundaries — it just wants 'enough recent data to compute an EWMA'."
+  [_]
+  (let [latest (latest-snapshot)
+        cutoff (if latest
+                 (- (:resets-at latest) (* 8 86400))   ; one extra day for safety
+                 (- (.getEpochSecond (java.time.Instant/now)) (* 14 86400)))]
+    (snapshots-since (epoch->iso cutoff))))
 
 (defn fold-ewma
   "Fold a sequence of {:ts :pct :resets-at} into final EWMA state.
@@ -142,27 +184,26 @@
                    in display order; absent methods (insufficient data)
                    are filtered out}"
   []
-  (let [snaps (recent-snapshots window-size)]
-    (when-let [latest (last snaps)]
-      (let [resets-at    (:resets-at latest)
-            window-start (- resets-at (* 7 86400))
-            in-window    (filterv #(and (>= (:ts %) window-start)
-                                        (>= (:pct %) (:pct (first snaps) 0)))
-                                  snaps)
-            now          (-> (Instant/now) .getEpochSecond)
-            last-pct     (:pct (last in-window))
-            window-info  {:now now :resets-at resets-at
-                          :window-start window-start :last-pct last-pct}
-            obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
-            projs        (proj/all-projections obs-pairs window-info)]
-        (when (and last-pct (seq projs))
-          {:observed     obs-pairs
-           :resets-at    resets-at
-           :window-start window-start
-           :now          now
-           :last-pct     last-pct
-           :samples      (count obs-pairs)
-           :projections  projs})))))
+  (when-let [latest (latest-snapshot)]
+    (let [resets-at    (:resets-at latest)
+          window-start (- resets-at (* 7 86400))
+          ;; Query by timestamp directly — we want the entire current
+          ;; 7-day window, however dense or sparse the writes are.
+          in-window    (vec (snapshots-since (epoch->iso window-start)))
+          now          (-> (Instant/now) .getEpochSecond)
+          last-pct     (:pct (last in-window))
+          window-info  {:now now :resets-at resets-at
+                        :window-start window-start :last-pct last-pct}
+          obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
+          projs        (proj/all-projections obs-pairs window-info)]
+      (when (and last-pct (seq projs))
+        {:observed     obs-pairs
+         :resets-at    resets-at
+         :window-start window-start
+         :now          now
+         :last-pct     last-pct
+         :samples      (count obs-pairs)
+         :projections  projs}))))
 
 (defn current-status
   "Compute the current EWMA status from cch's events DB. Returns a map
