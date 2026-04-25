@@ -1,7 +1,7 @@
 {
   "database": "dolt",
   "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "claude_code_hooks",
-  "project_id": "64a59fdd-56a9-4437-b73d-a5ab65b851ef"
+  "dolt_mode": "server",
+  "dolt_database": "beads_claude-code-hooks",
+  "project_id": "cfe987c4-e45e-47ed-8aba-482e009e245a"
 }
