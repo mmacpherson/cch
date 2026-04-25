@@ -2,6 +2,8 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "server",
+  "dolt_server_host": "127.0.0.1",
+  "dolt_server_port": 3307,
   "dolt_database": "beads_claude-code-hooks",
-  "project_id": "cfe987c4-e45e-47ed-8aba-482e009e245a"
+  "project_id": "c322fe63-2ea8-49fc-8d7c-2c87b7b419c5"
 }
