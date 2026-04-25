@@ -14,6 +14,8 @@ Create a new cch hook based on the user's description.
 
 3. **Register the hook** in `src/cli/registry.clj`:
    - Add an entry to the `hooks` map with `:ns`, `:event`, `:matcher`, `:description`
+   - For a multi-event hook (subscribes to several Claude Code events), use `:events [{:event "..." :matcher "..."} ...]` instead of `:event`/`:matcher`. The handler then dispatches inside via `(case (:hook_event_name input) ...)`. See `hooks/context-governor` for an example covering `PreCompact` + `UserPromptSubmit`.
+   - `:type` defaults to `:code` (Clojure fn via `defhook`). The registry also supports `:prompt` and `:agent` for native Claude Code hook types — those use `:prompt-template`/`:model` or `:agent-*` fields instead of `:ns`. Most hooks should stay `:code`. Optional fields: `:if` (permission-rule string), `:timeout`, `:status-message`. Read the schema comment at the top of `registry.clj` before reaching for the rarer fields.
 
 4. **Write tests** in `test/hooks/<name>_test.clj`:
    - Unit tests for the pure check function (no I/O, explicit args)
@@ -28,6 +30,8 @@ Create a new cch hook based on the user's description.
    ```
 
 ## Hook Pattern Reference
+
+**Single-event (most common):**
 
 ```clojure
 (ns hooks.my-hook
@@ -46,6 +50,24 @@ Create a new cch hook based on the user's description.
     (proto/extract-file-path input)
     (:tool_name input)))
 ```
+
+**Multi-event:**
+
+```clojure
+(defn- handle-pre-compact     [input] ...)
+(defn- handle-user-prompt-submit [input] ...)
+
+(defhook my-hook
+  "Subscribes to multiple events; dispatches by hook_event_name."
+  {} ; events live in registry.clj as :events [...]
+  [input]
+  (case (:hook_event_name input)
+    "PreCompact"       (handle-pre-compact input)
+    "UserPromptSubmit" (handle-user-prompt-submit input)
+    nil))
+```
+
+Return values are per-event (`:decision` for tool events; `:context` for `UserPromptSubmit`; `:hook-specific-output` for `PreCompact`; etc.). Returning `nil` is always "no opinion."
 
 ## Arguments
 
