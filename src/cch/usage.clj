@@ -9,7 +9,8 @@
   Pure functions of the data bundle from cch.ewma/current-window — easy
   to test without a server."
   (:require [cch.ewma :as ewma]
-            [cch.projections :as proj])
+            [cch.projections :as proj]
+            [clojure.string :as str])
   (:import (java.time Instant ZoneId)
            (java.time.format DateTimeFormatter)))
 
@@ -241,10 +242,13 @@
      [:div.stat [:div.k "samples"]   [:div.v (str samples)]]
      [:div.method-projections
       [:div.k "projected at reset"]
-      (for [{:keys [method name proj band]} (ordered-projections projections)]
+      ;; Strip parenthetical sub-clauses from the method name —
+      ;; the full name lives in the legend under the chart.
+      (for [{:keys [method name proj band]} (ordered-projections projections)
+            :let [short-name (str/trim (clojure.string/replace name #"\s*\(.*\)\s*$" ""))]]
         [:div.method-row {:data-method (clojure.core/name method)}
          [:span.swatch {:style (str "background:" (method-color method))}]
-         [:span.method-name name]
+         [:span.method-name short-name]
          [:span.method-proj (format "%.0f%%" (double proj))
           (when-let [b (fmt-band band)] [:span.aux b])]])]]))
 
