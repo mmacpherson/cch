@@ -37,50 +37,32 @@
       (is (< 0.99 (:rate (first rs))  1.01))
       (is (< 1.99 (:rate (second rs)) 2.01)))))
 
-;; --- ewma-projection ---
+;; --- linear-projection (constrained, b≥0) ---
 
-(deftest ewma-on-constant-rate
-  (testing "constant 1%/hr should project 1%/hr forward"
-    (let [obs (linear-samples 10 0 1.0)
-          win (window-info obs 24)
-          {:keys [proj rate]} (p/ewma-projection obs win)]
-      (is (< 0.95 rate 1.05))
-      (is (< (+ 9.0 (* 24 0.95)) proj (+ 9.0 (* 24 1.05)))))))
-
-(deftest ewma-needs-at-least-two-rates
-  (is (nil? (p/ewma-projection [] (window-info [(snap 0 0)] 24))))
-  (is (nil? (p/ewma-projection [(snap 0 0) (snap 3600 1)]
-                               (window-info [(snap 0 0) (snap 3600 1)] 24)))
-      "two snapshots produce one rate; ewma-projection needs ≥2"))
-
-;; --- ols-projection ---
-
-(deftest ols-recovers-linear-trend
+(deftest linear-recovers-linear-trend
   (testing "a perfectly linear series projects forward at the same rate"
     ;; 10 samples at 1h spacing, rate 0.5 %/hr → t∈[0,9]hr, pct∈[0,4.5]
-    ;; reset is 24h after the last sample → x_new = 33hr
-    ;; pred = 0 + 0.5 * 33 = 16.5
+    ;; reset is 24h after the last sample → x_new = 33hr → pred = 16.5
     (let [obs (linear-samples 10 0 0.5)
           win (window-info obs 24)
-          {:keys [proj band]} (p/ols-projection obs win)]
+          {:keys [proj band]} (p/linear-projection obs win)]
       (is (< 16.0 proj 17.0))
       (is (<= (:lo band) proj (:hi band)))
       (testing "perfect fit → tight band"
         (is (< (- (:hi band) (:lo band)) 0.5))))))
 
-(deftest ols-monotone-on-decreasing-data
-  (testing "if the unconstrained OLS slope is negative (synthetic case where pct decreases), use b=0 + horizontal fit"
-    ;; pct goes 10, 9, 8, 7, 6 (decreasing — pathological for monotone usage)
+(deftest linear-monotone-on-decreasing-data
+  (testing "if unconstrained slope is negative, NNLS pins rate at 0"
     (let [obs (mapv (fn [i] (snap (* i 3600) (double (- 10 i)))) (range 5))
           win (window-info obs 24)
-          {:keys [rate proj band]} (p/ols-projection obs win)]
-      (is (= 0.0 rate) "monotone constraint pins rate at 0 when unconstrained slope < 0")
+          {:keys [rate proj band]} (p/linear-projection obs win)]
+      (is (= 0.0 rate) "monotone constraint pins rate at 0 when slope<0")
       (is (>= proj (:last-pct win)) "projection never below current pct")
       (is (>= (:lo band) (:last-pct win)) "band lo clamped at current pct"))))
 
-(deftest ols-needs-three-points
-  (is (nil? (p/ols-projection [(snap 0 0) (snap 3600 1)]
-                              (window-info [(snap 0 0) (snap 3600 1)] 24)))))
+(deftest linear-needs-three-points
+  (is (nil? (p/linear-projection [(snap 0 0) (snap 3600 1)]
+                                 (window-info [(snap 0 0) (snap 3600 1)] 24)))))
 
 ;; --- bayes-projection ---
 
@@ -114,29 +96,6 @@
       (is (< (- (:hi band-s) (:lo band-s))
              (- (:hi band-n) (:lo band-n)))))))
 
-;; --- trailing-rate-projection ---
-
-(deftest trailing-rate-respects-window
-  (testing "6h window only sees the last 6h of samples"
-    (let [obs (concat (linear-samples 24 0 0.1)         ;; old slow segment
-                      [(snap (* 24 3600) 2.4)]
-                      (mapv (fn [h] (snap (+ (* 24 3600) (* h 3600)) (+ 2.4 (* h 2.0))))
-                            (range 1 7)))
-          last-ts (:ts (last obs))
-          win {:window-start 0
-               :now last-ts
-               :resets-at (+ last-ts (* 24 3600))
-               :last-pct (:pct (last obs))}
-          {:keys [rate]} (p/trailing-rate-projection obs win 6)]
-      (is (< 1.5 rate 2.5)
-          "should reflect the recent fast segment, not the slow tail of history"))))
-
-(deftest trailing-rate-floors-at-zero
-  (testing "negative trailing rate (window roll) → 0, not negative projection"
-    (let [obs [(snap 0 80) (snap 3600 5)] ;; reset between samples
-          win (window-info obs 12)
-          out (p/trailing-rate-projection obs win 6)]
-      (is (= 0.0 (:rate out))))))
 
 ;; --- loess-smooth ---
 
@@ -222,11 +181,10 @@
     (is (= [] (p/all-projections [(snap 0 0)]
                                  {:window-start 0 :now 0 :resets-at 86400 :last-pct 0})))))
 
-(deftest all-projections-includes-multiple-methods-on-rich-data
+(deftest all-projections-includes-both-methods-on-rich-data
   (let [obs (linear-samples 12 0 0.6)
         win (window-info obs 48)
         methods (set (map :method (p/all-projections obs win)))]
-    (is (contains? methods :ewma))
-    (is (contains? methods :ols))
+    (is (contains? methods :linear))
     (is (contains? methods :bayes))
-    (is (contains? methods :trailing-24h))))
+    (is (= 2 (count methods)) "EWMA / trailing-* should no longer appear")))

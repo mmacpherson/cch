@@ -156,39 +156,7 @@
                      (conj! out {:t (:ts s) :rate rate :dt-hr dt-hr}))))))
       (persistent! out))))
 
-;; --- 1. EWMA (point estimate, fast/slow band as cheap proxy) ---
-
-(defn- ewma-fold
-  "Single-pass EWMA over rate samples with given tau (in hours)."
-  [tau-hr rate-samples]
-  (reduce
-    (fn [prev {:keys [rate dt-hr]}]
-      (if (nil? prev)
-        rate
-        (let [alpha (- 1.0 (Math/exp (- (/ dt-hr tau-hr))))]
-          (+ (* alpha rate) (* (- 1.0 alpha) prev)))))
-    nil
-    rate-samples))
-
-(defn ewma-projection
-  "Slow EWMA point estimate. Band is fast/slow spread (heuristic, not a
-  real CI). Returns nil if fewer than 2 usable rate samples."
-  [observed {:keys [now resets-at last-pct]}]
-  (let [rs (rate-samples observed)]
-    (when (>= (count rs) 2)
-      (let [slow (ewma-fold 6.0 rs)
-            fast (ewma-fold 1.0 rs)
-            dt-hr (max 0.0 (/ (- resets-at now) 3600.0))
-            proj (max 0.0 (+ last-pct (* slow dt-hr)))
-            band-lo (max 0.0 (+ last-pct (* (min slow fast) dt-hr)))
-            band-hi (max 0.0 (+ last-pct (* (max slow fast) dt-hr)))]
-        {:method  :ewma
-         :name    "EWMA (slow τ=6h)"
-         :rate    slow
-         :proj    proj
-         :band    {:lo band-lo :hi band-hi}}))))
-
-;; --- 2. OLS linear regression on (t, pct) ---
+;; --- Constrained linear regression on (t, pct) ---
 
 (defn- ols-fit
   "OLS fit of y = a + b*x. Returns coefficients + dispersion stats."
@@ -220,12 +188,18 @@
     {:pred y-pred
      :half-width (or (some-> se (* z-90)) 0.0)}))
 
-(defn- monotone-ols-fit
-  "OLS fit y = a + b*x with b constrained to be non-negative (used_percentage
-   can only go up). When unconstrained b ≥ 0 the result is identical to OLS;
-   when unconstrained b < 0 we collapse to b=0, a=ȳ — a horizontal fit at
-   the sample mean. Residuals are recomputed against the constrained line so
-   the prediction interval reflects the actual model used."
+(defn- monotone-linear-fit
+  "Least squares fit of y = a + b*x with b constrained to be non-negative
+   (cumulative usage can only go up). When unconstrained b ≥ 0 the result
+   is identical to OLS; when unconstrained b < 0 we collapse to b=0, a=ȳ —
+   a horizontal fit at the sample mean. Residuals are recomputed against
+   the constrained line so the prediction interval reflects the actual
+   model used.
+
+   Strictly: this is NNLS (non-negative least squares) on the slope. Not
+   OLS — OLS is unconstrained — but the constraint almost never binds in
+   practice for cumulative data, so the fit numerically equals OLS unless
+   the data is genuinely non-monotone."
   [pts]
   (let [{:keys [b sxx x-bar n] :as raw} (ols-fit pts)]
     (if (>= b 0)
@@ -237,22 +211,26 @@
             sigma2 (if (> n 2) (/ sse (- n 2)) 0.0)]
         {:a y-bar :b 0.0 :sxx sxx :x-bar x-bar :n n :sigma2 sigma2}))))
 
-(defn ols-projection
-  "OLS with built-in monotonicity: fits y = a + b*x with b ≥ 0 (a downward
-   slope is impossible for cumulative usage, so we use b=0 and a=ȳ in that
-   case). Forward-projects to resets_at with a Gaussian 90% PI, floored at
-   the current pct."
+(defn linear-projection
+  "Constrained linear regression with built-in monotonicity.
+   Fits y = a + b·x via NNLS-on-slope (b ≥ 0), forward-projects to
+   resets_at with a Gaussian 90% prediction interval. When unconstrained
+   slope is negative (synthetic decreasing data), collapses to b=0 and
+   reports rate=0; otherwise this is numerically equal to plain OLS.
+
+   This is the frequentist twin of bayes-projection without the prior:
+   no shrinkage toward a baseline, just whatever the data implies."
   [observed {:keys [resets-at window-start last-pct]}]
   (when (>= (count observed) 3)
     (let [to-x (fn [ts] (/ (- ts window-start) 3600.0))
           pts  (mapv (fn [{:keys [ts pct]}] [(to-x ts) pct]) observed)
-          fit  (monotone-ols-fit pts)
+          fit  (monotone-linear-fit pts)
           {:keys [pred half-width]} (ols-prediction fit (to-x resets-at))
           proj (max last-pct pred)
           lo   (max last-pct (- pred half-width))
           hi   (max last-pct (+ pred half-width))]
-      {:method :ols
-       :name   "OLS (b≥0, monotone)"
+      {:method :linear
+       :name   "Linear (frequentist, b≥0)"
        ;; Report the constrained slope directly. For a horizontal fit
        ;; this is 0, even when proj > last_pct (the fit's intercept can
        ;; be above the most recent sample on synthetic decreasing data).
@@ -342,28 +320,6 @@
          :proj   mean-proj
          :band   {:lo lo :hi hi}}))))
 
-;; --- 4. Trailing-window mean rate ---
-
-(defn trailing-rate-projection
-  "Mean rate over the last `window-hours`. Crude baseline — no band.
-  Returns nil if there aren't two samples within the window."
-  [observed {:keys [now resets-at last-pct]} window-hours]
-  (let [cutoff (- now (* window-hours 3600))
-        recent (filterv #(>= (:ts %) cutoff) observed)]
-    (when (>= (count recent) 2)
-      (let [a (first recent)
-            b (last recent)
-            dt-hr (/ (- (:ts b) (:ts a)) 3600.0)]
-        (when (pos? dt-hr)
-          (let [r        (max 0.0 (/ (- (:pct b) (:pct a)) dt-hr))
-                forward  (max 0.0 (/ (- resets-at now) 3600.0))
-                proj     (max last-pct (+ last-pct (* r forward)))]
-            {:method (keyword (str "trailing-" window-hours "h"))
-             :name   (format "Trailing %dh rate" window-hours)
-             :rate   r
-             :proj   proj
-             :band   nil}))))))
-
 ;; --- aggregation ---
 
 (defn all-projections
@@ -371,9 +327,6 @@
   of method maps (in display order), filtering out methods that lacked
   enough data."
   [observed window-info]
-  (->> [(ewma-projection observed window-info)
-        (ols-projection observed window-info)
-        (bayes-projection observed window-info)
-        (trailing-rate-projection observed window-info 6)
-        (trailing-rate-projection observed window-info 24)]
+  (->> [(linear-projection observed window-info)
+        (bayes-projection observed window-info)]
        (filterv some?)))

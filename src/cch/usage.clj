@@ -80,11 +80,8 @@
   "Color + display order per projection method. Methods not in this
    map are still rendered (with a default gray) but lose stable
    ordering across page loads."
-  {:ewma         {:color "#7c3aed" :order 0}
-   :ols          {:color "#2563eb" :order 1}
-   :bayes        {:color "#f59e0b" :order 2}
-   :trailing-6h  {:color "#94a3b8" :order 3}
-   :trailing-24h {:color "#475569" :order 4}})
+  {:linear {:color "#2563eb" :order 0}   ; frequentist — blue
+   :bayes  {:color "#f59e0b" :order 1}}) ; Bayesian — orange
 
 (defn- method-color [m]
   (get-in method-style [m :color] "#6b7280"))
@@ -273,14 +270,10 @@
    /* Hover-from-anywhere: legend item, the projection line itself, or the
       side-panel method-row. Scope at .usage-grid so :has() reaches the
       side panel. Each method gets two rules: lift its band, fatten its line. */
-   div.usage-grid:has([data-method=\"ewma\"]:hover) svg.usage-chart .band-region[data-method=\"ewma\"],
-   div.usage-grid:has([data-method=\"ols\"]:hover) svg.usage-chart .band-region[data-method=\"ols\"],
+   div.usage-grid:has([data-method=\"linear\"]:hover) svg.usage-chart .band-region[data-method=\"linear\"],
    div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .band-region[data-method=\"bayes\"] { opacity: 1; }
-   div.usage-grid:has([data-method=\"ewma\"]:hover) svg.usage-chart .proj-line[data-method=\"ewma\"],
-   div.usage-grid:has([data-method=\"ols\"]:hover) svg.usage-chart .proj-line[data-method=\"ols\"],
-   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"bayes\"],
-   div.usage-grid:has([data-method=\"trailing-6h\"]:hover) svg.usage-chart .proj-line[data-method=\"trailing-6h\"],
-   div.usage-grid:has([data-method=\"trailing-24h\"]:hover) svg.usage-chart .proj-line[data-method=\"trailing-24h\"] { stroke-width: 3; }
+   div.usage-grid:has([data-method=\"linear\"]:hover) svg.usage-chart .proj-line[data-method=\"linear\"],
+   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"bayes\"] { stroke-width: 3; }
    /* Side panel */
    div.usage-stats { display: flex; flex-direction: column; gap: 0.6em; font-family: var(--bulma-family-primary); }
    div.usage-stats .stat { padding: 0.5em 0.75em; background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 4px; }

@@ -916,10 +916,10 @@
               [:div.container
                (nav-bar :usage)
                [:p.subtitle
-                "Current 7-day rate-limit window: observed usage and "
-                "five forward projections (EWMA, OLS, Bayesian conj.-Gaussian, "
-                "trailing 6h/24h). The Bayesian 90% credible interval is "
-                "drawn as a band; per-method bands appear in the side panel."]
+                "Current 7-day rate-limit window. Two forward projections: "
+                "constrained linear regression (frequentist, b≥0) and "
+                "Bayesian with empirical prior. Hover a method's row, line, "
+                "or legend entry to reveal its 90% interval band."]
                [:p.meta
                 [:a {:href "/usage"} "↻ refresh"]]
                (usage/page-body data)]]]]))))
