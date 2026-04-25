@@ -189,7 +189,12 @@
           window-start (- resets-at (* 7 86400))
           ;; Query by timestamp directly — we want the entire current
           ;; 7-day window, however dense or sparse the writes are.
-          in-window    (vec (snapshots-since (epoch->iso window-start)))
+          raw          (vec (snapshots-since (epoch->iso window-start)))
+          ;; Thin bursty regions to one sample per 15 minutes. statusLine
+          ;; can fire 100+ times in a minute during active use; OLS would
+          ;; otherwise count them all as independent observations and
+          ;; produce overconfident bands.
+          in-window    (proj/thin-by-time raw 900)
           now          (-> (Instant/now) .getEpochSecond)
           last-pct     (:pct (last in-window))
           window-info  {:now now :resets-at resets-at

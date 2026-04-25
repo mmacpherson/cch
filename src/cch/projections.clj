@@ -110,6 +110,22 @@
           mono (isotonic-pav (mapv :raw raw))]
       (mapv (fn [pt y] {:ts (:ts pt) :pct y}) raw mono))))
 
+(defn thin-by-time
+  "Reduce a sequence of `{:ts :pct}` snapshots to one representative
+   per `bucket-secs`-wide bucket. Helps when the snapshot stream is
+   bursty (e.g. statusLine fires 100 times in a few seconds during
+   active use): the OLS fit and chart density don't benefit from
+   counting tightly-clustered samples as independent observations.
+
+   Picks the first sample in each bucket — preserves the 'leading
+   edge' of each time slice, which for cumulative usage is the
+   conservative choice."
+  [observed bucket-secs]
+  (->> observed
+       (group-by #(quot (:ts %) bucket-secs))
+       (sort-by key)
+       (mapv (comp first val))))
+
 (defn rate-samples
   "Inter-sample rates within the window, %/hr. Drops:
    - sub-15-minute gaps (anchor carries forward — no rate info at

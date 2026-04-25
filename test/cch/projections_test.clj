@@ -200,6 +200,21 @@
     (is (= [3.0 3.0 3.0 5.0 6.0]
            (p/isotonic-pav [4.0 2.0 3.0 5.0 6.0])))))
 
+;; --- thin-by-time ---
+
+(deftest thin-by-time-collapses-bursts
+  (testing "many samples within one bucket collapse to one"
+    (let [obs (mapv #(snap (+ 1000 %) (double %)) (range 50)) ; 50 samples in 50s
+          thinned (p/thin-by-time obs 900)]                   ; 15-min buckets
+      (is (= 1 (count thinned)))))
+  (testing "samples spread across buckets keep one each"
+    (let [obs [(snap 0 0) (snap 1 0)         ; bucket 0
+               (snap 901 1) (snap 902 1)     ; bucket 1
+               (snap 1801 2)]                ; bucket 2
+          thinned (p/thin-by-time obs 900)]
+      (is (= 3 (count thinned)))
+      (is (= [0 901 1801] (mapv :ts thinned))))))
+
 ;; --- aggregator ---
 
 (deftest all-projections-filters-empty-methods
