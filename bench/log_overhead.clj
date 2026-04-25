@@ -10,7 +10,8 @@
     - CCH_LOG_SYNC=1 cost for comparison"
   (:require [cch.log :as log]
             [cch.middleware :as mw]
-            [babashka.fs :as fs]))
+            [babashka.fs :as fs]
+            [babashka.process :as p]))
 
 (defn- percentile [sorted p]
   (let [idx (int (* p (count sorted)))]
@@ -92,8 +93,8 @@
   (println "\nIsolating the cost within wrap-logging:")
   (bench "ensure-db! (warm)"     1000 #(log/ensure-db! (log/db-path)))
   (bench "p/process sqlite3"     100
-         #(babashka.process/process ["sqlite3" (log/db-path) "SELECT 1;"]
-                                    {:out :discard :err :discard}))
+         #(p/process ["sqlite3" (log/db-path) "SELECT 1;"]
+                     {:out :discard :err :discard}))
 
   (println "\nCold DB (first-call ensure-db! path):")
   (let [tmp (str (fs/create-temp-dir {:prefix "bench-cold-"}))
@@ -101,12 +102,11 @@
     (try
       ;; Override db-path via env
       (System/setProperty "user.home" tmp)
-      (let [orig-path (log/db-path)]
-        (println (str "  (simulating via tmp dir: " tmp ")"))
-        ;; Not a true cold start — JVM is warm — but captures ensure-db! cost
-        (bench "cold ensure-db! + log" 5
-               #(do (fs/delete-if-exists tmp-db)
-                    ((mw/wrap-logging no-op) sample-input))))
+      (println (str "  (simulating via tmp dir: " tmp ")"))
+      ;; Not a true cold start — JVM is warm — but captures ensure-db! cost
+      (bench "cold ensure-db! + log" 5
+             #(do (fs/delete-if-exists tmp-db)
+                  ((mw/wrap-logging no-op) sample-input)))
       (finally
         (fs/delete-tree tmp))))
 

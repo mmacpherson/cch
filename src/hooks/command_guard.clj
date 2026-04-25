@@ -11,8 +11,7 @@
           - \"DROP TABLE\"
           - \"mkfs\""
   (:require [cch.core :refer [defhook]]
-            [cch.config :as config]
-            [clojure.string :as str]))
+            [cch.config :as config]))
 
 (def ^:private builtin-patterns
   [{:label "recursive force-delete of system paths"
