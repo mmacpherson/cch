@@ -857,6 +857,18 @@
        :headers {"Content-Type" "application/json"}
        :body    (json/generate-string {:error (.getMessage e)})})))
 
+(defn- coerce-current-tokens
+  "Claude Code's statusLine schema for context_window.current_usage has
+  shifted from a single number (older builds) to an object with a
+  per-source breakdown ({input_tokens, output_tokens, cache_*}). Be
+  lenient: number passes through, map sums its numeric values, anything
+  else collapses to nil (the JSON blob preserves the full original)."
+  [v]
+  (cond
+    (number? v) v
+    (map? v)    (reduce + 0 (filter number? (vals v)))
+    :else       nil))
+
 (defn- handle-context-snapshot
   "POST /context-snapshot — store a context window snapshot from the status line.
   Accepts the full statusLine JSON payload; extracts indexed columns and
@@ -869,7 +881,7 @@
       (log/log-context-snapshot!
         {:session-id     (:session_id body)
          :used-pct       (:used_percentage ctx)
-         :current-tokens (:current_usage ctx)
+         :current-tokens (coerce-current-tokens (:current_usage ctx))
          :window-size    (:context_window_size ctx)
          :model-id       (get-in body [:model :id])
          :payload        body-str})

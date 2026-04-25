@@ -289,6 +289,57 @@
     (testing "type badges rendered as Bulma tags"
       (is (str/includes? (:body resp) "tag")))))
 
+;; --- /context-snapshot — schema variations of context_window.current_usage ---
+
+(deftest test-coerce-current-tokens-shapes
+  (testing "passes a number through unchanged"
+    (is (= 1234 (#'server/coerce-current-tokens 1234))))
+  (testing "sums a per-source breakdown map (current Claude Code schema)"
+    (is (= (+ 1 122 800 191721)
+           (#'server/coerce-current-tokens
+             {:input_tokens 1
+              :output_tokens 122
+              :cache_creation_input_tokens 800
+              :cache_read_input_tokens 191721}))))
+  (testing "ignores non-numeric values inside the map"
+    (is (= 5 (#'server/coerce-current-tokens
+               {:input_tokens 5 :note "ignored"}))))
+  (testing "nil and unsupported types collapse to nil"
+    (is (nil? (#'server/coerce-current-tokens nil)))
+    (is (nil? (#'server/coerce-current-tokens "1234")))
+    (is (nil? (#'server/coerce-current-tokens [1 2 3])))))
+
+(deftest test-context-snapshot-accepts-realistic-payload
+  (testing "POST /context-snapshot with the post-2026 schema (current_usage as map) returns 204"
+    (let [body {:session_id "ctx-snap-test"
+                :model {:id "claude-opus-4-7"}
+                :context_window
+                {:total_input_tokens 3325
+                 :total_output_tokens 95734
+                 :context_window_size 1000000
+                 :current_usage {:input_tokens 1
+                                 :output_tokens 122
+                                 :cache_creation_input_tokens 800
+                                 :cache_read_input_tokens 191721}
+                 :used_percentage 19
+                 :remaining_percentage 81}
+                :rate_limits {:seven_day {:used_percentage 29
+                                          :resets_at 1777518000}}}
+          resp (http/post (url "/context-snapshot")
+                          {:body (json/generate-string body)
+                           :headers {"Content-Type" "application/json"}
+                           :throw false})]
+      (is (= 204 (:status resp)))
+      (testing "row landed with both indexed columns populated"
+        (let [r (-> (p/sh ["sqlite3" "-json" *tmp-db*
+                           "SELECT used_pct, current_tokens FROM context_snapshots WHERE session_id='ctx-snap-test' ORDER BY id DESC LIMIT 1;"])
+                    :out
+                    str/trim
+                    (json/parse-string true)
+                    first)]
+          (is (= 19.0 (:used_pct r)))
+          (is (= (+ 1 122 800 191721) (:current_tokens r))))))))
+
 (deftest test-hooks-toggle-form-post
   (testing "POST /hooks/toggle upserts the row"
     (http/post (url "/hooks/toggle")
