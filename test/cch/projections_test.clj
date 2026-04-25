@@ -68,18 +68,38 @@
       (testing "perfect fit → tight band"
         (is (< (- (:hi band) (:lo band)) 0.5))))))
 
+(deftest ols-monotone-on-decreasing-data
+  (testing "if the unconstrained OLS slope is negative (synthetic case where pct decreases), use b=0 + horizontal fit"
+    ;; pct goes 10, 9, 8, 7, 6 (decreasing — pathological for monotone usage)
+    (let [obs (mapv (fn [i] (snap (* i 3600) (double (- 10 i)))) (range 5))
+          win (window-info obs 24)
+          {:keys [rate proj band]} (p/ols-projection obs win)]
+      (is (= 0.0 rate) "monotone constraint pins rate at 0 when unconstrained slope < 0")
+      (is (>= proj (:last-pct win)) "projection never below current pct")
+      (is (>= (:lo band) (:last-pct win)) "band lo clamped at current pct"))))
+
 (deftest ols-needs-three-points
   (is (nil? (p/ols-projection [(snap 0 0) (snap 3600 1)]
                               (window-info [(snap 0 0) (snap 3600 1)] 24)))))
 
 ;; --- bayes-projection ---
 
-(deftest bayes-shrinks-toward-prior-with-few-samples
-  (testing "with just a couple samples way above target, posterior is between target and observed"
-    (let [obs (linear-samples 3 0 5.0)              ;; well above 0.6 %/hr target
+(deftest bayes-shrinks-strongly-toward-empirical-prior
+  (testing "with the tight empirical prior (μ₀=0.55, σ₀=0.12), a few samples way above prior get pulled hard toward the prior"
+    (let [obs (linear-samples 3 0 5.0)             ;; rate 5 %/hr — way above prior
           win (window-info obs 24)
           {:keys [rate]} (p/bayes-projection obs win)]
-      (is (< 0.6 rate 5.0)))))
+      (is (< 0.55 rate 2.0)
+          "posterior should sit between prior (0.55) and 2.0; old loose prior would let it run to ~5"))))
+
+(deftest bayes-band-stays-bounded-at-long-horizon
+  (testing "a 30-day horizon doesn't blow up the band — Brownian variance grows linearly, not quadratically"
+    (let [obs (linear-samples 12 0 0.6)
+          win (window-info obs (* 30 24))           ;; 30 days out
+          {:keys [band proj]} (p/bayes-projection obs win)
+          half-width (- (:hi band) proj)]
+      (is (< half-width 200.0)
+          "old σ²·Δt² model would produce a band wider than 1000% on the high side at 30d"))))
 
 (deftest bayes-band-widens-with-noisy-rates
   (testing "noisy rates produce a wider credible interval than steady rates"

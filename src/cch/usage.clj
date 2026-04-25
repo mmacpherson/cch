@@ -198,7 +198,7 @@
            [:polyline {:points pts
                        :fill "none"
                        :stroke (method-color method)
-                       :stroke-width 2.75
+                       :stroke-width 2.25
                        :stroke-dasharray "5 4"
                        :class (str "proj-line proj-" mname)
                        :data-method mname}]])]

@@ -208,69 +208,126 @@
     {:pred y-pred
      :half-width (or (some-> se (* z-90)) 0.0)}))
 
+(defn- monotone-ols-fit
+  "OLS fit y = a + b*x with b constrained to be non-negative (used_percentage
+   can only go up). When unconstrained b ≥ 0 the result is identical to OLS;
+   when unconstrained b < 0 we collapse to b=0, a=ȳ — a horizontal fit at
+   the sample mean. Residuals are recomputed against the constrained line so
+   the prediction interval reflects the actual model used."
+  [pts]
+  (let [{:keys [a b sxx x-bar n] :as raw} (ols-fit pts)]
+    (if (>= b 0)
+      raw
+      (let [ys      (mapv second pts)
+            xs      (mapv first pts)
+            y-bar   (/ (reduce + 0.0 ys) n)
+            resid   (map (fn [y] (- y y-bar)) ys)
+            sse     (reduce + 0.0 (map #(* % %) resid))
+            sigma2  (if (> n 2) (/ sse (- n 2)) 0.0)]
+        ;; preserve sxx and x-bar so ols-prediction's PI math still works
+        {:a y-bar :b 0.0 :sxx sxx :x-bar x-bar :n n :sigma2 sigma2}))))
+
 (defn ols-projection
-  "OLS line through (ts→hours-from-window-start, pct). Forward-projects
-  to resets_at with a Gaussian 90% prediction interval. Floors at the
-  current pct (a downward fit shouldn't claim usage will go down)."
+  "OLS with built-in monotonicity: fits y = a + b*x with b ≥ 0 (a downward
+   slope is impossible for cumulative usage, so we use b=0 and a=ȳ in that
+   case). Forward-projects to resets_at with a Gaussian 90% PI, floored at
+   the current pct."
   [observed {:keys [now resets-at window-start last-pct]}]
   (when (>= (count observed) 3)
-    (let [;; convert to hours-since-window-start to keep numbers small
-          to-x (fn [ts] (/ (- ts window-start) 3600.0))
+    (let [to-x (fn [ts] (/ (- ts window-start) 3600.0))
           pts  (mapv (fn [{:keys [ts pct]}] [(to-x ts) pct]) observed)
-          fit  (ols-fit pts)
+          fit  (monotone-ols-fit pts)
           {:keys [pred half-width]} (ols-prediction fit (to-x resets-at))
           proj (max last-pct pred)
           lo   (max last-pct (- pred half-width))
-          hi   (max last-pct (+ pred half-width))
-          dt-hr (max 1e-9 (/ (- resets-at now) 3600.0))]
+          hi   (max last-pct (+ pred half-width))]
       {:method :ols
-       :name   "OLS linear"
-       :rate   (max 0.0 (/ (- proj last-pct) dt-hr))
+       :name   "OLS (b≥0, monotone)"
+       ;; Report the constrained slope directly. For a horizontal fit
+       ;; this is 0, even when proj > last_pct (the fit's intercept can
+       ;; be above the most recent sample on synthetic decreasing data).
+       :rate   (max 0.0 (:b fit))
        :proj   proj
        :band   {:lo lo :hi hi}})))
 
 ;; --- 3. Bayesian conjugate Gaussian on the rate ---
 
+;; Empirical prior on the average weekly rate.
+;; User reports typical end-of-week pct 80-95%, occasionally 100%:
+;;   mean_rate ≈ 87.5/(7·24) = 0.521 %/hr
+;;   σ on average rate ≈ (15pp/2)/(7·24) ≈ 0.045 %/hr (across-week)
+;; This is a strong prior — the user has a confident sense of their
+;; baseline. Tightness here is what stops the posterior from running
+;; off to whatever the most recent few rate samples suggest.
+(def ^:private bayes-prior-mu 0.55)
+(def ^:private bayes-prior-sigma 0.045)
+
+;; Floor on observed rate variance: pct is quantized to integer percent,
+;; so a 1-hour gap carries ±0.5%/hr quantization noise. Without this
+;; floor, synthetic data with identical rates makes σ_ε → 0 and the
+;; data overwhelms the prior.
+(def ^:private rate-noise-floor-sigma2 0.25)
+
 (defn- bayes-rate-posterior
-  "Conjugate update for r ~ N(mu0, sigma0^2) given rate observations
-  with empirical variance. Returns posterior {:mu :sigma2}."
-  [rates mu0 sigma0]
-  (let [n (count rates)]
-    (if (zero? n)
-      {:mu mu0 :sigma2 (* sigma0 sigma0)}
-      (let [r-mean      (/ (reduce + 0.0 rates) n)
-            r-var       (if (> n 1)
-                          (/ (reduce + 0.0
-                                     (map #(let [d (- % r-mean)] (* d d)) rates))
-                             (dec n))
-                          (* sigma0 sigma0))
-            sigma-obs2  (max r-var 1e-6)
-            tau-0       (/ 1.0 (* sigma0 sigma0))
-            tau-obs     (/ n sigma-obs2)
-            tau-n       (+ tau-0 tau-obs)
-            mu-n        (/ (+ (* tau-0 mu0) (* tau-obs r-mean)) tau-n)
-            sigma2-n    (/ 1.0 tau-n)]
-        {:mu mu-n :sigma2 sigma2-n}))))
+  "Conjugate update for the *average* week-rate R ~ N(μ₀, σ₀²) given
+  observed inter-sample rates with empirical variance σ_ε². Returns
+  posterior {:mu :sigma2 :sigma-eps2 :tau-avg-hr}."
+  [rates dts mu0 sigma0]
+  (let [n (count rates)
+        r-mean (/ (reduce + 0.0 rates) (max 1 n))
+        r-var  (if (> n 1)
+                 (/ (reduce + 0.0
+                            (map #(let [d (- % r-mean)] (* d d)) rates))
+                    (dec n))
+                 (* sigma0 sigma0))
+        sigma-eps2 (max r-var rate-noise-floor-sigma2)
+        tau-avg    (if (zero? n) 1.0 (/ (reduce + 0.0 dts) n))
+        tau-0      (/ 1.0 (* sigma0 sigma0))
+        tau-data   (if (zero? n) 0.0 (/ n sigma-eps2))
+        tau-post   (+ tau-0 tau-data)
+        mu-post    (/ (+ (* tau-0 mu0) (* tau-data r-mean)) tau-post)
+        sigma2-R   (/ 1.0 tau-post)]
+    {:mu mu-post :sigma2 sigma2-R
+     :sigma-eps2 sigma-eps2 :tau-avg-hr tau-avg}))
 
 (defn bayes-projection
-  "Bayesian conjugate Gaussian on rate. Prior centered at the linear
-  weekly target (0.595 %/hr), with σ₀ at the same scale (loose enough
-  that ~5 observations dominate). Posterior projects forward to
-  resets_at; 90% credible interval comes from Var(r·Δt)=Var(r)·Δt²."
+  "Bayesian Gaussian model with two improvements over the original:
+
+   1. Empirical prior. Centered at 0.55 %/hr (≈ what's needed to land
+      at 92% over 7 days), σ₀ = 0.12 %/hr — much tighter than a flat
+      'target rate' prior, so a few hours of data barely move the
+      posterior unless they're substantially off-prior.
+
+   2. Brownian-motion-style variance. Originally Var[pct(reset)]
+      grew as σ²·Δt², which assumes 'whatever rate I infer now is locked
+      in for the entire 105-hour horizon' and produces absurd bands.
+      Replace with σ²_R·Δt² + σ²_BM·Δt, where σ²_BM ≈ σ²_ε · τ_avg
+      (within-week noise integrated over the projection horizon, like
+      Brownian motion). At long horizons the linear Δt term dominates
+      and the band scales like √Δt rather than Δt.
+
+   Monotonicity comes from clamping the posterior rate at 0 and the
+   band lower edge at last_pct."
   [observed {:keys [now resets-at last-pct]}]
   (let [rs    (rate-samples observed)
-        rates (mapv :rate rs)]
+        rates (mapv :rate rs)
+        dts   (mapv :dt-hr rs)]
     (when (>= (count rates) 2)
-      (let [{:keys [mu sigma2]} (bayes-rate-posterior rates target-pct-per-hr 1.0)
-            dt-hr (max 0.0 (/ (- resets-at now) 3600.0))
-            proj  (max last-pct (+ last-pct (* mu dt-hr)))
-            sd    (Math/sqrt (* sigma2 dt-hr dt-hr))
-            lo    (max last-pct (+ last-pct (* mu dt-hr) (* -1.0 z-90 sd)))
-            hi    (max last-pct (+ last-pct (* mu dt-hr) (*  1.0 z-90 sd)))]
+      (let [{:keys [mu sigma2 sigma-eps2 tau-avg-hr]}
+            (bayes-rate-posterior rates dts bayes-prior-mu bayes-prior-sigma)
+            dt-hr     (max 0.0 (/ (- resets-at now) 3600.0))
+            mu*       (max 0.0 mu)            ; non-negative average rate
+            sigma-bm2 (* sigma-eps2 tau-avg-hr)
+            var-proj  (+ (* sigma2 dt-hr dt-hr)    ; uncertainty in mean R
+                         (* sigma-bm2 dt-hr))      ; cumulative within-week noise
+            sd-proj   (Math/sqrt var-proj)
+            mean-proj (+ last-pct (* mu* dt-hr))
+            lo        (max last-pct (- mean-proj (* z-90 sd-proj)))
+            hi        (max last-pct (+ mean-proj (* z-90 sd-proj)))]
         {:method :bayes
-         :name   "Bayesian (conj. Gaussian on rate)"
-         :rate   mu
-         :proj   proj
+         :name   "Bayesian (empirical prior, BM)"
+         :rate   mu*
+         :proj   mean-proj
          :band   {:lo lo :hi hi}}))))
 
 ;; --- 4. Trailing-window mean rate ---
