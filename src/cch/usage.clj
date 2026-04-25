@@ -39,11 +39,16 @@
     (-> hi (/ 10.0) Math/ceil long (* 10) (min 200))))
 
 (defn- scale-x [{:keys [window-start resets-at]} {:keys [x0 x1]}]
-  (let [span (- resets-at window-start)]
-    (fn [t] (+ x0 (* (- t window-start) (/ (- x1 x0) span))))))
+  ;; Ratios sneak in when integer dividends collide with integer divisors.
+  ;; Force doubles end-to-end — browsers reject "184951/525" in SVG point
+  ;; lists and silently drop the polyline.
+  (let [span (double (- resets-at window-start))
+        slope (/ (double (- x1 x0)) span)]
+    (fn [t] (+ (double x0) (* (- (double t) window-start) slope)))))
 
 (defn- scale-y [y-top {:keys [y0 y1]}]
-  (fn [pct] (- y1 (* pct (/ (- y1 y0) y-top)))))
+  (let [slope (/ (double (- y1 y0)) (double y-top))]
+    (fn [pct] (- (double y1) (* (double pct) slope)))))
 
 ;; --- formatting helpers ---
 
@@ -108,12 +113,23 @@
           y-ticks (range 0 (inc y-top) 25)
           day-ticks (->> (iterate #(+ % 86400) window-start)
                          (take-while #(<= % resets-at)))
-          bayes-band (some #(when (= :bayes (:method %)) (:band %)) projections)
-          line-for (fn [proj-pct] [[proj-x0 (sy last-pct)] [proj-x1 (sy proj-pct)]])]
+          line-for (fn [proj-pct] [[proj-x0 (sy last-pct)] [proj-x1 (sy proj-pct)]])
+          ;; rgba helper so each band fills with its method's color at low alpha
+          rgba (fn [hex a]
+                 (let [r (Integer/parseInt (subs hex 1 3) 16)
+                       g (Integer/parseInt (subs hex 3 5) 16)
+                       b (Integer/parseInt (subs hex 5 7) 16)]
+                   (format "rgba(%d,%d,%d,%.2f)" r g b a)))]
       [:svg {:viewBox (str "0 0 " chart-w " " chart-h)
              :width   "100%"
              :role    "img"
              :class   "usage-chart"}
+       ;; clipPath so projection bands/lines that exceed the y-axis
+       ;; ceiling (a runaway EWMA at 500% etc.) get cropped to the
+       ;; plot rectangle instead of bleeding into the header.
+       [:defs
+        [:clipPath {:id "plot-clip"}
+         [:rect {:x x0 :y y0 :width (- x1 x0) :height (- y1 y0)}]]]
        ;; --- gridlines + y-axis labels ---
        (for [pct y-ticks
              :let [y (sy pct)]]
@@ -148,21 +164,25 @@
                   :font-size 10
                   :fill "var(--bulma-text-weak)"}
            "now"]])
-       ;; --- Bayesian credible interval (only band drawn on chart) ---
-       (when bayes-band
-         [:path {:d (band-path (line-for (:hi bayes-band))
-                               (line-for (:lo bayes-band)))
-                 :fill "rgba(245, 158, 11, 0.18)"
-                 :stroke "none"
-                 :class "band-bayes"}])
-       ;; --- projection lines, one per method ---
-       (for [{:keys [method proj]} (ordered-projections projections)]
-         [:polyline {:points (points-attr (line-for proj))
-                     :fill "none"
-                     :stroke (method-color method)
-                     :stroke-width 2
-                     :stroke-dasharray "5 4"
-                     :class (str "proj-" (name method))}])
+       ;; --- per-method bands and projection lines, clipped to plot area ---
+       [:g {:clip-path "url(#plot-clip)"}
+        ;; bands first so lines render on top
+        (for [{:keys [method band]} (ordered-projections projections)
+              :when band]
+          [:path {:d (band-path (line-for (:hi band))
+                                (line-for (:lo band)))
+                  :fill (rgba (method-color method) 0.18)
+                  :stroke "none"
+                  :class "band-region"
+                  :data-method (name method)}])
+        (for [{:keys [method proj]} (ordered-projections projections)]
+          [:polyline {:points (points-attr (line-for proj))
+                      :fill "none"
+                      :stroke (method-color method)
+                      :stroke-width 2.5
+                      :stroke-dasharray "5 4"
+                      :class (str "proj-line proj-" (name method))
+                      :data-method (name method)}])]
        ;; --- observed line + points ---
        (when (seq obs-pts)
          [:polyline {:points (points-attr obs-pts)
@@ -173,17 +193,18 @@
          [:circle {:cx x :cy y :r 2.5 :fill "#059669"}])])))
 
 (defn legend
-  "Inline legend describing the chart's lines + the Bayesian band."
+  "Inline legend. Hovering a method entry isolates that method on the
+   chart (others fade) via the CSS rules in page-css."
   [data]
   [:div.legend
-   [:span.swatch.observed] " observed "
+   [:span.legend-item
+    [:span.swatch.observed] " observed"]
    (for [{:keys [method name]} (ordered-projections (:projections data))]
-     [:span " "
+     [:span.legend-item {:data-method (clojure.core/name method)}
       [:span.swatch {:style (str "background:" (method-color method))}]
       " " name])
-   " "
-   [:span.swatch.bayes-band] " 90% CI (Bayes) "
-   [:span.swatch.ref100] " 100% reference"])
+   [:span.legend-item
+    [:span.swatch.ref100] " 100% reference"]])
 
 (defn- fmt-band [{:keys [lo hi]}]
   (when (and lo hi (not= lo hi))
@@ -209,8 +230,30 @@
 
 (def page-css
   "div.usage-grid { display: grid; grid-template-columns: 1fr 280px; gap: 1.5em; align-items: start; }
-   div.usage-chart-wrap { background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 6px; padding: 0.75em; }
+   div.usage-chart-block { background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 6px; padding: 0.75em; }
    svg.usage-chart .ref-100 { stroke: #dc2626; stroke-dasharray: none; }
+   svg.usage-chart .proj-line { transition: opacity 0.18s ease; }
+   svg.usage-chart .band-region { transition: opacity 0.18s ease; }
+   div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.6em; display: flex; flex-wrap: wrap; gap: 0.6em 1.1em; line-height: 1.6; }
+   div.legend .legend-item { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.05em 0.25em; border-radius: 3px; cursor: default; transition: background 0.18s ease; }
+   div.legend .legend-item[data-method]:hover { background: var(--bulma-scheme-main-bis); color: var(--bulma-text); }
+   div.legend .swatch { display: inline-block; width: 1.2em; height: 0.5em; vertical-align: middle; border-radius: 1px; }
+   div.legend .swatch.observed { background: #059669; }
+   div.legend .swatch.ref100   { background: #dc2626; }
+   /* Hover-isolate: when any legend method item is hovered, dim everything;
+      then per-method rules below restore opacity for the matching ones. */
+   div.usage-chart-block:has(div.legend .legend-item[data-method]:hover) svg.usage-chart .proj-line { opacity: 0.12; }
+   div.usage-chart-block:has(div.legend .legend-item[data-method]:hover) svg.usage-chart .band-region { opacity: 0.04; }
+   div.usage-chart-block:has(div.legend .legend-item[data-method=\"ewma\"]:hover) svg.usage-chart [data-method=\"ewma\"]:not(.legend-item) { opacity: 1; }
+   div.usage-chart-block:has(div.legend .legend-item[data-method=\"ols\"]:hover) svg.usage-chart [data-method=\"ols\"]:not(.legend-item) { opacity: 1; }
+   div.usage-chart-block:has(div.legend .legend-item[data-method=\"bayes\"]:hover) svg.usage-chart [data-method=\"bayes\"]:not(.legend-item) { opacity: 1; }
+   div.usage-chart-block:has(div.legend .legend-item[data-method=\"trailing-6h\"]:hover) svg.usage-chart [data-method=\"trailing-6h\"]:not(.legend-item) { opacity: 1; }
+   div.usage-chart-block:has(div.legend .legend-item[data-method=\"trailing-24h\"]:hover) svg.usage-chart [data-method=\"trailing-24h\"]:not(.legend-item) { opacity: 1; }
+   /* For the band specifically, when its method is isolated, lift its opacity higher than the dimmed default. */
+   div.usage-chart-block:has(div.legend .legend-item[data-method=\"ewma\"]:hover) svg.usage-chart .band-region[data-method=\"ewma\"],
+   div.usage-chart-block:has(div.legend .legend-item[data-method=\"ols\"]:hover) svg.usage-chart .band-region[data-method=\"ols\"],
+   div.usage-chart-block:has(div.legend .legend-item[data-method=\"bayes\"]:hover) svg.usage-chart .band-region[data-method=\"bayes\"] { opacity: 1; }
+   /* Side panel — usage-stats and per-method projections list */
    div.usage-stats { display: flex; flex-direction: column; gap: 0.6em; font-family: var(--bulma-family-primary); }
    div.usage-stats .stat { padding: 0.5em 0.75em; background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 4px; }
    div.usage-stats .k { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.05em; color: var(--bulma-text-weak); }
@@ -220,19 +263,16 @@
    div.method-row { display: grid; grid-template-columns: 0.9em 1fr auto; gap: 0.4em; align-items: center; font-family: var(--bulma-family-code); font-size: 0.85em; }
    div.method-row .swatch { width: 0.9em; height: 0.5em; border-radius: 1px; }
    div.method-row .method-name { font-family: var(--bulma-family-primary); font-size: 0.8em; color: var(--bulma-text-weak); }
-   div.method-row .method-proj .aux { color: var(--bulma-text-weak); font-size: 0.75em; }
-   div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.5em; line-height: 1.6; }
-   div.legend .swatch { display: inline-block; width: 1.2em; height: 0.5em; vertical-align: middle; margin: 0 0.2em 0 0.4em; border-radius: 1px; }
-   div.legend .swatch.observed   { background: #059669; }
-   div.legend .swatch.bayes-band { background: rgba(245, 158, 11, 0.4); }
-   div.legend .swatch.ref100     { background: #dc2626; }")
+   div.method-row .method-proj .aux { color: var(--bulma-text-weak); font-size: 0.75em; }")
 
 (defn page-body
   "Hiccup body for the /usage page. Caller wraps with html/head/nav."
   [data]
   [:div.usage-grid
-   [:div
-    [:div.usage-chart-wrap (chart-svg data)]
+   ;; Single block wraps chart + legend so :has() can reach from a
+   ;; legend hover into the SVG to isolate the matching method.
+   [:div.usage-chart-block
+    (chart-svg data)
     (legend data)]
    (when data (summary-stats data))])
 

@@ -58,13 +58,21 @@
       (is (re-find #"proj-bayes"        s))
       (is (re-find #"proj-trailing-24h" s)))))
 
-(deftest chart-svg-bayes-band-only
-  (testing "only the Bayesian band is drawn on the chart (other bands live in the stats panel)"
+(deftest chart-svg-bands-per-method
+  (testing "every projection with a band draws a path tagged with data-method"
     (let [s (str (u/chart-svg (make-data)))]
-      (is (re-find #"band-bayes" s))
-      ;; sanity: there's no path class for OLS or EWMA bands
-      (is (not (re-find #"band-ols"  s)))
-      (is (not (re-find #"band-ewma" s))))))
+      (is (re-find #"band-region" s))
+      ;; Clojure-printed form of [:path {:data-method "ewma"}] etc.
+      (is (re-find #":data-method \"ewma\""  s))
+      (is (re-find #":data-method \"ols\""   s))
+      (is (re-find #":data-method \"bayes\"" s)))))
+
+(deftest chart-svg-coords-are-numeric-not-ratios
+  (testing "polyline points must not contain Clojure ratios"
+    (let [s (str (u/chart-svg (make-data)))]
+      (doseq [[_ body] (re-seq #"points=\"([^\"]+)\"" s)]
+        (is (not (re-find #"/" body))
+            (str "ratio leaked into points=\"" body "\""))))))
 
 (deftest projection-above-100-is-clamped-to-y-top
   (testing "a runaway projection still fits inside viewBox"
