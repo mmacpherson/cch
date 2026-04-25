@@ -118,6 +118,39 @@
           out (p/trailing-rate-projection obs win 6)]
       (is (= 0.0 (:rate out))))))
 
+;; --- loess-smooth ---
+
+(deftest loess-smooth-passes-through-linear
+  (testing "a linear input is returned ~unchanged after smoothing"
+    (let [obs (linear-samples 20 0 0.5)
+          smoothed (p/loess-smooth obs 40 0.2)]
+      (is (= 40 (count smoothed)))
+      (testing "endpoints close to the truth at first/last sample times"
+        (is (< (Math/abs (- (:pct (first smoothed)) 0.0)) 0.5))
+        (is (< (Math/abs (- (:pct (last smoothed))
+                            (:pct (last obs))))
+               0.5))))))
+
+(deftest loess-smooth-flattens-noise
+  (testing "the smoothed curve has smaller adjacent jumps than the raw observations"
+    (let [;; jagged but trending up — alternating fast/slow 1h gaps
+          obs (mapv (fn [i]
+                      (let [base (* i 0.5)
+                                noise (if (even? i) 0.0 1.0)]
+                        (snap (* i 3600) (+ base noise))))
+                    (range 16))
+          smoothed (p/loess-smooth obs 60 0.2)
+          max-jump (fn [pts get-y]
+                     (apply max
+                            (map (fn [a b] (Math/abs (- (get-y b) (get-y a))))
+                                 pts (rest pts))))]
+      (is (< (max-jump smoothed :pct) (max-jump obs :pct))))))
+
+(deftest loess-smooth-needs-three-points
+  (is (nil? (p/loess-smooth [] 10 0.2)))
+  (is (nil? (p/loess-smooth [(snap 0 0)] 10 0.2)))
+  (is (nil? (p/loess-smooth [(snap 0 0) (snap 3600 1)] 10 0.2))))
+
 ;; --- aggregator ---
 
 (deftest all-projections-filters-empty-methods

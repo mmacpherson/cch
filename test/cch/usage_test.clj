@@ -97,6 +97,13 @@
       (is (re-find #"80%"       out) "EWMA proj")
       (is (re-find #"75%"       out) "Bayes proj"))))
 
+(deftest summary-stats-rows-have-data-method
+  (testing "each method-row carries a data-method attribute so hover triggers band reveal"
+    (let [out (str (u/summary-stats (make-data)))]
+      (is (re-find #":data-method \"ewma\""  out))
+      (is (re-find #":data-method \"ols\""   out))
+      (is (re-find #":data-method \"bayes\"" out)))))
+
 (deftest summary-stats-no-band-skips-band-text
   (testing "a method without a band shows just the point estimate"
     (let [data (make-data :projections [{:method :trailing-24h

@@ -26,6 +26,57 @@
 
 ;; --- shared sample preparation ---
 
+;; --- observed-curve smoothing (poor-man's LOESS) ---
+
+(defn- weighted-local-linear
+  "WLS fit y = a + b*x at the data, evaluated at x*.
+   Returns the predicted y, or nil if the local design is degenerate."
+  [xs ys ws x*]
+  (let [sw (reduce + 0.0 ws)]
+    (when (pos? sw)
+      (let [swx  (reduce + 0.0 (map * ws xs))
+            swy  (reduce + 0.0 (map * ws ys))
+            mx   (/ swx sw)
+            my   (/ swy sw)
+            swxx (reduce + 0.0 (map (fn [w x] (* w x x)) ws xs))
+            swxy (reduce + 0.0 (map (fn [w x y] (* w x y)) ws xs ys))
+            sxx  (- swxx (* sw mx mx))
+            sxy  (- swxy (* sw mx my))
+            b    (if (pos? sxx) (/ sxy sxx) 0.0)
+            a    (- my (* b mx))]
+        (+ a (* b x*))))))
+
+(defn- tricube
+  "Tricube kernel: (1 - u^3)^3 for |u|<1, else 0."
+  [u]
+  (let [au (Math/abs (double u))]
+    (if (>= au 1.0)
+      0.0
+      (let [v (- 1.0 (* au au au))] (* v v v)))))
+
+(defn loess-smooth
+  "Poor-man's LOESS: local-linear regression with tricube weights at
+   `n-eval` evenly-spaced eval points across the observed timespan.
+   `bandwidth-frac` is the kernel half-width as a fraction of the
+   observed span (0.2 ~= each fit sees ~40% of the data).
+   Returns [{:ts :pct} ...] or nil with too few points."
+  [observed n-eval bandwidth-frac]
+  (when (>= (count observed) 3)
+    (let [xs   (mapv :ts observed)
+          ys   (mapv :pct observed)
+          xmin (apply min xs)
+          xmax (apply max xs)
+          span (double (max 1 (- xmax xmin)))
+          h    (max 1.0 (* (double bandwidth-frac) span))
+          step (/ span (max 1 (dec n-eval)))]
+      (vec
+        (for [i (range n-eval)
+              :let [x*  (+ xmin (* i step))
+                    ws  (mapv #(tricube (/ (- % x*) h)) xs)
+                    y*  (weighted-local-linear xs ys ws x*)]
+              :when y*]
+          {:ts (long x*) :pct (max 0.0 y*)})))))
+
 (defn rate-samples
   "Inter-sample rates within the window, %/hr. Drops:
    - sub-15-minute gaps (anchor carries forward — no rate info at

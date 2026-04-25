@@ -8,7 +8,8 @@
 
   Pure functions of the data bundle from cch.ewma/current-window — easy
   to test without a server."
-  (:require [cch.ewma :as ewma])
+  (:require [cch.ewma :as ewma]
+            [cch.projections :as proj])
   (:import (java.time Instant ZoneId)
            (java.time.format DateTimeFormatter)))
 
@@ -107,7 +108,12 @@
           sx   (scale-x data rect)
           sy   (scale-y y-top rect)
           {:keys [x0 y0 x1 y1]} rect
-          obs-pts (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)]) observed)
+          obs-pts    (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)]) observed)
+          ;; LOESS-style smoothed curve: 80 evaluation points, kernel
+          ;; bandwidth ≈ 15% of the observed span. Falls back to raw
+          ;; points when there aren't enough samples.
+          smoothed   (some->> (proj/loess-smooth observed 80 0.15)
+                              (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)])))
           proj-x0 (sx now)
           proj-x1 (sx resets-at)
           y-ticks (range 0 (inc y-top) 25)
@@ -166,12 +172,12 @@
            "now"]])
        ;; --- per-method bands and projection lines, clipped to plot area ---
        [:g {:clip-path "url(#plot-clip)"}
-        ;; bands first so lines render on top
+        ;; bands first so lines render on top of them
         (for [{:keys [method band]} (ordered-projections projections)
               :when band]
           [:path {:d (band-path (line-for (:hi band))
                                 (line-for (:lo band)))
-                  :fill (rgba (method-color method) 0.18)
+                  :fill (rgba (method-color method) 0.22)
                   :stroke "none"
                   :class "band-region"
                   :data-method (name method)}])
@@ -179,18 +185,22 @@
           [:polyline {:points (points-attr (line-for proj))
                       :fill "none"
                       :stroke (method-color method)
-                      :stroke-width 2.5
+                      :stroke-width 1.75
                       :stroke-dasharray "5 4"
                       :class (str "proj-line proj-" (name method))
                       :data-method (name method)}])]
-       ;; --- observed line + points ---
-       (when (seq obs-pts)
-         [:polyline {:points (points-attr obs-pts)
+       ;; --- observed: smoothed line + small raw dots ---
+       (when (seq smoothed)
+         [:polyline {:points (points-attr smoothed)
                      :fill "none"
                      :stroke "#059669"
-                     :stroke-width 2}])
+                     :stroke-width 1.75
+                     :class "observed-smoothed"}])
        (for [[x y] obs-pts]
-         [:circle {:cx x :cy y :r 2.5 :fill "#059669"}])])))
+         [:circle {:cx x :cy y :r 1.6
+                   :fill "#059669"
+                   :fill-opacity 0.55
+                   :class "observed-point"}])])))
 
 (defn legend
   "Inline legend. Hovering a method entry isolates that method on the
@@ -222,7 +232,7 @@
      [:div.method-projections
       [:div.k "projected at reset"]
       (for [{:keys [method name proj band]} (ordered-projections projections)]
-        [:div.method-row
+        [:div.method-row {:data-method (clojure.core/name method)}
          [:span.swatch {:style (str "background:" (method-color method))}]
          [:span.method-name name]
          [:span.method-proj (format "%.0f%%" (double proj))
@@ -232,35 +242,36 @@
   "div.usage-grid { display: grid; grid-template-columns: 1fr 280px; gap: 1.5em; align-items: start; }
    div.usage-chart-block { background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 6px; padding: 0.75em; }
    svg.usage-chart .ref-100 { stroke: #dc2626; stroke-dasharray: none; }
-   svg.usage-chart .proj-line { transition: opacity 0.18s ease; }
-   svg.usage-chart .band-region { transition: opacity 0.18s ease; }
-   div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.6em; display: flex; flex-wrap: wrap; gap: 0.6em 1.1em; line-height: 1.6; }
-   div.legend .legend-item { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.05em 0.25em; border-radius: 3px; cursor: default; transition: background 0.18s ease; }
+   /* Defaults: bands hidden, lines slim, transitions on. */
+   svg.usage-chart .proj-line { transition: stroke-width 0.18s ease; pointer-events: stroke; }
+   svg.usage-chart .band-region { opacity: 0; transition: opacity 0.18s ease; pointer-events: none; }
+   /* Legend layout */
+   div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.6em; display: flex; flex-wrap: wrap; gap: 0.5em 1em; line-height: 1.6; }
+   div.legend .legend-item { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.05em 0.3em; border-radius: 3px; cursor: default; }
    div.legend .legend-item[data-method]:hover { background: var(--bulma-scheme-main-bis); color: var(--bulma-text); }
-   div.legend .swatch { display: inline-block; width: 1.2em; height: 0.5em; vertical-align: middle; border-radius: 1px; }
+   div.legend .swatch { display: inline-block; width: 1.2em; height: 0.5em; border-radius: 1px; }
    div.legend .swatch.observed { background: #059669; }
-   div.legend .swatch.ref100   { background: #dc2626; }
-   /* Hover-isolate: when any legend method item is hovered, dim everything;
-      then per-method rules below restore opacity for the matching ones. */
-   div.usage-chart-block:has(div.legend .legend-item[data-method]:hover) svg.usage-chart .proj-line { opacity: 0.12; }
-   div.usage-chart-block:has(div.legend .legend-item[data-method]:hover) svg.usage-chart .band-region { opacity: 0.04; }
-   div.usage-chart-block:has(div.legend .legend-item[data-method=\"ewma\"]:hover) svg.usage-chart [data-method=\"ewma\"]:not(.legend-item) { opacity: 1; }
-   div.usage-chart-block:has(div.legend .legend-item[data-method=\"ols\"]:hover) svg.usage-chart [data-method=\"ols\"]:not(.legend-item) { opacity: 1; }
-   div.usage-chart-block:has(div.legend .legend-item[data-method=\"bayes\"]:hover) svg.usage-chart [data-method=\"bayes\"]:not(.legend-item) { opacity: 1; }
-   div.usage-chart-block:has(div.legend .legend-item[data-method=\"trailing-6h\"]:hover) svg.usage-chart [data-method=\"trailing-6h\"]:not(.legend-item) { opacity: 1; }
-   div.usage-chart-block:has(div.legend .legend-item[data-method=\"trailing-24h\"]:hover) svg.usage-chart [data-method=\"trailing-24h\"]:not(.legend-item) { opacity: 1; }
-   /* For the band specifically, when its method is isolated, lift its opacity higher than the dimmed default. */
-   div.usage-chart-block:has(div.legend .legend-item[data-method=\"ewma\"]:hover) svg.usage-chart .band-region[data-method=\"ewma\"],
-   div.usage-chart-block:has(div.legend .legend-item[data-method=\"ols\"]:hover) svg.usage-chart .band-region[data-method=\"ols\"],
-   div.usage-chart-block:has(div.legend .legend-item[data-method=\"bayes\"]:hover) svg.usage-chart .band-region[data-method=\"bayes\"] { opacity: 1; }
-   /* Side panel — usage-stats and per-method projections list */
+   div.legend .swatch.ref100 { background: #dc2626; }
+   /* Hover-from-anywhere: legend item, the projection line itself, or the
+      side-panel method-row. Scope at .usage-grid so :has() reaches the
+      side panel. Each method gets two rules: lift its band, fatten its line. */
+   div.usage-grid:has([data-method=\"ewma\"]:hover) svg.usage-chart .band-region[data-method=\"ewma\"],
+   div.usage-grid:has([data-method=\"ols\"]:hover) svg.usage-chart .band-region[data-method=\"ols\"],
+   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .band-region[data-method=\"bayes\"] { opacity: 1; }
+   div.usage-grid:has([data-method=\"ewma\"]:hover) svg.usage-chart .proj-line[data-method=\"ewma\"],
+   div.usage-grid:has([data-method=\"ols\"]:hover) svg.usage-chart .proj-line[data-method=\"ols\"],
+   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"bayes\"],
+   div.usage-grid:has([data-method=\"trailing-6h\"]:hover) svg.usage-chart .proj-line[data-method=\"trailing-6h\"],
+   div.usage-grid:has([data-method=\"trailing-24h\"]:hover) svg.usage-chart .proj-line[data-method=\"trailing-24h\"] { stroke-width: 3; }
+   /* Side panel */
    div.usage-stats { display: flex; flex-direction: column; gap: 0.6em; font-family: var(--bulma-family-primary); }
    div.usage-stats .stat { padding: 0.5em 0.75em; background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 4px; }
    div.usage-stats .k { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.05em; color: var(--bulma-text-weak); }
    div.usage-stats .v { font-family: var(--bulma-family-code); font-size: 1.05em; }
    div.usage-stats .v .aux { font-size: 0.75em; color: var(--bulma-text-weak); margin-left: 0.4em; }
    div.method-projections { padding: 0.5em 0.75em; background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 4px; display: flex; flex-direction: column; gap: 0.35em; }
-   div.method-row { display: grid; grid-template-columns: 0.9em 1fr auto; gap: 0.4em; align-items: center; font-family: var(--bulma-family-code); font-size: 0.85em; }
+   div.method-row { display: grid; grid-template-columns: 0.9em 1fr auto; gap: 0.4em; align-items: center; font-family: var(--bulma-family-code); font-size: 0.85em; padding: 0.1em 0.25em; border-radius: 3px; cursor: default; transition: background 0.18s ease; }
+   div.method-row[data-method]:hover { background: var(--bulma-scheme-main-bis); }
    div.method-row .swatch { width: 0.9em; height: 0.5em; border-radius: 1px; }
    div.method-row .method-name { font-family: var(--bulma-family-primary); font-size: 0.8em; color: var(--bulma-text-weak); }
    div.method-row .method-proj .aux { color: var(--bulma-text-weak); font-size: 0.75em; }")
