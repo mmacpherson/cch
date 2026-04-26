@@ -75,23 +75,34 @@
                       (catch Exception _ nil)))
    :updated-at updated_at})
 
+(def ^:private cols [:hook-name :scope :enabled :options :updated-at])
+
 (defn list-all
   "All rows, ordered by hook then scope. Returns a seq of maps."
   []
-  (some->> (db/query "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config ORDER BY hook_name, scope;")
-           (map parse-row)))
+  (let [fmt (requiring-resolve 'honey.sql/format)]
+    (some->> (db/query (first (fmt {:select cols :from [:hook-config]
+                                    :order-by [[:hook-name :asc] [:scope :asc]]}
+                                   {:inline true})))
+             (map parse-row))))
 
 (defn list-for-scope
   "Rows belonging to one scope."
   [scope]
-  (some->> (db/query (format "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config WHERE scope = %s ORDER BY hook_name;"
-                             (sql-lit scope)))
-           (map parse-row)))
+  (let [fmt (requiring-resolve 'honey.sql/format)]
+    (some->> (db/query (first (fmt {:select cols :from [:hook-config]
+                                    :where [:= :scope scope]
+                                    :order-by [[:hook-name :asc]]}
+                                   {:inline true})))
+             (map parse-row))))
 
 (defn get-row
   "Look up a single row. Returns nil if absent."
   [hook-name scope]
-  (some-> (db/query (format "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config WHERE hook_name = %s AND scope = %s LIMIT 1;"
-                            (sql-lit hook-name) (sql-lit scope)))
-          first
-          parse-row))
+  (let [fmt (requiring-resolve 'honey.sql/format)]
+    (some-> (db/query (first (fmt {:select cols :from [:hook-config]
+                                   :where [:and [:= :hook-name hook-name] [:= :scope scope]]
+                                   :limit 1}
+                                  {:inline true})))
+            first
+            parse-row)))

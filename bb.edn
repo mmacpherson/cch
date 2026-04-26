@@ -1,5 +1,5 @@
 {:paths ["src" "resources"]
- :deps {}
+ :deps {com.github.seancorfield/honeysql {:mvn/version "2.6.1126"}}
  :tasks
  {test {:extra-paths ["test"]
         :extra-deps {io.github.cognitect-labs/test-runner

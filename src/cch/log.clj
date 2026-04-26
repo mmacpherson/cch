@@ -174,8 +174,11 @@
   Done as a SQL DISTINCT — avoids pulling the full table into memory
   for the dashboard's Repo dropdown. Returns a seq of strings."
   []
-  (->> (db/query "SELECT DISTINCT cwd FROM events WHERE cwd IS NOT NULL;")
-       (keep :cwd)))
+  (let [fmt (requiring-resolve 'honey.sql/format)]
+    (->> (db/query (first (fmt {:select-distinct [:cwd] :from [:events]
+                                :where [:!= :cwd nil]}
+                               {:inline true})))
+         (keep :cwd))))
 
 (defn recent-sessions
   "Return up to `limit` most-recently-active session IDs as
@@ -183,36 +186,35 @@
   sessions whose events landed under `cwd-prefix`. Server-side
   grouping + sort, no post-filtering in Clojure."
   [& {:keys [limit cwd-prefix] :or {limit 30}}]
-  (let [where (if (str/blank? cwd-prefix)
-                ""
-                (str " WHERE cwd LIKE '" (escape-sql cwd-prefix) "%'"))
-        sql   (str "SELECT session_id, max(timestamp) AS timestamp "
-                   "FROM events"
-                   where
-                   " GROUP BY session_id "
-                   "ORDER BY timestamp DESC "
-                   "LIMIT " (int limit) ";")]
-    (->> (db/query sql)
-         (filter :session_id))))
+  (let [q (cond-> {:select [:session-id [[:max :timestamp] :timestamp]]
+                   :from   [:events]
+                   :group-by [:session-id]
+                   :order-by [[:timestamp :desc]]
+                   :limit (int limit)}
+            (not (str/blank? cwd-prefix))
+            (assoc :where [:like :cwd (str cwd-prefix "%")]))]
+    (let [fmt (requiring-resolve 'honey.sql/format)]
+      (->> (db/query (first (fmt q {:inline true})))
+           (filter :session_id)))))
 
 (defn query-events
   "Query recent events. Returns a seq of maps.
   opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix"
   [& {:keys [limit hook event session decision since cwd-prefix]}]
-  (let [limit   (or limit 20)
-        wheres  (cond-> []
-                  hook       (conj (format "hook_name = '%s'" (escape-sql hook)))
-                  event      (conj (format "event_type = '%s'" (escape-sql event)))
-                  session    (conj (format "session_id = '%s'" (escape-sql session)))
-                  decision   (conj (format "decision = '%s'" (escape-sql decision)))
-                  since      (conj (format "timestamp > '%s'" (escape-sql since)))
-                  cwd-prefix (conj (format "cwd LIKE '%s%%'" (escape-sql cwd-prefix))))
-        where   (if (seq wheres)
-                  (str " WHERE " (str/join " AND " wheres))
-                  "")
-        sql     (format "SELECT id,timestamp,session_id,hook_name,event_type,tool_name,file_path,cwd,decision,reason,elapsed_ms,extra FROM events%s ORDER BY id DESC LIMIT %d;"
-                        where limit)]
-    (db/query sql)))
+  (let [cols [:id :timestamp :session-id :hook-name :event-type
+              :tool-name :file-path :cwd :decision :reason :elapsed-ms :extra]
+        q    (cond-> {:select   cols
+                      :from     [:events]
+                      :order-by [[:id :desc]]
+                      :limit    (or limit 20)}
+               hook       (update :where (fnil conj [:and]) [:= :hook-name hook])
+               event      (update :where (fnil conj [:and]) [:= :event-type event])
+               session    (update :where (fnil conj [:and]) [:= :session-id session])
+               decision   (update :where (fnil conj [:and]) [:= :decision decision])
+               since      (update :where (fnil conj [:and]) [:> :timestamp since])
+               cwd-prefix (update :where (fnil conj [:and]) [:like :cwd (str cwd-prefix "%")]))]
+    (let [fmt (requiring-resolve 'honey.sql/format)]
+      (db/query (first (fmt q {:inline true}))))))
 
 ;; --- Context snapshots ---
 
@@ -242,7 +244,12 @@
 (defn latest-context-snapshot
   "Most recent context snapshot for a session. Returns a map or nil."
   [session-id]
-  (first
-    (db/query
-      (format "SELECT used_pct, current_tokens, window_size, model_id, timestamp FROM context_snapshots WHERE session_id = '%s' ORDER BY id DESC LIMIT 1;"
-              (escape-sql session-id)))))
+  (let [fmt (requiring-resolve 'honey.sql/format)]
+    (first
+      (db/query
+        (first (fmt {:select   [:used-pct :current-tokens :window-size :model-id :timestamp]
+                     :from     [:context-snapshots]
+                     :where    [:= :session-id session-id]
+                     :order-by [[:id :desc]]
+                     :limit    1}
+                    {:inline true}))))))
