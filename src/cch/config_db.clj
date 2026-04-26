@@ -7,14 +7,16 @@
     enabled    — 0 / 1
     options    — JSON blob, hook-specific (nullable)
 
-  Mirrors cch.log's sqlite3 CLI pattern — synchronous p/sh here because
-  config reads/writes are UI-initiated, not hot-path. If CRUD latency
-  ever matters we can share cch.log's queue.
+  Writes (upsert!, delete!) use the sqlite3 CLI. Reads (list-all,
+  list-for-scope, get-row) use cch.db/query, which shares the
+  persistent pod connection in server context and falls back to the
+  sqlite3 CLI otherwise.
 
   Repo scope format: 'repo:<abs-path>'. The absolute path must already
   be canonicalized by the caller (fs/canonicalize) so equality checks
   don't split hairs on symlinks."
   (:require [babashka.process :as p]
+            [cch.db :as db]
             [cch.log :as log]
             [cheshire.core :as json]
             [clojure.string :as str]))
@@ -76,34 +78,20 @@
 (defn list-all
   "All rows, ordered by hook then scope. Returns a seq of maps."
   []
-  (let [path   (log/db-path)
-        sql    "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config ORDER BY hook_name, scope;"
-        result (p/sh ["sqlite3" "-json" path sql])]
-    (when (zero? (:exit result))
-      (let [out (str/trim (:out result))]
-        (when-not (str/blank? out)
-          (map parse-row (json/parse-string out true)))))))
+  (some->> (db/query "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config ORDER BY hook_name, scope;")
+           (map parse-row)))
 
 (defn list-for-scope
   "Rows belonging to one scope."
   [scope]
-  (let [path   (log/db-path)
-        sql    (format "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config WHERE scope = %s ORDER BY hook_name;"
-                       (sql-lit scope))
-        result (p/sh ["sqlite3" "-json" path sql])]
-    (when (zero? (:exit result))
-      (let [out (str/trim (:out result))]
-        (when-not (str/blank? out)
-          (map parse-row (json/parse-string out true)))))))
+  (some->> (db/query (format "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config WHERE scope = %s ORDER BY hook_name;"
+                             (sql-lit scope)))
+           (map parse-row)))
 
 (defn get-row
   "Look up a single row. Returns nil if absent."
   [hook-name scope]
-  (let [path   (log/db-path)
-        sql    (format "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config WHERE hook_name = %s AND scope = %s LIMIT 1;"
-                       (sql-lit hook-name) (sql-lit scope))
-        result (p/sh ["sqlite3" "-json" path sql])]
-    (when (zero? (:exit result))
-      (let [out (str/trim (:out result))]
-        (when-not (str/blank? out)
-          (first (map parse-row (json/parse-string out true))))))))
+  (some-> (db/query (format "SELECT hook_name, scope, enabled, options, updated_at FROM hook_config WHERE hook_name = %s AND scope = %s LIMIT 1;"
+                            (sql-lit hook-name) (sql-lit scope)))
+          first
+          parse-row))
