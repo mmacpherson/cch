@@ -22,8 +22,9 @@
             [babashka.nrepl.server :as nrepl]
             [cch.config :as config]
             [cch.config-db :as cdb]
+            [cch.db :as db]
             [cch.events :as events]
-            [cch.ewma :as ewma]
+            [cch.forecast :as forecast]
             [cch.log :as log]
             [cch.protocol :as proto]
             [cch.usage :as usage]
@@ -931,17 +932,15 @@
    :headers {"Content-Type" "text/html; charset=utf-8"}
    :body    (usage-html)})
 
-(defn- handle-ewma
-  "GET /ewma — current pct + Bayesian projection + time-to-reset for
+(defn- handle-forecast
+  "GET /forecast — current pct + Bayesian projection + time-to-reset for
   both the 5h and 7d rate-limit windows. The statusLine consumes this
-  to render compact, color-coded status. Returns {} when there isn't
-  enough data yet. Never blocks the caller for long: a couple of
-  bounded sqlite queries on context_snapshots."
+  to render compact, color-coded status."
   [_req]
   (try
     {:status  200
      :headers {"Content-Type" "application/json"}
-     :body    (json/generate-string (ewma/statusline-stats))}
+     :body    (json/generate-string (forecast/statusline-stats))}
     (catch Exception e
       {:status  500
        :headers {"Content-Type" "application/json"}
@@ -1207,8 +1206,8 @@
       (and (= request-method :post) (= uri "/context-snapshot"))
       (handle-context-snapshot req)
 
-      (and (= request-method :get) (= uri "/ewma"))
-      (handle-ewma req)
+      (and (= request-method :get) (= uri "/forecast"))
+      (handle-forecast req)
 
       (and (= request-method :get) (= uri "/usage"))
       (handle-usage req)
@@ -1263,6 +1262,7 @@
   [{:keys [port host nrepl-port] :or {port 8888 host "::"}}]
   (registry/validate-registry!)
   (log/start-writer!)
+  (db/open-db!)
   (let [hooks     (build-registry)
         event-idx (build-event-index hooks)
         nrepl     (start-nrepl! nrepl-port)
@@ -1279,6 +1279,7 @@
               ;; httpkit's stop-fn takes &{:as opts}, e.g. (stop :timeout 100)
               (try (apply stop-fn args) (catch Exception _ nil))
               (stop-nrepl! nrepl)
+              (db/close-db!)
               (log/stop-writer!))
      :hooks hooks
      :nrepl nrepl}))
