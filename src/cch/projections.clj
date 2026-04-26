@@ -357,24 +357,54 @@
     {:mu mu-post :sigma2 sigma2-R
      :sigma-eps2 sigma-eps2 :tau-avg-hr tau-avg}))
 
+;; --- truncated-normal helpers (Abramowitz & Stegun erf approximation) ---
+
+(defn- std-normal-pdf
+  "φ(x) — standard normal PDF."
+  [x]
+  (* (/ 1.0 (Math/sqrt (* 2.0 Math/PI))) (Math/exp (* -0.5 x x))))
+
+(defn- std-normal-cdf
+  "Φ(x) — standard normal CDF via A&S 26.2.17 (max error < 7.5e-8)."
+  [x]
+  (let [t (/ 1.0 (+ 1.0 (* 0.2316419 (Math/abs x))))
+        poly (+ (* t (+ (* t (+ (* t (+ (* t (+ (* t 1.330274429)
+                                                 -1.821255978))
+                                         1.781477937))
+                                 -0.356563782))
+                         0.319381530)))]
+    (if (>= x 0)
+      (- 1.0 (* (std-normal-pdf x) poly))
+      (* (std-normal-pdf x) poly))))
+
+(defn- truncated-normal-mean-sd
+  "Mean and SD of N(μ, σ²) truncated to [0, ∞).
+   Returns [E[R|R≥0] SD[R|R≥0]]. When μ/σ is large (>>0) the
+   truncation correction is negligible and we fall back to [μ σ]."
+  [mu sigma]
+  (if (<= sigma 0.0)
+    [mu 0.0]
+    (let [alpha (/ (- mu) sigma)            ; (0 - μ) / σ
+          phi-a (std-normal-pdf alpha)
+          Phi-a (std-normal-cdf alpha)
+          denom (- 1.0 Phi-a)]              ; P(R > 0)
+      (if (< denom 1e-12)
+        [0.0 0.0]                           ; essentially all mass at 0
+        (let [lambda (/ phi-a denom)        ; inverse Mills ratio
+              e-r    (+ mu (* sigma lambda))
+              var-r  (* sigma sigma (- 1.0 (* lambda (- lambda alpha))))]
+          [e-r (Math/sqrt (max 0.0 var-r))])))))
+
 (defn bayes-projection
-  "Bayesian Gaussian model with two improvements over the original:
+  "Bayesian Gaussian model with conjugate update on the rate R.
 
-   1. Empirical prior. Centered at 0.55 %/hr (≈ what's needed to land
-      at 92% over 7 days), σ₀ = 0.12 %/hr — much tighter than a flat
-      'target rate' prior, so a few hours of data barely move the
-      posterior unless they're substantially off-prior.
-
-   2. Brownian-motion-style variance. Originally Var[pct(reset)]
-      grew as σ²·Δt², which assumes 'whatever rate I infer now is locked
-      in for the entire 105-hour horizon' and produces absurd bands.
-      Replace with σ²_R·Δt² + σ²_BM·Δt, where σ²_BM ≈ σ²_ε · τ_avg
-      (within-week noise integrated over the projection horizon, like
-      Brownian motion). At long horizons the linear Δt term dominates
-      and the band scales like √Δt rather than Δt.
-
-   Monotonicity comes from clamping the posterior rate at 0 and the
-   band lower edge at last_pct."
+   1. Empirical prior: R ~ N(μ₀, σ₀²) centered at 0.55 %/hr.
+   2. Brownian-motion variance: Var[pct(reset)] = σ²_R·Δt² + σ²_BM·Δt,
+      so bands scale like √Δt at long horizons rather than Δt.
+   3. Non-negative support via truncated normal: instead of clamping
+      the posterior mean at 0, we use E[R | R≥0] and SD[R | R≥0] from
+      the truncated distribution. The band lower edge is still floored
+      at last_pct (usage is monotone non-decreasing within a window)."
   [observed {:keys [now resets-at last-pct prior-mu prior-sigma]
              :or   {prior-mu    bayes-prior-mu
                     prior-sigma bayes-prior-sigma}}]
@@ -385,7 +415,7 @@
       (let [{:keys [mu sigma2 sigma-eps2 tau-avg-hr]}
             (bayes-rate-posterior rates dts prior-mu prior-sigma)
             dt-hr     (max 0.0 (/ (- resets-at now) 3600.0))
-            mu*       (max 0.0 mu)            ; non-negative average rate
+            [mu* _]   (truncated-normal-mean-sd mu (Math/sqrt sigma2))
             sigma-bm2 (* sigma-eps2 tau-avg-hr)
             var-proj  (+ (* sigma2 dt-hr dt-hr)    ; uncertainty in mean R
                          (* sigma-bm2 dt-hr))      ; cumulative within-week noise
