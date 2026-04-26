@@ -41,7 +41,7 @@
   Callers should pre-canonicalize repo paths (not done here to keep
   this fn pure about I/O)."
   [{:keys [hook-name scope enabled options]}]
-  (let [path    (log/db-path)
+  (let [path    (db/db-path)
         opts    (when options (json/generate-string options))
         enabled (if enabled 1 0)
         sql     (format
@@ -57,7 +57,7 @@
 (defn delete!
   "Remove a config row. No-op if not present."
   [hook-name scope]
-  (let [path (log/db-path)
+  (let [path (db/db-path)
         sql  (format "DELETE FROM hook_config WHERE hook_name = %s AND scope = %s;"
                      (sql-lit hook-name) (sql-lit scope))]
     (log/ensure-db! path)

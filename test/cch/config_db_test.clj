@@ -1,6 +1,7 @@
 (ns cch.config-db-test
   (:require [babashka.fs :as fs]
             [cch.config-db :as cdb]
+            [cch.db :as db]
             [cch.log :as log]
             [clojure.test :refer [deftest is testing use-fixtures]]))
 
@@ -15,7 +16,7 @@
         db  (str tmp "/events.db")]
     (try
       (binding [*tmp-db* db]
-        (with-redefs [log/db-path (fn [] db)]
+        (with-redefs [db/db-path (fn [] db)]
           (t)))
       (finally
         (fs/delete-tree tmp)))))

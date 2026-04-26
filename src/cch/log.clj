@@ -20,16 +20,11 @@
   so tests can assert on rows immediately after a log call."
   (:require [babashka.process :as p]
             [babashka.fs :as fs]
+            [cch.db :as db]
             [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]))
 
-(defn db-path
-  "Returns the SQLite database path, respecting XDG_DATA_HOME."
-  []
-  (str (or (System/getenv "XDG_DATA_HOME")
-           (str (System/getProperty "user.home") "/.local/share"))
-       "/cch/events.db"))
 
 (defn ensure-db!
   "Create the database directory if needed and apply the schema.
@@ -99,7 +94,7 @@
   Returns the writer-state map for callers that want to introspect."
   []
   (or @writer-state
-      (let [path  (db-path)
+      (let [path  (db/db-path)
             _     (ensure-db-once! path)
             proc  (p/process ["sqlite3" path]
                              {:in :write :out :discard :err :discard})
@@ -135,7 +130,7 @@
     - otherwise          → fire-and-forget per-call sqlite3 subprocess"
   [{:keys [hook-name event-type tool-name file-path cwd
            session-id decision reason elapsed-ms extra]}]
-  (let [path  (db-path)
+  (let [path  (db/db-path)
         sync? (= "1" (System/getenv "CCH_LOG_SYNC"))
         ;; Insert SQL. PRAGMA busy_timeout matters only on the per-call
         ;; fallback path (concurrent sqlite3 procs); the writer thread
@@ -173,23 +168,13 @@
       (catch Exception _e
         nil))))
 
-(defn- sqlite-json
-  "Run `sql` against the events DB via `sqlite3 -json`. Returns parsed
-  keyword-keyed maps on success, nil when the query produces no rows."
-  [sql]
-  (let [path   (db-path)
-        result (p/sh ["sqlite3" "-json" path sql])]
-    (when (zero? (:exit result))
-      (let [out (str/trim (:out result))]
-        (when-not (str/blank? out)
-          (json/parse-string out true))))))
 
 (defn distinct-cwds
   "All distinct cwd values in the events table, in arbitrary order.
   Done as a SQL DISTINCT — avoids pulling the full table into memory
   for the dashboard's Repo dropdown. Returns a seq of strings."
   []
-  (->> (sqlite-json "SELECT DISTINCT cwd FROM events WHERE cwd IS NOT NULL;")
+  (->> (db/query "SELECT DISTINCT cwd FROM events WHERE cwd IS NOT NULL;")
        (keep :cwd)))
 
 (defn recent-sessions
@@ -207,7 +192,7 @@
                    " GROUP BY session_id "
                    "ORDER BY timestamp DESC "
                    "LIMIT " (int limit) ";")]
-    (->> (sqlite-json sql)
+    (->> (db/query sql)
          (filter :session_id))))
 
 (defn query-events
@@ -215,7 +200,6 @@
   opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix"
   [& {:keys [limit hook event session decision since cwd-prefix]}]
   (let [limit   (or limit 20)
-        path    (db-path)
         wheres  (cond-> []
                   hook       (conj (format "hook_name = '%s'" (escape-sql hook)))
                   event      (conj (format "event_type = '%s'" (escape-sql event)))
@@ -227,19 +211,15 @@
                   (str " WHERE " (str/join " AND " wheres))
                   "")
         sql     (format "SELECT id,timestamp,session_id,hook_name,event_type,tool_name,file_path,cwd,decision,reason,elapsed_ms,extra FROM events%s ORDER BY id DESC LIMIT %d;"
-                        where limit)
-        result  (p/sh ["sqlite3" "-json" path sql])]
-    (when (zero? (:exit result))
-      (let [out (str/trim (:out result))]
-        (when-not (str/blank? out)
-          (json/parse-string out true))))))
+                        where limit)]
+    (db/query sql)))
 
 ;; --- Context snapshots ---
 
 (defn log-context-snapshot!
   "Insert a context window snapshot. Non-blocking, same write-path as log-event!."
   [{:keys [session-id used-pct current-tokens window-size model-id payload]}]
-  (let [path   (db-path)
+  (let [path   (db/db-path)
         insert (format
                  "INSERT INTO context_snapshots (session_id, used_pct, current_tokens, window_size, model_id, payload) VALUES (%s,%s,%s,%s,%s,%s);"
                  (sql-value session-id)
@@ -263,6 +243,6 @@
   "Most recent context snapshot for a session. Returns a map or nil."
   [session-id]
   (first
-    (sqlite-json
+    (db/query
       (format "SELECT used_pct, current_tokens, window_size, model_id, timestamp FROM context_snapshots WHERE session_id = '%s' ORDER BY id DESC LIMIT 1;"
               (escape-sql session-id)))))

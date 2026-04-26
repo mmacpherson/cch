@@ -13,6 +13,7 @@
   the web UI's config CRUD, not via install/uninstall."
   (:require [babashka.process :as p]
             [cch.config-db :as cdb]
+            [cch.db :as db]
             [cch.log :as log]
             [cli.registry :as registry]
             [cli.settings :as settings]
@@ -49,7 +50,7 @@
 (defn- clear-hook-config!
   "Delete every row from hook_config. Used by uninstall."
   []
-  (let [path (log/db-path)]
+  (let [path (db/db-path)]
     (log/ensure-db! path)
     (p/sh ["sqlite3" path "DELETE FROM hook_config;"])
     nil))

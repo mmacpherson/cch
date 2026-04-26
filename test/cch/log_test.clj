@@ -1,5 +1,6 @@
 (ns cch.log-test
   (:require [clojure.test :refer [deftest is testing]]
+            [cch.db :as db]
             [cch.log :as log]
             [cheshire.core :as json]
             [babashka.fs :as fs]
@@ -86,7 +87,7 @@
     (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-writer-"}))
           db      (str tmp-dir "/test.db")]
       (try
-        (with-redefs [log/db-path (fn [] db)]
+        (with-redefs [db/db-path (fn [] db)]
           (log/ensure-db! db)
           (log/start-writer!)
           (try
@@ -120,7 +121,7 @@
     (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-writer-idem-"}))
           db      (str tmp-dir "/test.db")]
       (try
-        (with-redefs [log/db-path (fn [] db)]
+        (with-redefs [db/db-path (fn [] db)]
           (log/ensure-db! db)
           (let [w1 (log/start-writer!)
                 w2 (log/start-writer!)]

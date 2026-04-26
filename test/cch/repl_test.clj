@@ -9,6 +9,7 @@
   format that bin/cch-eval uses."
   (:require [babashka.fs :as fs]
             [bencode.core :as b]
+            [cch.db :as db]
             [cch.log :as log]
             [cch.server :as server]
             [clojure.test :refer [deftest is testing]])
@@ -41,7 +42,7 @@
     (let [http  (free-port)
           nport (free-port)
           tmp   (str (fs/create-temp-dir {:prefix "repl-test-db-"}))]
-      (with-redefs [log/db-path (fn [] (str tmp "/test.db"))]
+      (with-redefs [db/db-path (fn [] (str tmp "/test.db"))]
         (let [{:keys [stop]} (server/start! {:port http :host "127.0.0.1"
                                               :nrepl-port nport})]
           (try
@@ -59,7 +60,7 @@
   (testing "starting without --nrepl leaves the default port unbound"
     (let [http (free-port)
           tmp  (str (fs/create-temp-dir {:prefix "repl-test-off-db-"}))]
-      (with-redefs [log/db-path (fn [] (str tmp "/test.db"))]
+      (with-redefs [db/db-path (fn [] (str tmp "/test.db"))]
         (let [{:keys [stop nrepl]} (server/start! {:port http :host "127.0.0.1"})]
           (try
             (is (nil? nrepl) "no nREPL server when port is unset")

@@ -6,8 +6,14 @@
   via query. Falls back to shelling out to sqlite3 when no connection is open
   (CLI context, tests). The hook hot path never calls this namespace."
   (:require [babashka.process :as p]
-            [cch.log :as log]
             [clojure.string :as str]))
+
+(defn db-path
+  "Returns the SQLite database path, respecting XDG_DATA_HOME."
+  []
+  (str (or (System/getenv "XDG_DATA_HOME")
+           (str (System/getProperty "user.home") "/.local/share"))
+       "/cch/events.db"))
 
 (def ^:private conn (atom nil))
 
@@ -20,7 +26,7 @@
   (require '[pod.babashka.go-sqlite3])
   (let [get-conn (resolve 'pod.babashka.go-sqlite3/get-connection)
         q        (resolve 'pod.babashka.go-sqlite3/query)
-        c        (get-conn (str "file:" (log/db-path) "?mode=ro"))]
+        c        (get-conn (str "file:" (db-path) "?mode=ro"))]
     (reset! conn c)
     (q c "SELECT 1")))
 
@@ -39,7 +45,7 @@
   (if-let [c @conn]
     (let [q (resolve 'pod.babashka.go-sqlite3/query)]
       (q c sql))
-    (let [result (p/sh ["sqlite3" "-json" (log/db-path) sql])]
+    (let [result (p/sh ["sqlite3" "-json" (db-path) sql])]
       (when (and (zero? (:exit result))
                  (not (str/blank? (:out result))))
         (let [parse (requiring-resolve 'cheshire.core/parse-string)]

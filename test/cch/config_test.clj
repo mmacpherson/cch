@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [cch.config :as config]
             [cch.config-db :as cdb]
+            [cch.db :as db]
             [cch.log :as log]
             [babashka.fs :as fs]
             [babashka.process :as p]
@@ -93,7 +94,7 @@
 
 ;; --- load-effective-config (dispatcher precedence) ---
 ;;
-;; Tests use a tmp DB (via with-redefs on log/db-path) and a tmp git
+;; Tests use a tmp DB (via with-redefs on db/db-path) and a tmp git
 ;; repo root so worktree-root resolves somewhere controlled.
 
 (def ^:dynamic *tmp-db*     nil)
@@ -113,7 +114,7 @@
     (try
       (binding [*tmp-db* db
                 *tmp-repo* repo]
-        (with-redefs [log/db-path (fn [] db)]
+        (with-redefs [db/db-path (fn [] db)]
           (t)))
       (finally
         (fs/delete-tree tmp-dir)

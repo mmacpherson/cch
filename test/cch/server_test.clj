@@ -8,6 +8,7 @@
             [babashka.http-client :as http]
             [babashka.process :as p]
             [cch.config-db :as cdb]
+            [cch.db :as db]
             [cch.events :as cch-events]
             [cch.log :as log]
             [cch.server :as server]
@@ -27,7 +28,7 @@
   (let [tmp-dir (str (fs/create-temp-dir {:prefix "server-test-db-"}))
         db      (str tmp-dir "/events.db")
         p       (free-port)]
-    (with-redefs [log/db-path (fn [] db)]
+    (with-redefs [db/db-path (fn [] db)]
       (log/ensure-db! db)
       ;; Enable all code hooks at global scope so dispatch fan-out works.
       ;; Individual tests can disable specific hooks as needed.

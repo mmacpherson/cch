@@ -1,6 +1,7 @@
 (ns cli.init
   "cch init — set up cch in the current project."
-  (:require [cch.log :as log]
+  (:require [cch.db :as db]
+            [cch.log :as log]
             [cch.config :as config]
             [babashka.fs :as fs]
             [clojure.java.io :as io]
@@ -58,9 +59,9 @@
         (println "  Created global config:" global-path))))
 
   ;; Ensure SQLite DB exists
-  (let [db (log/db-path)]
-    (log/ensure-db! db)
-    (println "  Event log database:" db))
+  (let [path (db/db-path)]
+    (log/ensure-db! path)
+    (println "  Event log database:" path))
 
   ;; Create project config if not present
   (let [project-config ".cch-config.yaml"
