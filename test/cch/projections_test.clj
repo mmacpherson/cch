@@ -23,6 +23,46 @@
      :resets-at    (+ (:ts last) (long (* hours-left 3600)))
      :last-pct     (:pct last)}))
 
+;; --- truncated-normal math ---
+
+(defn- cdf [x]
+  ((ns-resolve 'cch.projections 'std-normal-cdf) x))
+
+(defn- trunc [mu sigma]
+  ((ns-resolve 'cch.projections 'truncated-normal-mean-sd) mu sigma))
+
+(deftest std-normal-cdf-known-values
+  (testing "Φ(0) = 0.5 exactly by symmetry"
+    (is (< (Math/abs (- (cdf 0) 0.5)) 1e-7)))
+  (testing "Φ(1) ≈ 0.8413"
+    (is (< (Math/abs (- (cdf 1.0) 0.8413)) 1e-4)))
+  (testing "Φ(-1) ≈ 0.1587"
+    (is (< (Math/abs (- (cdf -1.0) 0.1587)) 1e-4)))
+  (testing "Φ(2) ≈ 0.9772"
+    (is (< (Math/abs (- (cdf 2.0) 0.9772)) 1e-4)))
+  (testing "Φ(-2) ≈ 0.0228"
+    (is (< (Math/abs (- (cdf -2.0) 0.0228)) 1e-4)))
+  (testing "Φ(1.645) ≈ 0.95 (our z-90 quantile)"
+    (is (< (Math/abs (- (cdf 1.645) 0.95)) 1e-4)))
+  (testing "symmetry: Φ(x) + Φ(-x) = 1"
+    (doseq [x [0.5 1.0 2.0 3.0]]
+      (is (< (Math/abs (- (+ (cdf x) (cdf (- x))) 1.0)) 1e-10)))))
+
+(deftest truncated-normal-mean-sd-known-values
+  (testing "half-normal (μ=0, σ=1): E = √(2/π) ≈ 0.7979"
+    (let [[e _] (trunc 0.0 1.0)]
+      (is (< (Math/abs (- e (Math/sqrt (/ 2.0 Math/PI)))) 1e-6))))
+  (testing "half-normal (μ=0, σ=1): SD = √(1 - 2/π) ≈ 0.6028"
+    (let [[_ sd] (trunc 0.0 1.0)]
+      (is (< (Math/abs (- sd (Math/sqrt (- 1.0 (/ 2.0 Math/PI))))) 1e-6))))
+  (testing "μ >> 0: truncation correction is negligible (empirical prior case)"
+    (let [[e _] (trunc 0.55 0.045)]  ; α ≈ -12.2
+      (is (< (Math/abs (- e 0.55)) 1e-10))))
+  (testing "σ=0 returns μ unchanged"
+    (let [[e sd] (trunc 1.5 0.0)]
+      (is (= e 1.5))
+      (is (= sd 0.0)))))
+
 ;; --- rate-samples ---
 
 (deftest rate-samples-coalesces-and-skips-resets
