@@ -229,8 +229,7 @@
      [:span.legend-item {:data-method (clojure.core/name method)}
       [:span.swatch {:style (str "background:" (method-color method))}]
       " " name])
-   [:span.legend-item
-    [:span.swatch.ref100] " 100% reference"]])
+   ])
 
 (defn- fmt-band [{:keys [lo hi]}]
   (when (and lo hi (not= lo hi))

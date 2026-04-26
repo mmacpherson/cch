@@ -4,12 +4,12 @@
 <dict>
   <key>Label</key>
   <string>com.cch.server</string>
+  <key>WorkingDirectory</key>
+  <string>{{HOME}}/.local/share/cch/repo</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/env</string>
     <string>bb</string>
-    <string>-cp</string>
-    <string>{{HOME}}/.local/share/cch/repo/src:{{HOME}}/.local/share/cch/repo/resources</string>
     <string>-m</string>
     <string>cli.cch</string>
     <string>serve</string>

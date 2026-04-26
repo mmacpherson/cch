@@ -5,7 +5,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env bb -cp %h/.local/share/cch/repo/src:%h/.local/share/cch/repo/resources -m cli.cch serve
+WorkingDirectory=%h/.local/share/cch/repo
+ExecStart=/usr/bin/env bb -m cli.cch serve
 Restart=on-failure
 RestartSec=3
 

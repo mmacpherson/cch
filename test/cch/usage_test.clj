@@ -98,8 +98,7 @@
   (let [out (str (u/legend (make-data)))]
     (is (re-find #"Linear"   out))
     (is (re-find #"Bayesian" out))
-    (is (re-find #"observed" out))
-    (is (re-find #"100%"     out))))
+    (is (re-find #"observed" out))))
 
 (deftest page-body-no-data
   (testing "no-data path renders the chart fallback but no stats panel"

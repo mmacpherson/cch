@@ -18,7 +18,7 @@
           rendered (#'svc/render-template "service/cch.service.template")]
       ;; Template has no {{HOME}} tokens — render-template's replace is a no-op.
       (is (= raw rendered))
-      (is (str/includes? rendered "%h/.local/share/cch/repo/src")
+      (is (str/includes? rendered "WorkingDirectory=%h/.local/share/cch/repo")
           "systemd %h must be in the rendered unit")
       (is (str/includes? rendered "Restart=on-failure")
           "Restart policy must be present"))))
@@ -29,8 +29,8 @@
           home     (System/getProperty "user.home")]
       (is (not (str/includes? rendered "{{HOME}}"))
           "no unresolved {{HOME}} tokens remain")
-      (is (str/includes? rendered (str home "/.local/share/cch/repo/src"))
-          "home directory is baked into the classpath")
+      (is (str/includes? rendered (str home "/.local/share/cch/repo"))
+          "home directory is baked into the working directory")
       (is (str/includes? rendered (str home "/.local/share/cch/serve.log"))
           "home directory is baked into the log path")
       (is (str/includes? rendered "<key>RunAtLoad</key>")
