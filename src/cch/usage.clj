@@ -6,9 +6,9 @@
   credible interval is shown as a band; other methods are shown as
   lines only (their bands are tabulated in the right-hand stats panel).
 
-  Pure functions of the data bundle from cch.ewma/current-window — easy
-  to test without a server."
-  (:require [cch.ewma :as ewma]
+  Pure functions of the data bundle from cch.forecast/current-window —
+  easy to test without a server."
+  (:require [cch.forecast :as forecast]
             [cch.projections :as proj]
             [clojure.string :as str])
   (:import (java.time Instant ZoneId)
@@ -308,7 +308,7 @@
    (when data (summary-stats data))])
 
 (defn build-data
-  "Public entry point — fetches the bundle from ewma. Indirection kept
-   so tests can pass synthetic bundles to chart-svg directly."
+  "Public entry point — fetches the bundle from forecast. Indirection
+   kept so tests can pass synthetic bundles to chart-svg directly."
   []
-  (ewma/current-window))
+  (forecast/current-window))

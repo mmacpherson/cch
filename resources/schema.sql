@@ -49,4 +49,5 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
   payload        TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_ctx_session ON context_snapshots(session_id);
+CREATE INDEX IF NOT EXISTS idx_ctx_session   ON context_snapshots(session_id);
+CREATE INDEX IF NOT EXISTS idx_ctx_timestamp ON context_snapshots(timestamp);
