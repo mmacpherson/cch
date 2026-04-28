@@ -328,25 +328,34 @@
    Same math as the statusline burn indicator, applied historically."
   [data]
   (when (and data (> (count (:observed data)) 4))
-    (let [{:keys [rate-samples window-start resets-at now]} data
-          ;; Use fine-grained 60s-bucketed data (not the 360s top-chart data)
-          ;; so that 20-min lookback windows have ~20 points and session
-          ;; boundaries appear crisply rather than ramping over an hour.
-          in-window   (vec (filter #(<= (:ts %) now) (or rate-samples [])))
+    (let [{:keys [rate-5h-samples window-start resets-at now]} data
+          ;; Use 5h-window samples (60s buckets, ~33 windows in the 7d span).
+          ;; Ticks ~7.5x more often than the 7d window, giving a continuous
+          ;; signal even when the 7d curve is on a long plateau.
+          ;; Scale factor 0.133 converts 5h-%/hr to 7d-%/hr units (empirical
+          ;; from observed co-movement: 1% of 5h window ~ 0.133% of 7d window).
+          scale       0.133
+          in-5h       (vec (filter #(<= (:ts %) now) (or rate-5h-samples [])))
           grid-step-s (* 5 60)
-          lookback-s  (* 60 60)
+          lookback-s  (* 30 60)
           grid-ts     (range window-start (+ now 1) grid-step-s)
           rate-pts    (mapv (fn [t]
-                              (let [bucket (->> in-window
-                                               (filter #(and (>= (:ts %) (- t lookback-s))
-                                                             (<= (:ts %) t))))
-                                    rate   (when (>= (count bucket) 2)
-                                             (let [oldest  (first bucket)
-                                                   newest  (last bucket)
-                                                   elapsed (- (:ts newest) (:ts oldest))]
-                                               (when (>= elapsed 600)
-                                                 (max 0.0 (/ (- (:pct newest) (:pct oldest))
-                                                              (/ elapsed 3600.0))))))]
+                              (let [bucket    (->> in-5h
+                                                   (filter #(and (>= (:ts %) (- t lookback-s))
+                                                                 (<= (:ts %) t))))
+                                    ;; Only use samples from the active (most recent)
+                                    ;; 5h window to avoid spanning a reset boundary.
+                                    active-r  (when (seq bucket)
+                                                (apply max (map :resets-at bucket)))
+                                    active    (filter #(= (:resets-at %) active-r) bucket)
+                                    rate      (when (>= (count active) 2)
+                                                (let [oldest  (first active)
+                                                      newest  (last active)
+                                                      elapsed (- (:ts newest) (:ts oldest))]
+                                                  (when (>= elapsed 300)
+                                                    (* scale
+                                                       (max 0.0 (/ (- (:pct newest) (:pct oldest))
+                                                                    (/ elapsed 3600.0)))))))]
                                 {:ts t :rate (or rate 0.0)}))
                             grid-ts)
           margin-r  {:top 12 :right 32 :bottom 28 :left 56}
@@ -354,12 +363,15 @@
                      :x1 (- chart-w (:right margin-r))
                      :y1 (- rate-chart-h (:bottom margin-r))}
           {:keys [x0 y0 x1 y1]} rect
-          ;; y ceiling: 95th-percentile cap so one burst spike doesn't
-          ;; squash the rest of the chart; floor at 10.
-          rates     (sort (map :rate rate-pts))
-          p95-idx   (int (* 0.95 (max 1 (dec (count rates)))))
-          r-max     (max 10.0 (if (seq rates) (nth rates p95-idx) 10.0))
-          y-top     (-> r-max (/ 5.0) Math/ceil long (* 5) (max 10))
+          ;; y ceiling: p95 of *non-zero* rates so that the many idle-period
+          ;; zeros don't pull the percentile below the active-session peaks.
+          ;; Hard cap at 25 to clip genuine millisecond bursts (e.g. 4
+          ;; sessions all ticking simultaneously in a few seconds).
+          ;; y ceiling: max of non-zero rates, hard-capped at 25 to clip
+          ;; sub-second multi-session coincident bursts (e.g. 140%/hr).
+          nonzero   (filter pos? (map :rate rate-pts))
+          r-max     (min 25.0 (max 2.0 (if (seq nonzero) (apply max nonzero) 2.0)))
+          y-top     (-> r-max (/ 5.0) Math/ceil long (* 5) (max 5))
           sx        (scale-x {:window-start window-start :resets-at resets-at} rect)
           sy        (scale-y y-top rect)
           r-ticks   (range 0 (inc y-top) 5)

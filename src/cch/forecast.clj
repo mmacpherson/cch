@@ -136,6 +136,38 @@
              (mapv (fn [{:keys [ts pct]}]
                      {:ts (long ts) :pct (double pct)})))))
 
+(defn- rate-5h-samples
+  "60s-bucketed five-hour window samples for the full 7d span.
+   Monotone filter is partitioned per resets_at so each 5h window is
+   treated independently. Returns :resets-at so the chart can avoid
+   spanning a reset boundary when computing a lookback-window rate."
+  [since-iso]
+  (let [sql (format
+              (str "WITH samples AS ("
+                   "  SELECT CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
+                   "    CAST(json_extract(payload, '$.rate_limits.five_hour.used_percentage') AS REAL) AS pct,"
+                   "    json_extract(payload, '$.rate_limits.five_hour.resets_at') AS resets_at"
+                   "  FROM context_snapshots"
+                   "  WHERE timestamp >= '%s'"
+                   "    AND json_extract(payload, '$.rate_limits.five_hour.used_percentage') IS NOT NULL"
+                   "    AND session_id NOT LIKE 'test%%'"
+                   "  ORDER BY timestamp ASC"
+                   "), fresh AS ("
+                   "  SELECT *,"
+                   "    MAX(pct) OVER (PARTITION BY resets_at ORDER BY ts"
+                   "      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_max"
+                   "  FROM samples"
+                   "), monotone AS ("
+                   "  SELECT * FROM fresh WHERE pct >= COALESCE(prev_max, 0)"
+                   "), bucketed AS ("
+                   "  SELECT *, ROW_NUMBER() OVER (PARTITION BY resets_at, ts / 60 ORDER BY ts) AS rn"
+                   "  FROM monotone"
+                   ") SELECT ts, pct, resets_at FROM bucketed WHERE rn = 1 ORDER BY ts")
+              since-iso)]
+    (some->> (db/query sql)
+             (mapv (fn [{:keys [ts pct resets_at]}]
+                     {:ts (long ts) :pct (double pct) :resets-at (long resets_at)})))))
+
 (defn current-window
   "Data bundle for the /usage page: observed snapshots in the current
    7d rate-limit window plus the full set of forward projections."
@@ -150,8 +182,9 @@
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
           projs        (proj/all-projections obs-pairs window-info)]
       (when (and last-pct (seq projs))
-        {:observed      obs-pairs
-         :rate-samples  (rate-chart-samples resets-at)
+        {:observed        obs-pairs
+         :rate-samples    (rate-chart-samples resets-at)
+         :rate-5h-samples (rate-5h-samples (epoch->iso window-start))
          :resets-at     resets-at
          :window-start  window-start
          :now           now
