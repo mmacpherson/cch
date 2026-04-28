@@ -133,11 +133,43 @@
   {:seven-day {:prior-mu 0.55 :prior-sigma 0.045}
    :five-hour {:prior-mu 15.0 :prior-sigma 8.0}})
 
+;; pct is integer-quantized (1% resolution). At ~0.6%/hr aggregate, a 10-min
+;; window almost never captures a tick. 20 min gives enough span to see
+;; movement at normal rates while staying reactive to bursts. Compare newest
+;; vs oldest raw sample across all concurrent sessions.
+(def ^:private burn-lookback-secs 1200)
+
+(defn- recent-burn-rate-phr
+  "Observed burn rate in %/hr over the past ~20 min of raw samples.
+   Compares newest vs oldest pct within the window across all concurrent
+   sessions. Returns 0.0 when idle, nil when fewer than 2 samples."
+  [wpath resets-at now]
+  (let [cutoff-iso (epoch->iso (- now burn-lookback-secs))
+        sql        (format
+                     (str "SELECT CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
+                          "  json_extract(payload, '$.rate_limits.%s.used_percentage') AS pct"
+                          " FROM context_snapshots"
+                          " WHERE timestamp >= '%s'"
+                          "   AND json_extract(payload, '$.rate_limits.%s.resets_at') = %d"
+                          "   AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
+                          "   AND session_id NOT LIKE 'test%%'"
+                          " ORDER BY ts ASC")
+                     wpath cutoff-iso wpath resets-at wpath)
+        rows       (db/query sql)]
+    (when (>= (count rows) 2)
+      (let [oldest    (first rows)
+            newest    (last rows)
+            elapsed-s (- (:ts newest) (:ts oldest))]
+        (when (>= elapsed-s 60)
+          (/ (- (:pct newest) (:pct oldest))
+             (/ elapsed-s 3600.0)))))))
+
 (defn- compute-bayes-stats
   "Bayesian projection for one window."
   [window-key]
   (when-let [resets-at (latest-resets-at window-key)]
     (let [{:keys [prior-mu prior-sigma]} (window-config window-key)
+          wpath        (window-sql-path window-key)
           window-start (- resets-at (span-secs window-key))
           in-window    (filtered-samples (epoch->iso window-start) window-key)
           now          (-> (Instant/now) .getEpochSecond)
@@ -146,12 +178,14 @@
                         :window-start window-start :last-pct last-pct
                         :prior-mu prior-mu :prior-sigma prior-sigma}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
-          proj-result  (when last-pct (proj/bayes-projection obs-pairs window-info))]
+          proj-result  (when last-pct (proj/bayes-projection obs-pairs window-info))
+          local-rate   (recent-burn-rate-phr wpath resets-at now)]
       (when last-pct
         (let [raw-proj (or (:proj proj-result) last-pct)]
-          {:current_pct   (Math/round last-pct)
-           :projected_pct (Double/parseDouble (format "%.1f" raw-proj))
-           :secs_left     (max 0 (- resets-at now))})))))
+          (cond-> {:current_pct   (Math/round last-pct)
+                   :projected_pct (Double/parseDouble (format "%.1f" raw-proj))
+                   :secs_left     (max 0 (- resets-at now))}
+            (some? local-rate) (assoc :local_rate_phr (Double/parseDouble (format "%.1f" local-rate)))))))))
 
 (defn statusline-stats
   "Bundle for the statusLine: current pct, Bayesian projection at reset,

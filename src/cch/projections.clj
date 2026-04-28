@@ -286,7 +286,7 @@
           lo   (max last-pct (- pred half-width))
           hi   (max last-pct (+ pred half-width))]
       {:method :linear
-       :name   "Linear (frequentist, b≥0)"
+       :name   "Frequentist (linear, b≥0)"
        ;; Report the constrained slope directly. For a horizontal fit
        ;; this is 0, even when proj > last_pct (the fit's intercept can
        ;; be above the most recent sample on synthetic decreasing data).

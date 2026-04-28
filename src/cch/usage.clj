@@ -133,12 +133,33 @@
              :width   "100%"
              :role    "img"
              :class   "usage-chart"}
-       ;; clipPath so projection bands/lines that exceed the y-axis
-       ;; ceiling (a runaway EWMA at 500% etc.) get cropped to the
-       ;; plot rectangle instead of bleeding into the header.
+       [:text {:x (/ (+ x0 x1) 2.0) :y 14
+               :text-anchor "middle" :font-size 10
+               :fill "var(--bulma-text-weak)"}
+        "quota used (%)"]
        [:defs
         [:clipPath {:id "plot-clip"}
          [:rect {:x x0 :y y0 :width (- x1 x0) :height (- y1 y0)}]]]
+       ;; --- reset-cycle vertical lines (resets-at, resets-at-24h, ...) ---
+       ;; Marks the same hour-of-day as the weekly reset, every 24h back to
+       ;; window-start. Subtle — drawn before gridlines so they sit furthest back.
+       (for [t (->> (iterate #(- % 86400) resets-at)
+                    (take-while #(>= % window-start)))
+             :let [x (sx t)]]
+         [:line {:x1 x :x2 x :y1 (sy 100) :y2 y1
+                 :stroke "var(--bulma-text-weak)"
+                 :stroke-width 1
+                 :opacity 0.25
+                 :class "reset-cycle-tick"}])
+       ;; --- linear-pace reference line (0% at window-start → 100% at resets-at) ---
+       ;; If observed usage is above this line you're ahead of pace; below means behind.
+       [:line {:x1 (sx window-start) :x2 (sx resets-at)
+               :y1 (sy 0) :y2 (sy 100)
+               :stroke "var(--bulma-text-weak)"
+               :stroke-width 1
+               :stroke-dasharray "6 3"
+               :opacity 0.55
+               :class "ref-pace"}]
        ;; --- gridlines + y-axis labels ---
        (for [pct y-ticks
              :let [y (sy pct)]]
@@ -201,7 +222,8 @@
            [:polyline {:points pts
                        :fill "none"
                        :stroke (method-color method)
-                       :stroke-width 2.25
+                       :stroke-width 2.7
+                       :stroke-opacity 0.9
                        :stroke-dasharray "5 4"
                        :class (str "proj-line proj-" mname)
                        :data-method mname}]])]
@@ -210,12 +232,13 @@
          [:polyline {:points (points-attr smoothed)
                      :fill "none"
                      :stroke "#059669"
-                     :stroke-width 1.75
+                     :stroke-width 2.1
+                     :stroke-opacity 0.9
                      :class "observed-smoothed"}])
        (for [[x y] obs-pts]
          [:circle {:cx x :cy y :r 1.6
                    :fill "#059669"
-                   :fill-opacity 0.55
+                   :fill-opacity 0.5
                    :class "observed-point"}])])))
 
 (defn legend
@@ -269,7 +292,8 @@
    svg.usage-chart .proj-hit { pointer-events: stroke; cursor: pointer; }
    svg.usage-chart .band-region { opacity: 0; transition: opacity 0.18s ease; pointer-events: none; }
    /* Legend layout */
-   div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.6em; display: flex; flex-wrap: wrap; gap: 0.5em 1em; line-height: 1.6; }
+   div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.6em; margin-bottom: 0.6em; display: flex; flex-wrap: wrap; gap: 0.5em 1em; line-height: 1.6; justify-content: center; }
+   svg.rate-chart { margin-top: 1.5em; border-top: 1px solid var(--bulma-border); padding-top: 0.5em; }
    div.legend .legend-item { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.05em 0.3em; border-radius: 3px; cursor: default; }
    div.legend .legend-item[data-method]:hover { background: var(--bulma-scheme-main-bis); color: var(--bulma-text); }
    div.legend .swatch { display: inline-block; width: 1.2em; height: 0.5em; border-radius: 1px; }
@@ -295,6 +319,96 @@
    div.method-row .method-name { font-family: var(--bulma-family-primary); font-size: 0.8em; color: var(--bulma-text-weak); }
    div.method-row .method-proj .aux { color: var(--bulma-text-weak); font-size: 0.9em; }")
 
+(def ^:private rate-chart-h 140)
+
+(defn rate-chart-svg
+  "Second chart: estimated first derivative (burn rate in %/hr) over the
+   observed window only (nothing past 'now'). Differentiates the
+   LOESS-smoothed observed curve to get a clean session-level rate
+   envelope free of integer-quantization spikes."
+  [data]
+  (when (and data (> (count (:observed data)) 4))
+    (let [{:keys [observed window-start resets-at now]} data
+          in-window (filter #(<= (:ts %) now) observed)
+          ;; Differentiate the LOESS-smoothed observed curve.
+          ;; Smoothing first removes integer-quantization spikes; finite
+          ;; differences on the smooth curve give a clean rate envelope.
+          smooth    (proj/loess-smooth in-window (count in-window) 0.08)
+          rate-pts  (when (>= (count smooth) 2)
+                      (->> (partition 2 1 smooth)
+                           (keep (fn [[a b]]
+                                   (let [dt-s (- (:ts b) (:ts a))]
+                                     (when (pos? dt-s)
+                                       {:ts   (/ (+ (:ts a) (:ts b)) 2.0)
+                                        :rate (max 0.0 (* (/ (- (:pct b) (:pct a)) dt-s) 3600.0))}))))
+                           vec))
+          margin-r  {:top 12 :right 32 :bottom 28 :left 56}
+          rect      {:x0 (:left margin-r) :y0 (:top margin-r)
+                     :x1 (- chart-w (:right margin-r))
+                     :y1 (- rate-chart-h (:bottom margin-r))}
+          {:keys [x0 y0 x1 y1]} rect
+          ;; y ceiling: next multiple of 5 above the observed max, min 10
+          r-max     (apply max 10.0 (map :rate (or rate-pts [])))
+          y-top     (-> r-max (/ 5.0) Math/ceil long (* 5) (max 10))
+          sx        (scale-x {:window-start window-start :resets-at resets-at} rect)
+          sy        (scale-y y-top rect)
+          r-ticks   (range 0 (inc y-top) 5)
+          pts       (mapv (fn [{:keys [ts rate]}] [(sx ts) (sy rate)]) (or rate-pts []))
+          ;; Area fill: close path at y1 (zero line)
+          area-d    (when (seq pts)
+                      (let [[fx fy] (first pts)
+                            [lx _]  (last pts)]
+                        (str "M " fx " " fy " "
+                             (apply str (for [[x y] (rest pts)] (str "L " x " " y " ")))
+                             "L " lx " " y1 " L " fx " " y1 " Z")))]
+      [:svg {:viewBox (str "0 0 " chart-w " " rate-chart-h)
+             :width   "100%"
+             :class   "rate-chart"}
+       [:text {:x (/ (+ x0 x1) 2.0) :y 10
+               :text-anchor "middle" :font-size 10
+               :fill "var(--bulma-text-weak)"}
+        "burn rate (%/hr)"]
+       [:defs
+        [:clipPath {:id "rate-clip"}
+         [:rect {:x x0 :y y0 :width (- x1 x0) :height (- y1 y0)}]]]
+       ;; gridlines + y-axis labels
+       (for [r r-ticks :let [y (sy r)]]
+         [:g
+          [:line {:x1 x0 :x2 x1 :y1 y :y2 y
+                  :stroke "var(--bulma-border)" :stroke-width 1
+                  :stroke-dasharray (when (pos? r) "2 4")}]
+          [:text {:x (- x0 8) :y (+ y 4) :text-anchor "end" :font-size 10
+                  :fill "var(--bulma-text-weak)"}
+           (str r "%/h")]])
+       ;; x-axis date ticks (aligned with main chart)
+       (for [t (->> (iterate #(+ % 86400) window-start) (take-while #(<= % resets-at)))
+             :let [x (sx t)]]
+         [:g
+          [:line {:x1 x :x2 x :y1 y1 :y2 (+ y1 4)
+                  :stroke "var(--bulma-border)" :stroke-width 1}]
+          [:text {:x x :y (+ y1 16) :text-anchor "middle" :font-size 10
+                  :fill "var(--bulma-text-weak)"}
+           (fmt-day t)]])
+       ;; "now" guide
+       (let [x (sx now)]
+         [:line {:x1 x :x2 x :y1 y0 :y2 y1
+                 :stroke "var(--bulma-text-weak)" :stroke-width 1
+                 :stroke-dasharray "3 3"}])
+       ;; reset-cycle vertical ticks (same as main chart)
+       (for [t (->> (iterate #(- % 86400) resets-at) (take-while #(>= % window-start)))
+             :let [x (sx t)]]
+         [:line {:x1 x :x2 x :y1 (sy (min y-top 100)) :y2 y1
+                 :stroke "var(--bulma-text-weak)" :stroke-width 1 :opacity 0.25}])
+       ;; area fill + line, clipped
+       [:g {:clip-path "url(#rate-clip)"}
+        (when area-d
+          [:path {:d area-d :fill "#059669" :fill-opacity 0.12 :stroke "none"}])
+        (when (seq pts)
+          [:polyline {:points (points-attr pts)
+                      :fill "none" :stroke "#059669"
+                      :stroke-width 1.75 :stroke-opacity 0.9
+                      :class "rate-line"}])]])))
+
 (defn page-body
   "Hiccup body for the /usage page. Caller wraps with html/head/nav."
   [data]
@@ -303,7 +417,8 @@
    ;; legend hover into the SVG to isolate the matching method.
    [:div.usage-chart-block
     (chart-svg data)
-    (legend data)]
+    (legend data)
+    (rate-chart-svg data)]
    (when data (summary-stats data))])
 
 (defn build-data
