@@ -333,7 +333,9 @@
           ;; Differentiate the LOESS-smoothed observed curve.
           ;; Smoothing first removes integer-quantization spikes; finite
           ;; differences on the smooth curve give a clean rate envelope.
-          smooth    (proj/loess-smooth in-window (count in-window) 0.08)
+          ;; Narrow bandwidth (~1.5h over 7d) so session bursts survive the
+          ;; derivative; the main chart uses 0.08 (13h) for trend tracking.
+          smooth    (proj/loess-smooth in-window (count in-window) 0.015)
           rate-pts  (when (>= (count smooth) 2)
                       (->> (partition 2 1 smooth)
                            (keep (fn [[a b]]
