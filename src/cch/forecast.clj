@@ -332,17 +332,43 @@
             (some? local-rate) (assoc :local_rate_phr (Double/parseDouble (format "%.1f" local-rate)))))))))
 
 (def ^:private forecast-cache (atom {:ts 0 :data nil}))
+(def ^:private forecast-refreshing? (atom false))
+
+(defn- refresh-forecast! []
+  (when (compare-and-set! forecast-refreshing? false true)
+    (future
+      (try
+        (let [fresh {:five_hour (compute-bayes-stats :five-hour)
+                     :seven_day (compute-bayes-stats :seven-day)}
+              now   (-> (Instant/now) .getEpochSecond)]
+          (reset! forecast-cache {:ts now :data fresh}))
+        (finally
+          (reset! forecast-refreshing? false))))))
 
 (defn statusline-stats
   "Bundle for the statusLine: current pct, Bayesian projection at reset,
-   and time-to-reset for both windows. Cached for 15 s so repeated
-   statusLine refreshes don't run N SQLite queries each time."
+   and time-to-reset for both windows.
+
+   Uses stale-while-revalidate: returns cached data immediately (even if
+   stale) and kicks off a background refresh when data is older than 15 s.
+   This ensures /forecast always responds in <1 ms regardless of how many
+   concurrent statusLine calls are in flight."
   []
   (let [{:keys [ts data]} @forecast-cache
-        now (-> (Instant/now) .getEpochSecond)]
-    (if (< (- now ts) 15)
-      data
+        now    (-> (Instant/now) .getEpochSecond)
+        stale? (>= (- now ts) 15)]
+    (cond
+      ;; No data yet (first call after startup) — block once to populate.
+      (nil? data)
       (let [fresh {:five_hour (compute-bayes-stats :five-hour)
                    :seven_day (compute-bayes-stats :seven-day)}]
         (reset! forecast-cache {:ts now :data fresh})
-        fresh))))
+        fresh)
+
+      ;; Data is stale — return what we have and refresh in the background
+      ;; so the next call (a few seconds later) gets the updated values.
+      stale?
+      (do (refresh-forecast!) data)
+
+      ;; Fresh — return immediately.
+      :else data)))
