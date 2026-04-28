@@ -336,26 +336,33 @@
           ;; from observed co-movement: 1% of 5h window ~ 0.133% of 7d window).
           scale       0.133
           in-5h       (vec (filter #(<= (:ts %) now) (or rate-5h-samples [])))
-          grid-step-s (* 5 60)
+          n-5h        (count in-5h)
+          grid-step-s (* 10 60)
           lookback-s  (* 30 60)
           grid-ts     (range window-start (+ now 1) grid-step-s)
+          ;; Binary search: first index where (:ts v[i]) >= cutoff. O(log n).
+          lower-bound (fn [cutoff]
+                        (loop [lo 0 hi n-5h]
+                          (if (>= lo hi) lo
+                            (let [mid (quot (+ lo hi) 2)]
+                              (if (< (:ts (nth in-5h mid)) cutoff)
+                                (recur (inc mid) hi)
+                                (recur lo mid))))))
           rate-pts    (mapv (fn [t]
-                              (let [bucket    (->> in-5h
-                                                   (filter #(and (>= (:ts %) (- t lookback-s))
-                                                                 (<= (:ts %) t))))
-                                    ;; Only use samples from the active (most recent)
-                                    ;; 5h window to avoid spanning a reset boundary.
-                                    active-r  (when (seq bucket)
-                                                (apply max (map :resets-at bucket)))
-                                    active    (filter #(= (:resets-at %) active-r) bucket)
-                                    rate      (when (>= (count active) 2)
-                                                (let [oldest  (first active)
-                                                      newest  (last active)
-                                                      elapsed (- (:ts newest) (:ts oldest))]
-                                                  (when (>= elapsed 300)
-                                                    (* scale
-                                                       (max 0.0 (/ (- (:pct newest) (:pct oldest))
-                                                                    (/ elapsed 3600.0)))))))]
+                              (let [lo      (lower-bound (- t lookback-s))
+                                    hi      (lower-bound (inc t))
+                                    bucket  (subvec in-5h lo hi)
+                                    active-r (when (seq bucket)
+                                               (apply max (map :resets-at bucket)))
+                                    active  (filter #(= (:resets-at %) active-r) bucket)
+                                    rate    (when (>= (count active) 2)
+                                              (let [oldest  (first active)
+                                                    newest  (last active)
+                                                    elapsed (- (:ts newest) (:ts oldest))]
+                                                (when (>= elapsed 300)
+                                                  (* scale
+                                                     (max 0.0 (/ (- (:pct newest) (:pct oldest))
+                                                                  (/ elapsed 3600.0)))))))]
                                 {:ts t :rate (or rate 0.0)}))
                             grid-ts)
           margin-r  {:top 12 :right 32 :bottom 28 :left 56}

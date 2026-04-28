@@ -168,10 +168,7 @@
              (mapv (fn [{:keys [ts pct resets_at]}]
                      {:ts (long ts) :pct (double pct) :resets-at (long resets_at)})))))
 
-(defn current-window
-  "Data bundle for the /usage page: observed snapshots in the current
-   7d rate-limit window plus the full set of forward projections."
-  []
+(defn- build-current-window []
   (when-let [resets-at (latest-resets-at :seven-day)]
     (let [window-start (- resets-at (* 7 86400))
           in-window    (filtered-samples (epoch->iso window-start) :seven-day)
@@ -183,14 +180,29 @@
           projs        (proj/all-projections obs-pairs window-info)]
       (when (and last-pct (seq projs))
         {:observed        obs-pairs
-         :rate-samples    (rate-chart-samples resets-at)
          :rate-5h-samples (rate-5h-samples (epoch->iso window-start))
-         :resets-at     resets-at
-         :window-start  window-start
-         :now           now
-         :last-pct      last-pct
-         :samples       (or (raw-sample-count (epoch->iso window-start) :seven-day) 0)
-         :projections   projs}))))
+         :resets-at       resets-at
+         :window-start    window-start
+         :now             now
+         :last-pct        last-pct
+         :samples         (or (raw-sample-count (epoch->iso window-start) :seven-day) 0)
+         :projections     projs}))))
+
+;; Cache current-window for 30s — data arrives at most once per minute
+;; via the statusLine hook, so re-running 4 queries + LOESS + projections
+;; on every browser hit is pure waste.
+(def ^:private window-cache (atom {:ts 0 :data nil}))
+
+(defn current-window
+  "Data bundle for the /usage page. Cached for 30 s."
+  []
+  (let [{:keys [ts data]} @window-cache
+        now (-> (Instant/now) .getEpochSecond)]
+    (if (< (- now ts) 30)
+      data
+      (let [fresh (build-current-window)]
+        (reset! window-cache {:ts now :data fresh})
+        fresh))))
 
 (def ^:private window-config
   {:seven-day {:prior-mu 0.55 :prior-sigma 0.045}
