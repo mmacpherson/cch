@@ -245,6 +245,50 @@
           (/ (- (:pct newest) (:pct oldest))
              (/ elapsed-s 3600.0)))))))
 
+;; --- Empirical Bayes: learned prior from completed windows ---
+
+;; Exponential decay applied across completed weeks — most-recent week has
+;; weight 1, each older week is multiplied by this factor.
+(def ^:private prior-decay-lambda 0.85)
+
+;; Floor on σ so that a handful of nearly-identical weeks don't collapse
+;; the prior to a spike and overwhelm the within-week likelihood.
+(def ^:private prior-sigma-floor 0.03)
+
+(defn weighted-prior-params
+  "Pure fn: given a seq of completed-window rows [{:final_pct N} ...] ordered
+   newest-first, returns {:mu :sigma} in %/hr units using exponentially-decayed
+   weights (most-recent weight = 1, each older week × prior-decay-lambda).
+   Returns nil when fewer than 2 windows are supplied."
+  [rows]
+  (when (>= (count rows) 2)
+    (let [rates (mapv #(/ (double (:final_pct %)) (* 7.0 24.0)) rows)
+          ws    (mapv #(Math/pow prior-decay-lambda %) (range (count rates)))
+          sw    (reduce + 0.0 ws)
+          mu    (/ (reduce + 0.0 (map * ws rates)) sw)
+          ;; Bessel-corrected weighted variance
+          sw2   (reduce + 0.0 (map #(* % %) ws))
+          var   (/ (reduce + 0.0 (map (fn [w r] (* w (Math/pow (- r mu) 2.0))) ws rates))
+                   (- sw (/ sw2 sw)))
+          sigma (max prior-sigma-floor (Math/sqrt var))]
+      {:mu mu :sigma sigma})))
+
+(defn- learned-prior
+  "Query completed 7-day windows (newest-first, up to 12) and derive an
+   empirical Bayes prior via weighted-prior-params. Returns nil during the
+   first week when there is no history."
+  []
+  (let [sql (str "SELECT MAX(CAST(json_extract(payload,'$.rate_limits.seven_day.used_percentage') AS REAL))"
+                 "  AS final_pct"
+                 " FROM context_snapshots"
+                 " WHERE json_extract(payload,'$.rate_limits.seven_day.resets_at') < strftime('%s','now')"
+                 "   AND json_extract(payload,'$.rate_limits.seven_day.used_percentage') IS NOT NULL"
+                 "   AND session_id NOT LIKE 'test%'"
+                 " GROUP BY json_extract(payload,'$.rate_limits.seven_day.resets_at')"
+                 " ORDER BY json_extract(payload,'$.rate_limits.seven_day.resets_at') DESC"
+                 " LIMIT 12")]
+    (weighted-prior-params (db/query sql))))
+
 (defn- fused-burn-rate-7d
   "Inverse-variance weighted fusion of 7d-direct and 5h-scaled burn rates,
    both in 7d-percent/hr. 5h weight = 7.5 (proportional to its tick frequency)."
@@ -264,7 +308,9 @@
   "Bayesian projection for one window."
   [window-key]
   (when-let [resets-at (latest-resets-at window-key)]
-    (let [{:keys [prior-mu prior-sigma]} (window-config window-key)
+    (let [base-cfg              (window-config window-key)
+          learned               (when (= window-key :seven-day) (learned-prior))
+          {:keys [prior-mu prior-sigma]} (merge base-cfg learned)
           wpath        (window-sql-path window-key)
           window-start (- resets-at (span-secs window-key))
           in-window    (filtered-samples (epoch->iso window-start) window-key)

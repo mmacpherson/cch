@@ -258,5 +258,6 @@
         win (window-info obs 48)
         methods (set (map :method (p/all-projections obs win)))]
     (is (contains? methods :linear))
+    (is (contains? methods :linear-rate))
     (is (contains? methods :bayes))
-    (is (= 2 (count methods)) "EWMA / trailing-* should no longer appear")))
+    (is (= 3 (count methods)) "expected linear, linear-rate, and bayes")))

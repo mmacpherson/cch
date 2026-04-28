@@ -194,18 +194,19 @@
 
 (defn- hac-variance-factor
   "Newey-West-style autocorrelation correction for OLS variance.
-   Uses the (1+ρ)/(1-ρ) Bartlett-kernel limit at lag 1, capped to keep
-   the band sensible when adjacent residuals are nearly identical
-   (cumulative-usage data routinely has ρ → 0.95+).
+   Uses the (1+ρ)/(1-ρ) Bartlett-kernel limit at lag 1, capped at 8
+   (≈ ρ=0.78) to keep the band sensible.
 
-   Cumulative pct points are highly autocorrelated by construction, so
-   plain OLS underestimates σ² and produces overconfident bands. The
-   factor ranges from ~1 (independent residuals) to ~20 (very strong
-   positive autocorrelation) to inflate σ² accordingly."
+   Cumulative pct residuals are highly autocorrelated by construction —
+   partly genuine process autocorrelation and partly model mismatch from
+   fitting a line to S-shaped data. The original cap of 20 (ρ≈0.95)
+   over-inflated σ² when residuals are large, producing bands of ±25pp.
+   Cap at 8 still corrects for real autocorrelation without treating
+   curvature-induced residuals as prediction uncertainty."
   [residuals]
   (let [rho (lag1-autocorr residuals)]
     (cond
-      (>= rho 0.95) 20.0
+      (>= rho 0.78) 8.0
       (<= rho 0.0)  1.0
       :else         (/ (+ 1.0 rho) (- 1.0 rho)))))
 
@@ -294,7 +295,43 @@
        :proj   proj
        :band   {:lo lo :hi hi}})))
 
-;; --- 3. Bayesian conjugate Gaussian on the rate ---
+;; --- 3. Frequentist-2: OLS on rates (not cumulative level) ---
+
+(defn rate-ols-projection
+  "Frequentist projection via OLS on observed rates (d/dt pct).
+
+   Models rate ~ N(μ, σ²) from non-overlapping inter-sample intervals,
+   then propagates the CI on the MEAN RATE to the forecast horizon:
+
+     proj = last_pct + μ̂ × hours_remaining
+     lo   = last_pct + max(0, μ̂ − z·σ/√n) × hours_remaining
+     hi   = last_pct + (μ̂ + z·σ/√n) × hours_remaining
+
+   Unlike linear-projection (OLS on cumulative level), residuals here are
+   from a stationary process so σ² is small and the lower bound is
+   physically meaningful: it represents a slow-but-nonzero sustained rate,
+   not a nearly-flat linear fit to an S-shaped curve."
+  [observed {:keys [now resets-at last-pct]}]
+  (let [rs (rate-samples observed)]
+    (when (>= (count rs) 3)
+      (let [rates   (mapv :rate rs)
+            n       (count rates)
+            mean-r  (/ (reduce + 0.0 rates) n)
+            sse     (reduce + 0.0 (map #(let [d (- % mean-r)] (* d d)) rates))
+            sigma2  (/ sse (dec n))
+            se-r    (Math/sqrt (/ sigma2 n))
+            hours-l (max 0.0 (/ (double (- resets-at now)) 3600.0))
+            lo-r    (max 0.0 (- mean-r (* z-90 se-r)))
+            proj    (+ last-pct (* (max 0.0 mean-r) hours-l))
+            lo      (max last-pct (+ last-pct (* lo-r hours-l)))
+            hi      (max last-pct (+ last-pct (* (+ mean-r (* z-90 se-r)) hours-l)))]
+        {:method :linear-rate
+         :name   "Frequentist-2 (rate OLS)"
+         :rate   (max 0.0 mean-r)
+         :proj   proj
+         :band   {:lo lo :hi hi}}))))
+
+;; --- 4. Bayesian conjugate Gaussian on the rate ---
 
 ;; Empirical prior on the average weekly rate.
 ;; User reports typical end-of-week pct 80-95%, occasionally 100%:
@@ -437,5 +474,6 @@
   enough data."
   [observed window-info]
   (->> [(linear-projection observed window-info)
+        (rate-ols-projection observed window-info)
         (bayes-projection observed window-info)]
        (filterv some?)))
