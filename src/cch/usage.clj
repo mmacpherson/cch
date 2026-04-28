@@ -319,7 +319,7 @@
    div.method-row .method-name { font-family: var(--bulma-family-primary); font-size: 0.8em; color: var(--bulma-text-weak); }
    div.method-row .method-proj .aux { color: var(--bulma-text-weak); font-size: 0.9em; }")
 
-(def ^:private rate-chart-h 140)
+(def ^:private rate-chart-h 280)
 
 (defn rate-chart-svg
   "Second chart: burn rate (%/hr) sampled on a regular time grid.
@@ -365,7 +365,7 @@
                                                                   (/ elapsed 3600.0)))))))]
                                 {:ts t :rate (or rate 0.0)}))
                             grid-ts)
-          margin-r  {:top 12 :right 32 :bottom 28 :left 56}
+          margin-r  {:top 34 :right 32 :bottom 36 :left 56}
           rect      {:x0 (:left margin-r) :y0 (:top margin-r)
                      :x1 (- chart-w (:right margin-r))
                      :y1 (- rate-chart-h (:bottom margin-r))}
@@ -393,7 +393,7 @@
       [:svg {:viewBox (str "0 0 " chart-w " " rate-chart-h)
              :width   "100%"
              :class   "rate-chart"}
-       [:text {:x (/ (+ x0 x1) 2.0) :y 10
+       [:text {:x (/ (+ x0 x1) 2.0) :y 14
                :text-anchor "middle" :font-size 10
                :fill "var(--bulma-text-weak)"}
         "burn rate (%/hr)"]

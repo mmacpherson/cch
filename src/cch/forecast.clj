@@ -214,6 +214,12 @@
 ;; vs oldest raw sample across all concurrent sessions.
 (def ^:private burn-lookback-secs 1200)
 
+;; Empirical Δ7d/Δ5h co-movement ratio (490k sample pairs). The 5h window
+;; ticks ~7.5x more often (proportional to its smaller token budget), so we
+;; weight it 7.5x more heavily in the fused estimate.
+(def ^:private scale-5h->7d 0.133)
+(def ^:private weight-5h    7.5)
+
 (defn- recent-burn-rate-phr
   "Observed burn rate in %/hr over the past ~20 min of raw samples.
    Compares newest vs oldest pct within the window across all concurrent
@@ -239,6 +245,21 @@
           (/ (- (:pct newest) (:pct oldest))
              (/ elapsed-s 3600.0)))))))
 
+(defn- fused-burn-rate-7d
+  "Inverse-variance weighted fusion of 7d-direct and 5h-scaled burn rates,
+   both in 7d-percent/hr. 5h weight = 7.5 (proportional to its tick frequency)."
+  [resets-at-7d now]
+  (let [r7d  (some-> (recent-burn-rate-phr "seven_day" resets-at-7d now) (max 0.0))
+        r5at (latest-resets-at :five-hour)
+        r5h  (when r5at
+               (some-> (recent-burn-rate-phr "five_hour" r5at now)
+                       (* scale-5h->7d)
+                       (max 0.0)))]
+    (cond
+      (and r7d r5h) (/ (+ r7d (* weight-5h r5h)) (+ 1.0 weight-5h))
+      r5h           r5h
+      r7d           r7d)))
+
 (defn- compute-bayes-stats
   "Bayesian projection for one window."
   [window-key]
@@ -254,7 +275,9 @@
                         :prior-mu prior-mu :prior-sigma prior-sigma}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
           proj-result  (when last-pct (proj/bayes-projection obs-pairs window-info))
-          local-rate   (recent-burn-rate-phr wpath resets-at now)]
+          local-rate   (if (= window-key :seven-day)
+                         (fused-burn-rate-7d resets-at now)
+                         (recent-burn-rate-phr wpath resets-at now))]
       (when last-pct
         (let [raw-proj (or (:proj proj-result) last-pct)]
           (cond-> {:current_pct   (Math/round last-pct)
