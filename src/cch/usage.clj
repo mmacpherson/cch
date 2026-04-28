@@ -322,40 +322,48 @@
 (def ^:private rate-chart-h 140)
 
 (defn rate-chart-svg
-  "Second chart: estimated first derivative (burn rate in %/hr) over the
-   observed window only (nothing past 'now'). Differentiates the
-   LOESS-smoothed observed curve to get a clean session-level rate
-   envelope free of integer-quantization spikes."
+  "Second chart: burn rate (%/hr) sampled on a regular time grid.
+   For each grid point t, finds the oldest and newest observed sample
+   within a trailing lookback window and computes (delta-pct / delta-t).
+   Same math as the statusline burn indicator, applied historically."
   [data]
   (when (and data (> (count (:observed data)) 4))
-    (let [{:keys [observed window-start resets-at now]} data
-          in-window (filter #(<= (:ts %) now) observed)
-          ;; Differentiate the LOESS-smoothed observed curve.
-          ;; Smoothing first removes integer-quantization spikes; finite
-          ;; differences on the smooth curve give a clean rate envelope.
-          ;; Narrow bandwidth (~1.5h over 7d) so session bursts survive the
-          ;; derivative; the main chart uses 0.08 (13h) for trend tracking.
-          smooth    (proj/loess-smooth in-window (count in-window) 0.015)
-          rate-pts  (when (>= (count smooth) 2)
-                      (->> (partition 2 1 smooth)
-                           (keep (fn [[a b]]
-                                   (let [dt-s (- (:ts b) (:ts a))]
-                                     (when (pos? dt-s)
-                                       {:ts   (/ (+ (:ts a) (:ts b)) 2.0)
-                                        :rate (max 0.0 (* (/ (- (:pct b) (:pct a)) dt-s) 3600.0))}))))
-                           vec))
+    (let [{:keys [rate-samples window-start resets-at now]} data
+          ;; Use fine-grained 60s-bucketed data (not the 360s top-chart data)
+          ;; so that 20-min lookback windows have ~20 points and session
+          ;; boundaries appear crisply rather than ramping over an hour.
+          in-window   (vec (filter #(<= (:ts %) now) (or rate-samples [])))
+          grid-step-s (* 5 60)
+          lookback-s  (* 60 60)
+          grid-ts     (range window-start (+ now 1) grid-step-s)
+          rate-pts    (mapv (fn [t]
+                              (let [bucket (->> in-window
+                                               (filter #(and (>= (:ts %) (- t lookback-s))
+                                                             (<= (:ts %) t))))
+                                    rate   (when (>= (count bucket) 2)
+                                             (let [oldest  (first bucket)
+                                                   newest  (last bucket)
+                                                   elapsed (- (:ts newest) (:ts oldest))]
+                                               (when (>= elapsed 600)
+                                                 (max 0.0 (/ (- (:pct newest) (:pct oldest))
+                                                              (/ elapsed 3600.0))))))]
+                                {:ts t :rate (or rate 0.0)}))
+                            grid-ts)
           margin-r  {:top 12 :right 32 :bottom 28 :left 56}
           rect      {:x0 (:left margin-r) :y0 (:top margin-r)
                      :x1 (- chart-w (:right margin-r))
                      :y1 (- rate-chart-h (:bottom margin-r))}
           {:keys [x0 y0 x1 y1]} rect
-          ;; y ceiling: next multiple of 5 above the observed max, min 10
-          r-max     (apply max 10.0 (map :rate (or rate-pts [])))
+          ;; y ceiling: 95th-percentile cap so one burst spike doesn't
+          ;; squash the rest of the chart; floor at 10.
+          rates     (sort (map :rate rate-pts))
+          p95-idx   (int (* 0.95 (max 1 (dec (count rates)))))
+          r-max     (max 10.0 (if (seq rates) (nth rates p95-idx) 10.0))
           y-top     (-> r-max (/ 5.0) Math/ceil long (* 5) (max 10))
           sx        (scale-x {:window-start window-start :resets-at resets-at} rect)
           sy        (scale-y y-top rect)
           r-ticks   (range 0 (inc y-top) 5)
-          pts       (mapv (fn [{:keys [ts rate]}] [(sx ts) (sy rate)]) (or rate-pts []))
+          pts       (mapv (fn [{:keys [ts rate]}] [(sx ts) (sy rate)]) rate-pts)
           ;; Area fill: close path at y1 (zero line)
           area-d    (when (seq pts)
                       (let [[fx fy] (first pts)
