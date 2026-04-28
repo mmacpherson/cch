@@ -331,44 +331,49 @@
                    :secs_left     (max 0 (- resets-at now))}
             (some? local-rate) (assoc :local_rate_phr (Double/parseDouble (format "%.1f" local-rate)))))))))
 
-(def ^:private forecast-cache (atom {:ts 0 :data nil}))
-(def ^:private forecast-refreshing? (atom false))
+(def ^:private forecast-cache (atom nil))
+(def ^:private bg-thread (atom nil))
 
-(defn- refresh-forecast! []
-  (when (compare-and-set! forecast-refreshing? false true)
-    (future
-      (try
-        (let [fresh {:five_hour (compute-bayes-stats :five-hour)
-                     :seven_day (compute-bayes-stats :seven-day)}
-              now   (-> (Instant/now) .getEpochSecond)]
-          (reset! forecast-cache {:ts now :data fresh}))
-        (finally
-          (reset! forecast-refreshing? false))))))
+(defn- latest-snapshot-id []
+  (some-> (db/query "SELECT MAX(id) AS id FROM context_snapshots") first :id))
+
+(defn- do-refresh! []
+  (let [fresh {:five_hour (compute-bayes-stats :five-hour)
+               :seven_day (compute-bayes-stats :seven-day)}]
+    (reset! forecast-cache fresh)))
+
+(defn start-bg-refresh!
+  "Start a background thread that polls for new context_snapshots every
+   `interval-ms` ms. If the DB's max(id) has advanced since the last
+   compute, recompute and update the cache atom; otherwise sleep again.
+   Computes once immediately on startup to seed the cache."
+  [& {:keys [interval-ms] :or {interval-ms 10000}}]
+  (let [last-id (atom nil)
+        t (Thread.
+            (fn []
+              (try (do-refresh!) (catch Exception _))
+              (loop []
+                (when-not (.isInterrupted (Thread/currentThread))
+                  (try
+                    (let [lid (latest-snapshot-id)]
+                      (when (and lid (not= lid @last-id))
+                        (reset! last-id lid)
+                        (do-refresh!)))
+                    (catch Exception _))
+                  (try (Thread/sleep (long interval-ms))
+                       (catch InterruptedException _))
+                  (recur)))))]
+    (.setDaemon t true)
+    (.start t)
+    (reset! bg-thread t)))
+
+(defn stop-bg-refresh! []
+  (when-let [t @bg-thread]
+    (.interrupt t)
+    (reset! bg-thread nil)))
 
 (defn statusline-stats
-  "Bundle for the statusLine: current pct, Bayesian projection at reset,
-   and time-to-reset for both windows.
-
-   Uses stale-while-revalidate: returns cached data immediately (even if
-   stale) and kicks off a background refresh when data is older than 15 s.
-   This ensures /forecast always responds in <1 ms regardless of how many
-   concurrent statusLine calls are in flight."
+  "Current forecast bundle for the statusLine. Sub-millisecond read —
+   all computation runs in the background thread started by start-bg-refresh!."
   []
-  (let [{:keys [ts data]} @forecast-cache
-        now    (-> (Instant/now) .getEpochSecond)
-        stale? (>= (- now ts) 15)]
-    (cond
-      ;; No data yet (first call after startup) — block once to populate.
-      (nil? data)
-      (let [fresh {:five_hour (compute-bayes-stats :five-hour)
-                   :seven_day (compute-bayes-stats :seven-day)}]
-        (reset! forecast-cache {:ts now :data fresh})
-        fresh)
-
-      ;; Data is stale — return what we have and refresh in the background
-      ;; so the next call (a few seconds later) gets the updated values.
-      stale?
-      (do (refresh-forecast!) data)
-
-      ;; Fresh — return immediately.
-      :else data)))
+  @forecast-cache)

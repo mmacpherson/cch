@@ -1268,8 +1268,7 @@
         nrepl     (start-nrepl! nrepl-port)
         stop-fn   (httpkit/run-server (fn [req] (route hooks event-idx req))
                                       {:port port :ip host})]
-    ;; Warm the forecast cache so the first statusLine refresh isn't slow.
-    (future (try (forecast/statusline-stats) (catch Exception _)))
+    (forecast/start-bg-refresh!)
     (println (format "cch serve listening on http://%s:%d (%d code hook(s) loaded)"
                      host port (count hooks)))
     (doseq [[n h] (sort-by first hooks)]
@@ -1281,6 +1280,7 @@
               ;; httpkit's stop-fn takes &{:as opts}, e.g. (stop :timeout 100)
               (try (apply stop-fn args) (catch Exception _ nil))
               (stop-nrepl! nrepl)
+              (forecast/stop-bg-refresh!)
               (db/close-db!)
               (log/stop-writer!))
      :hooks hooks
