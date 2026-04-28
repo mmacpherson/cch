@@ -331,9 +331,18 @@
                    :secs_left     (max 0 (- resets-at now))}
             (some? local-rate) (assoc :local_rate_phr (Double/parseDouble (format "%.1f" local-rate)))))))))
 
+(def ^:private forecast-cache (atom {:ts 0 :data nil}))
+
 (defn statusline-stats
   "Bundle for the statusLine: current pct, Bayesian projection at reset,
-   and time-to-reset for both windows."
+   and time-to-reset for both windows. Cached for 15 s so repeated
+   statusLine refreshes don't run N SQLite queries each time."
   []
-  {:five_hour (compute-bayes-stats :five-hour)
-   :seven_day (compute-bayes-stats :seven-day)})
+  (let [{:keys [ts data]} @forecast-cache
+        now (-> (Instant/now) .getEpochSecond)]
+    (if (< (- now ts) 15)
+      data
+      (let [fresh {:five_hour (compute-bayes-stats :five-hour)
+                   :seven_day (compute-bayes-stats :seven-day)}]
+        (reset! forecast-cache {:ts now :data fresh})
+        fresh))))
