@@ -18,7 +18,7 @@
     :re    #"rm\s+.*-\w*[rRf]\w*\s+(/\s|/$|/\*|~/|/home|/etc|/usr|/var|/boot|/sys|/proc)"
     :match #(re-find %2 %1)}
    {:label "fork bomb"
-    :re    #":\(\)\s*\{|\./:&|/dev/null\s*&"
+    :re    #":\(\)\s*\{|\./:&|/dev/null\s*&(?!&)"
     :match #(re-find %2 %1)}
    {:label "pipe to shell"
     :re    #"curl\s.*\|\s*(ba)?sh|wget\s.*\|\s*(ba)?sh"

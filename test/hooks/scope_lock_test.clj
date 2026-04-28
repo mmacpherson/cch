@@ -91,6 +91,44 @@
     (let [result (scope/check-scope "/repo/.git" "/repo" nil)]
       (is (= :deny (:decision result))))))
 
+;; --- Global allowed-paths tests ---
+
+(deftest test-global-allowed-paths-permits-external
+  (testing "file under a global-allowed-path is auto-allowed even outside worktree"
+    (is (nil? (scope/check-scope "/home/user/.claude/settings.json" "/repo" nil
+                                 ["/home/user/.claude"])))))
+
+(deftest test-global-allowed-paths-home-expansion
+  (let [home (System/getProperty "user.home")]
+    (testing "~ in global-allowed-path is expanded to home dir"
+      (is (nil? (scope/check-scope (str home "/.claude/plans/foo.md") "/repo" nil
+                                   ["~/.claude"]))))))
+
+(deftest test-global-allowed-paths-segment-safe
+  (testing "global-allowed-path prefix does not match sibling with longer name"
+    (let [home   (System/getProperty "user.home")
+          result (scope/check-scope (str home "/.claude-extra/file.txt") "/repo" nil
+                                    ["~/.claude"])]
+      (is (= :ask (:decision result))))))
+
+(deftest test-global-allowed-paths-still-denies-dot-git
+  (testing ".git check takes priority over global-allowed-paths"
+    (let [result (scope/check-scope "/repo/.git/config" "/repo" nil
+                                    ["/repo/.git"])]
+      (is (= :deny (:decision result))))))
+
+(deftest test-global-allowed-nil-no-effect
+  (testing "nil global-allowed-paths behaves the same as before"
+    (let [result (scope/check-scope "/other/file.py" "/repo" nil nil)]
+      (is (= :ask (:decision result))))))
+
+(deftest test-global-allowed-does-not-bypass-narrowing
+  (testing "global-allowed only applies outside worktree; narrowing still applies inside"
+    (let [result (scope/check-scope (str repo-root "/docs/readme.md") repo-root
+                                    ["src/"] ["/some/global/path"])]
+      (is (= :ask (:decision result)))
+      (is (str/includes? (:reason result) "outside allowed scope")))))
+
 ;; Malformed-YAML contract is proven by cch.config-test/test-load-yaml;
 ;; the fail-closed end-to-end behavior is proven by test-cli-integration
 ;; below. Protocol response shapes are proven by cch.protocol-test.
