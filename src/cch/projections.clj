@@ -326,7 +326,7 @@
             lo      (max last-pct (+ last-pct (* lo-r hours-l)))
             hi      (max last-pct (+ last-pct (* (+ mean-r (* z-90 se-r)) hours-l)))]
         {:method :linear-rate
-         :name   "Frequentist-2 (rate OLS)"
+         :name   "Frequentist (rate OLS)"
          :rate   (max 0.0 mean-r)
          :proj   proj
          :band   {:lo lo :hi hi}}))))
@@ -473,7 +473,6 @@
   of method maps (in display order), filtering out methods that lacked
   enough data."
   [observed window-info]
-  (->> [(linear-projection observed window-info)
-        (rate-ols-projection observed window-info)
+  (->> [(rate-ols-projection observed window-info)
         (bayes-projection observed window-info)]
        (filterv some?)))

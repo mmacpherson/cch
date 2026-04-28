@@ -81,9 +81,8 @@
   "Color + display order per projection method. Methods not in this
    map are still rendered (with a default gray) but lose stable
    ordering across page loads."
-  {:linear      {:color "#2563eb" :order 0}   ; frequentist — blue
-   :linear-rate {:color "#16a34a" :order 1}   ; frequentist-2 — green
-   :bayes       {:color "#f59e0b" :order 2}}) ; Bayesian — orange
+  {:linear-rate {:color "#2563eb" :order 0}   ; frequentist — blue
+   :bayes       {:color "#f59e0b" :order 1}}) ; Bayesian — orange
 
 (defn- method-color [m]
   (get-in method-style [m :color] "#6b7280"))
