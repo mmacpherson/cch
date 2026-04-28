@@ -1268,6 +1268,8 @@
         nrepl     (start-nrepl! nrepl-port)
         stop-fn   (httpkit/run-server (fn [req] (route hooks event-idx req))
                                       {:port port :ip host})]
+    ;; Warm the forecast cache so the first statusLine refresh isn't slow.
+    (future (try (forecast/statusline-stats) (catch Exception _)))
     (println (format "cch serve listening on http://%s:%d (%d code hook(s) loaded)"
                      host port (count hooks)))
     (doseq [[n h] (sort-by first hooks)]
