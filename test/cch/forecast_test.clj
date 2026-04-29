@@ -80,7 +80,6 @@
         (finally
           (stop-bg-refresh!)
           (reset! @#'cch.forecast/forecast-cache nil)
-          (reset! @#'cch.forecast/pending?       false)
           (fs/delete-tree tmp))))))
 
 (deftest bg-refresh-seeds-cache-on-startup

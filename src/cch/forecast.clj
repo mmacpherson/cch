@@ -13,7 +13,8 @@
   crosses the process boundary."
   (:require [cch.db :as db]
             [cch.log :as log]
-            [cch.projections :as proj])
+            [cch.projections :as proj]
+            [clojure.core.async :as async])
   (:import (java.time Instant)))
 
 ;; --- Query building ---
@@ -333,18 +334,15 @@
 
 (def ^:private forecast-cache (atom nil))
 (def ^:private bg-thread (atom nil))
-
-;; Signal path: server calls signal-new-data! after each context-snapshot POST.
-;; The bg thread blocks on lock.wait until notified, sleeps a debounce window
-;; to absorb bursts from concurrent sessions, then computes once.
-(def ^:private signal-lock (Object.))
-(def ^:private pending? (atom false))
+(def ^:private signal-ch-ref (atom nil))
 
 (defn signal-new-data!
-  "Notify the bg thread that a new context snapshot has arrived."
+  "Notify the bg thread that a new context snapshot has arrived.
+   dropping-buffer 1 means concurrent signals coalesce — at most one
+   wakeup is queued regardless of how many sessions post at once."
   []
-  (reset! pending? true)
-  (locking signal-lock (.notifyAll signal-lock)))
+  (when-let [ch @signal-ch-ref]
+    (async/put! ch :signal)))
 
 (defn- do-refresh! []
   (reset! forecast-cache
@@ -352,32 +350,31 @@
            :seven_day (compute-bayes-stats :seven-day)}))
 
 (defn start-bg-refresh!
-  "Start a background thread that idles until signaled by signal-new-data!,
-   then waits `debounce-ms` to absorb concurrent bursts, and computes the
-   forecast once. Computes immediately on startup to seed the cache."
+  "Start a background thread that blocks on a channel until signaled,
+   sleeps `debounce-ms` to absorb concurrent bursts, then computes once.
+   Closing the channel (stop-bg-refresh!) unblocks <!! with nil → clean exit.
+   Computes immediately on startup to seed the cache."
   [& {:keys [debounce-ms] :or {debounce-ms 3000}}]
-  (let [t (Thread.
-            (fn []
-              (try (do-refresh!) (catch Exception _))
-              (loop []
-                (when-not (.isInterrupted (Thread/currentThread))
-                  (locking signal-lock
-                    (while (not @pending?)
-                      (.wait signal-lock)))
-                  (reset! pending? false)
-                  (try (Thread/sleep (long debounce-ms))
-                       (catch InterruptedException _))
-                  (reset! pending? false)
-                  (try (do-refresh!) (catch Exception _))
-                  (recur)))))]
+  (let [ch (async/chan (async/dropping-buffer 1))
+        t  (Thread.
+             (fn []
+               (try (do-refresh!) (catch Exception _))
+               (loop []
+                 (when (async/<!! ch)       ; nil = channel closed → exit
+                   (try (Thread/sleep (long debounce-ms))
+                        (catch InterruptedException _))
+                   (try (do-refresh!) (catch Exception _))
+                   (recur)))))]
+    (reset! signal-ch-ref ch)
     (.setDaemon t true)
     (.start t)
     (reset! bg-thread t)))
 
 (defn stop-bg-refresh! []
-  (when-let [t @bg-thread]
-    (.interrupt t)
-    (reset! bg-thread nil)))
+  (when-let [ch @signal-ch-ref]
+    (async/close! ch)
+    (reset! signal-ch-ref nil))
+  (reset! bg-thread nil))
 
 (defn statusline-stats
   "Current forecast bundle for the statusLine. Sub-millisecond atom read —
