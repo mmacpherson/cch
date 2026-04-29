@@ -886,6 +886,7 @@
          :window-size    (:context_window_size ctx)
          :model-id       (get-in body [:model :id])
          :payload        body-str})
+      (forecast/signal-new-data!)
       {:status 204 :headers {} :body ""})
     (catch Exception e
       {:status 500

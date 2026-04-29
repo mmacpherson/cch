@@ -334,34 +334,41 @@
 (def ^:private forecast-cache (atom nil))
 (def ^:private bg-thread (atom nil))
 
-(defn- latest-snapshot-id []
-  (some-> (db/query "SELECT MAX(id) AS id FROM context_snapshots") first :id))
+;; Signal path: server calls signal-new-data! after each context-snapshot POST.
+;; The bg thread blocks on lock.wait until notified, sleeps a debounce window
+;; to absorb bursts from concurrent sessions, then computes once.
+(def ^:private signal-lock (Object.))
+(def ^:private pending? (atom false))
+
+(defn signal-new-data!
+  "Notify the bg thread that a new context snapshot has arrived."
+  []
+  (reset! pending? true)
+  (locking signal-lock (.notifyAll signal-lock)))
 
 (defn- do-refresh! []
-  (let [fresh {:five_hour (compute-bayes-stats :five-hour)
-               :seven_day (compute-bayes-stats :seven-day)}]
-    (reset! forecast-cache fresh)))
+  (reset! forecast-cache
+          {:five_hour (compute-bayes-stats :five-hour)
+           :seven_day (compute-bayes-stats :seven-day)}))
 
 (defn start-bg-refresh!
-  "Start a background thread that polls for new context_snapshots every
-   `interval-ms` ms. If the DB's max(id) has advanced since the last
-   compute, recompute and update the cache atom; otherwise sleep again.
-   Computes once immediately on startup to seed the cache."
-  [& {:keys [interval-ms] :or {interval-ms 10000}}]
-  (let [last-id (atom nil)
-        t (Thread.
+  "Start a background thread that idles until signaled by signal-new-data!,
+   then waits `debounce-ms` to absorb concurrent bursts, and computes the
+   forecast once. Computes immediately on startup to seed the cache."
+  [& {:keys [debounce-ms] :or {debounce-ms 3000}}]
+  (let [t (Thread.
             (fn []
               (try (do-refresh!) (catch Exception _))
               (loop []
                 (when-not (.isInterrupted (Thread/currentThread))
-                  (try
-                    (let [lid (latest-snapshot-id)]
-                      (when (and lid (not= lid @last-id))
-                        (reset! last-id lid)
-                        (do-refresh!)))
-                    (catch Exception _))
-                  (try (Thread/sleep (long interval-ms))
+                  (locking signal-lock
+                    (while (not @pending?)
+                      (.wait signal-lock)))
+                  (reset! pending? false)
+                  (try (Thread/sleep (long debounce-ms))
                        (catch InterruptedException _))
+                  (reset! pending? false)
+                  (try (do-refresh!) (catch Exception _))
                   (recur)))))]
     (.setDaemon t true)
     (.start t)
@@ -373,7 +380,7 @@
     (reset! bg-thread nil)))
 
 (defn statusline-stats
-  "Current forecast bundle for the statusLine. Sub-millisecond read —
-   all computation runs in the background thread started by start-bg-refresh!."
+  "Current forecast bundle for the statusLine. Sub-millisecond atom read —
+   all computation runs in the background thread."
   []
   @forecast-cache)
