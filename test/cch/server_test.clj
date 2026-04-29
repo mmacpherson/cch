@@ -341,6 +341,17 @@
           (is (= 19.0 (:used_pct r)))
           (is (= (+ 1 122 800 191721) (:current_tokens r))))))))
 
+;; --- /forecast ---
+
+(deftest test-forecast-endpoint
+  (testing "GET /forecast returns JSON with five_hour and seven_day keys"
+    (let [resp (http/get (url "/forecast") {:throw false})
+          body (json/parse-string (:body resp) true)]
+      (is (= 200 (:status resp)))
+      (is (map? body))
+      (is (contains? body :five_hour))
+      (is (contains? body :seven_day)))))
+
 (deftest test-hooks-toggle-form-post
   (testing "POST /hooks/toggle upserts the row"
     (http/post (url "/hooks/toggle")
