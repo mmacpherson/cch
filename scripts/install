@@ -19,12 +19,18 @@ chmod +x "$bin/cch"
 # cch-eval — symlink so edits in the repo flow through immediately.
 ln -sf "$repo/bin/cch-eval" "$bin/cch-eval"
 
+# statusline-command.sh — copy to ~/.claude so Claude Code picks it up.
+mkdir -p "$HOME/.claude"
+cp "$repo/bin/statusline-command.sh" "$HOME/.claude/statusline-command.sh"
+chmod +x "$HOME/.claude/statusline-command.sh"
+
 # Repo symlink: ~/.local/share/cch/repo → this checkout.
 ln -sfn "$repo" "$HOME/.local/share/cch/repo"
 
 echo "Installed:"
 echo "  $bin/cch        (bash shim)"
 echo "  $bin/cch-eval   -> $repo/bin/cch-eval"
+echo "  ~/.claude/statusline-command.sh  (copied)"
 echo "  ~/.local/share/cch/repo  -> $repo"
 
 if ! command -v cch >/dev/null 2>&1; then
