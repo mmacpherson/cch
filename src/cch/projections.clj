@@ -539,21 +539,6 @@
 ;; Extremely accurate for shape ≥ 1 (our data always has shape >> 1).
 ;; Avoids the numerical instability of series/CF for large shape.
 
-(defn- gamma-cdf
-  "CDF of Gamma(shape, scale) via Wilson-Hilferty cube-root transform to normal."
-  [shape scale x]
-  (let [x (double x)]
-    (if (<= x 0.0)
-      0.0
-      (let [k     (double shape)
-            mu    (* k (double scale))
-            ;; Wilson-Hilferty: (X/(kθ))^{1/3} ≈ N(1 - 1/9k, 1/9k)
-            ratio (/ x mu)
-            c     (/ 1.0 (* 9.0 k))
-            z     (/ (- (Math/pow ratio (/ 1.0 3.0)) (- 1.0 c))
-                     (Math/sqrt c))]
-        (std-normal-cdf z)))))
-
 (defn- gamma-quantile
   "Inverse CDF of Gamma(shape, scale) via Wilson-Hilferty."
   [shape scale p]
@@ -579,7 +564,7 @@
    current pct implies final ≈ pct/f — added as an extra observation
    with weight proportional to f (more informative as the window
    progresses). Prediction interval from Gamma quantiles."
-  [observed {:keys [now resets-at window-start last-pct historical-finals]}]
+  [_observed {:keys [now resets-at window-start last-pct historical-finals]}]
   (when (pos? last-pct)
     (let [f (/ (double (- now window-start))
                (double (- resets-at window-start)))
@@ -604,42 +589,23 @@
    approximately (thinned Poisson arrivals).
    Posterior is conjugate: Gamma(α_post, β_post).
    Credible interval from posterior predictive quantiles."
-  [observed {:keys [now resets-at window-start last-pct historical-finals]}]
+  [_observed {:keys [now resets-at window-start last-pct historical-finals]}]
   (let [{:keys [shape scale]} (or (gamma-mle historical-finals)
                                   default-gamma-prior)]
     (when shape
       (let [f      (/ (double (- now window-start))
                       (double (- resets-at window-start)))
             f      (max 0.001 f)
-            ;; Prior on final pct: Gamma(shape, scale) from historicals
-            ;; Convert to rate parameterization: α=shape, β=1/scale
             alpha0 shape
             beta0  (/ 1.0 scale)
-            ;; Observation model: at fraction f, pct ~ Gamma(α·f, β)
-            ;; Conjugate update: α_post = α₀ + pct/scale_obs,
-            ;; but simpler: treat implied_final = pct/f as a noisy
-            ;; observation of the final pct. Precision scales with f.
-            ;;
-            ;; Bayesian update on Gamma rate parameter β:
-            ;; Prior: β ~ Gamma(α₀, ...) → posterior with n obs
-            ;; For Gamma with known shape, conjugate prior on rate is Gamma.
-            ;; posterior shape: α₀ + n·k_obs
-            ;; posterior rate:  β₀ + Σ x_i
-            ;; Here n=1, observation = last-pct, but scaled:
-            ;; we observe pct at fraction f, equivalent to observing
-            ;; from a Gamma(shape*f, scale) — partial window.
-            alpha-obs (* shape f)
-            ;; Posterior: combine prior belief about final with
-            ;; what the partial observation tells us.
-            ;; Weight prior vs observation by precision (f for obs, 1-f for prior)
             w-prior (- 1.0 f)
             w-obs   f
-            ;; Posterior mean as precision-weighted combination
-            implied (if (pos? last-pct) (/ last-pct f) (* alpha0 (/ 1.0 beta0)))
-            post-mean (+ (* w-prior (* alpha0 (/ 1.0 beta0)))
+            prior-mean (/ alpha0 beta0)
+            implied (if (pos? last-pct) (/ last-pct f) prior-mean)
+            post-mean (+ (* w-prior prior-mean)
                          (* w-obs implied))
             ;; Posterior variance shrinks as f grows
-            prior-var (* alpha0 (/ 1.0 (* beta0 beta0)))
+            prior-var (/ alpha0 (* beta0 beta0))
             post-var  (* prior-var (- 1.0 (* 0.8 f f)))
             ;; Map back to Gamma params for the posterior predictive
             post-scale (/ post-var (max 0.01 post-mean))
@@ -733,7 +699,7 @@
    Posterior predictive for remaining increment:
      Remaining | λ ~ Gamma(α(1-f), 1/λ)
      Marginalizing λ: Remaining/b_post ~ BetaPrime(α(1-f), a_post)"
-  [observed {:keys [now resets-at window-start last-pct historical-finals]}]
+  [_observed {:keys [now resets-at window-start last-pct historical-finals]}]
   (let [{:keys [alpha beta]} (or (gp-estimate-params historical-finals)
                                  default-gamma-prior)]
     (when alpha
