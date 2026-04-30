@@ -473,6 +473,7 @@
 ;; Gamma(25, 3.8): mean = 95, var = 361, covers 60–130 at 90% CI.
 ;; Replaced by empirical MLE once ≥ 2 historical finals accumulate.
 (def ^:private default-gamma-prior {:shape 25.0 :scale 3.8})
+(def ^:private default-gp-prior {:alpha 25.0 :beta 3.8})
 
 ;; Gamma distribution utilities — bb doesn't ship commons-math, so we
 ;; implement the pieces we need: digamma, MLE, and CDF/quantile via
@@ -640,7 +641,7 @@
    Optionally refines β from within-window increments."
   [observed {:keys [now resets-at window-start last-pct historical-finals]}]
   (let [{:keys [alpha beta]} (or (gp-estimate-params historical-finals)
-                                 default-gamma-prior)]
+                                 default-gp-prior)]
     (when alpha
       (let [T-secs   (double (- resets-at window-start))
             f        (/ (double (- now window-start)) T-secs)
@@ -701,7 +702,7 @@
      Marginalizing λ: Remaining/b_post ~ BetaPrime(α(1-f), a_post)"
   [_observed {:keys [now resets-at window-start last-pct historical-finals]}]
   (let [{:keys [alpha beta]} (or (gp-estimate-params historical-finals)
-                                 default-gamma-prior)]
+                                 default-gp-prior)]
     (when alpha
       (let [T-secs   (double (- resets-at window-start))
             f        (/ (double (- now window-start)) T-secs)
