@@ -11,9 +11,9 @@
                      {:ts 86400  :pct 8.0}
                      {:ts 172800 :pct 16.0}
                      {:ts 259200 :pct 24.0}]
-           projections [{:method :linear :name "Linear (frequentist, b≥0)"
+           projections [{:method :rate-freq :name "Rate, frequentist"
                          :rate 0.55 :proj 78.0 :band {:lo 72 :hi 84}}
-                        {:method :bayes  :name "Bayesian"
+                        {:method :rate-bayes :name "Rate, Bayesian"
                          :rate 0.5  :proj 75.0 :band {:lo 60 :hi 90}}]}}]
   {:observed     observed
    :resets-at    (* 7 86400)
@@ -50,16 +50,15 @@
 (deftest chart-svg-renders-line-per-method
   (testing "one projection polyline per method, each with its own class"
     (let [s (str (u/chart-svg (make-data)))]
-      (is (re-find #"proj-linear" s))
-      (is (re-find #"proj-bayes"  s)))))
+      (is (re-find #"proj-rate-freq"  s))
+      (is (re-find #"proj-rate-bayes" s)))))
 
 (deftest chart-svg-bands-per-method
   (testing "every projection with a band draws a path tagged with data-method"
     (let [s (str (u/chart-svg (make-data)))]
       (is (re-find #"band-region" s))
-      ;; Clojure-printed form of [:path {:data-method "linear"}] etc.
-      (is (re-find #":data-method \"linear\"" s))
-      (is (re-find #":data-method \"bayes\""  s)))))
+      (is (re-find #":data-method \"rate-freq\""  s))
+      (is (re-find #":data-method \"rate-bayes\"" s)))))
 
 (deftest chart-svg-coords-are-numeric-not-ratios
   (testing "polyline points must not contain Clojure ratios"
@@ -72,7 +71,7 @@
   (testing "a runaway projection still fits inside viewBox"
     (let [data (assoc (make-data)
                       :projections
-                      [{:method :linear :name "Linear" :rate 5.0
+                      [{:method :rate-freq :name "Rate, frequentist" :rate 5.0
                         :proj 350.0 :band {:lo 300 :hi 400}}])
           out  (str (u/chart-svg data))
           ys   (->> (re-seq #"y[12]?=\"(-?\d+\.?\d*)\"" out)
@@ -83,22 +82,22 @@
   (testing "right-rail stats list every method's projected % and band"
     (let [out (str (u/summary-stats (make-data)))]
       (is (re-find #"24%"       out) "current pct")
-      (is (re-find #"Linear"    out))
-      (is (re-find #"Bayesian"  out))
+      (is (re-find #"Rate, frequentist" out))
+      (is (re-find #"Rate, Bayesian"   out))
       (is (re-find #"60.*90"    out) "Bayes band rendered as range")
-      (is (re-find #"78%"       out) "linear proj")
-      (is (re-find #"75%"       out) "Bayes proj"))))
+      (is (re-find #"78%"       out) "rate-freq proj")
+      (is (re-find #"75%"       out) "rate-bayes proj"))))
 
 (deftest summary-stats-rows-have-data-method
   (testing "each method-row carries a data-method attribute so hover triggers band reveal"
     (let [out (str (u/summary-stats (make-data)))]
-      (is (re-find #":data-method \"linear\"" out))
-      (is (re-find #":data-method \"bayes\""  out)))))
+      (is (re-find #":data-method \"rate-freq\""  out))
+      (is (re-find #":data-method \"rate-bayes\"" out)))))
 
 (deftest legend-lists-each-method
   (let [out (str (u/legend (make-data)))]
-    (is (re-find #"Linear"   out))
-    (is (re-find #"Bayesian" out))
+    (is (re-find #"Rate, frequentist" out))
+    (is (re-find #"Rate, Bayesian"   out))
     (is (re-find #"observed" out))))
 
 (deftest page-body-no-data

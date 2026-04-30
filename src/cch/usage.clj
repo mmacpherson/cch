@@ -69,12 +69,12 @@
   "Color + display order per projection method. Methods not in this
    map are still rendered (with a default gray) but lose stable
    ordering across page loads."
-  {:linear-rate {:color "#2563eb" :order 0}   ; frequentist rate — blue
-   :bayes       {:color "#f59e0b" :order 1}   ; Bayesian rate — orange
-   :gamma-freq  {:color "#8b5cf6" :order 2}   ; frequentist Gamma — purple
-   :gamma-bayes {:color "#ec4899" :order 3}   ; Bayesian Gamma — pink
-   :gp-freq     {:color "#14b8a6" :order 4}   ; frequentist Γ-process — teal
-   :gp-bayes    {:color "#f43f5e" :order 5}}) ; Bayesian Γ-process — rose
+  {:rate-freq   {:color "#2563eb" :order 0}   ; rate frequentist — blue
+   :rate-bayes  {:color "#f59e0b" :order 1}   ; rate Bayesian — orange
+   :gamma-freq  {:color "#8b5cf6" :order 2}   ; Gamma frequentist — purple
+   :gamma-bayes {:color "#ec4899" :order 3}   ; Gamma Bayesian — pink
+   :gp-freq     {:color "#14b8a6" :order 4}   ; Gamma process frequentist — teal
+   :gp-bayes    {:color "#f43f5e" :order 5}}) ; Gamma process Bayesian — rose
 
 (defn- method-color [m]
   (get-in method-style [m :color] "#6b7280"))

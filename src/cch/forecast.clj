@@ -348,8 +348,8 @@
 
 (defn- do-refresh! []
   (reset! forecast-cache
-          {:five_hour  (compute-window-stats :five-hour  proj/bayes-projection)
-           :seven_day  (compute-window-stats :seven-day  proj/bayes-projection)}))
+          {:five_hour  (compute-window-stats :five-hour  proj/rate-bayes-projection)
+           :seven_day  (compute-window-stats :seven-day  proj/rate-bayes-projection)}))
 
 (defn start-bg-refresh!
   "Start a background thread that blocks on a channel until signaled,

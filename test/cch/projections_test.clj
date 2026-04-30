@@ -77,7 +77,7 @@
       (is (< 0.99 (:rate (first rs))  1.01))
       (is (< 1.99 (:rate (second rs)) 2.01)))))
 
-;; --- linear-projection (constrained, b≥0) ---
+;; --- rate-level-projection (constrained, b≥0) ---
 
 (deftest linear-recovers-linear-trend
   (testing "a perfectly linear series projects forward at the same rate"
@@ -85,7 +85,7 @@
     ;; reset is 24h after the last sample → x_new = 33hr → pred = 16.5
     (let [obs (linear-samples 10 0 0.5)
           win (window-info obs 24)
-          {:keys [proj band]} (p/linear-projection obs win)]
+          {:keys [proj band]} (p/rate-level-projection obs win)]
       (is (< 16.0 proj 17.0))
       (is (<= (:lo band) proj (:hi band)))
       (testing "perfect fit → tight band"
@@ -95,22 +95,22 @@
   (testing "if unconstrained slope is negative, NNLS pins rate at 0"
     (let [obs (mapv (fn [i] (snap (* i 3600) (double (- 10 i)))) (range 5))
           win (window-info obs 24)
-          {:keys [rate proj band]} (p/linear-projection obs win)]
+          {:keys [rate proj band]} (p/rate-level-projection obs win)]
       (is (= 0.0 rate) "monotone constraint pins rate at 0 when slope<0")
       (is (>= proj (:last-pct win)) "projection never below current pct")
       (is (>= (:lo band) (:last-pct win)) "band lo clamped at current pct"))))
 
 (deftest linear-needs-three-points
-  (is (nil? (p/linear-projection [(snap 0 0) (snap 3600 1)]
+  (is (nil? (p/rate-level-projection [(snap 0 0) (snap 3600 1)]
                                  (window-info [(snap 0 0) (snap 3600 1)] 24)))))
 
-;; --- bayes-projection ---
+;; --- rate-bayes-projection ---
 
 (deftest bayes-shrinks-strongly-toward-empirical-prior
   (testing "with the tight empirical prior (μ₀=0.55, σ₀=0.12), a few samples way above prior get pulled hard toward the prior"
     (let [obs (linear-samples 3 0 5.0)             ;; rate 5 %/hr — way above prior
           win (window-info obs 24)
-          {:keys [rate]} (p/bayes-projection obs win)]
+          {:keys [rate]} (p/rate-bayes-projection obs win)]
       (is (< 0.55 rate 2.0)
           "posterior should sit between prior (0.55) and 2.0; old loose prior would let it run to ~5"))))
 
@@ -118,7 +118,7 @@
   (testing "a 30-day horizon doesn't blow up the band — Brownian variance grows linearly, not quadratically"
     (let [obs (linear-samples 12 0 0.6)
           win (window-info obs (* 30 24))           ;; 30 days out
-          {:keys [band proj]} (p/bayes-projection obs win)
+          {:keys [band proj]} (p/rate-bayes-projection obs win)
           half-width (- (:hi band) proj)]
       (is (< half-width 200.0)
           "old σ²·Δt² model would produce a band wider than 1000% on the high side at 30d"))))
@@ -131,8 +131,8 @@
                   (snap 14400 6) (snap 18000 12)]
           win-s (window-info steady 24)
           win-n (window-info noisy 24)
-          band-s (:band (p/bayes-projection steady win-s))
-          band-n (:band (p/bayes-projection noisy win-n))]
+          band-s (:band (p/rate-bayes-projection steady win-s))
+          band-n (:band (p/rate-bayes-projection noisy win-n))]
       (is (< (- (:hi band-s) (:lo band-s))
              (- (:hi band-n) (:lo band-n)))))))
 
@@ -253,8 +253,8 @@
     (let [results (p/all-projections [(snap 0 0)]
                                      {:window-start 0 :now 0 :resets-at 86400 :last-pct 0})
           methods (set (map :method results))]
-      (is (not (contains? methods :linear-rate)))
-      (is (not (contains? methods :bayes)))
+      (is (not (contains? methods :rate-freq)))
+      (is (not (contains? methods :rate-bayes)))
       (is (not (contains? methods :gamma-freq)) "gamma-freq needs pos? last-pct"))))
 
 (deftest all-projections-includes-both-methods-on-rich-data
@@ -262,6 +262,6 @@
         win (window-info obs 48)
         results (p/all-projections obs win)
         methods (set (map :method results))]
-    (is (contains? methods :linear-rate))
-    (is (contains? methods :bayes))
-    (is (>= (count methods) 2) "at least linear-rate and bayes")))
+    (is (contains? methods :rate-freq))
+    (is (contains? methods :rate-bayes))
+    (is (>= (count methods) 2) "at least rate-freq and rate-bayes")))

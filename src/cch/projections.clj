@@ -10,13 +10,13 @@
   out of the box. Heavier-weight methods (Stan, Prophet, BSTS) belong
   in a separate experiment that shells out to a Python runtime.
 
-  Methods:
-    :ewma         exponential-weighted moving average of inter-sample rate
-    :ols          ordinary least squares linear regression of (t, pct),
-                  Gaussian prediction interval
-    :bayes        conjugate Gaussian on the rate parameter, posterior
-                  credible interval propagated forward
-    :trailing-Nh  mean rate over the last N hours (dumb baseline)")
+  Methods (three families × frequentist/Bayesian):
+    :rate-freq    OLS on inter-sample rates, Gaussian prediction interval
+    :rate-bayes   conjugate Gaussian on the rate parameter, BM noise model
+    :gamma-freq   Gamma MLE on historical final percentages
+    :gamma-bayes  Gamma with conjugate prior update
+    :gp-freq      Gamma process with optional within-window refinement
+    :gp-bayes     Gamma process with conjugate posterior predictive")
 
 (def ^:private z-90 1.645) ; standard-normal quantile for ~90% CI/PI
 
@@ -268,14 +268,14 @@
             hac    (hac-variance-factor resid)]
         {:a y-bar :b 0.0 :sxx sxx :x-bar x-bar :n n :sigma2 sigma2 :hac hac}))))
 
-(defn linear-projection
+(defn rate-level-projection
   "Constrained linear regression with built-in monotonicity.
    Fits y = a + b·x via NNLS-on-slope (b ≥ 0), forward-projects to
    resets_at with a Gaussian 90% prediction interval. When unconstrained
    slope is negative (synthetic decreasing data), collapses to b=0 and
    reports rate=0; otherwise this is numerically equal to plain OLS.
 
-   This is the frequentist twin of bayes-projection without the prior:
+   This is the frequentist twin of rate-bayes-projection without the prior:
    no shrinkage toward a baseline, just whatever the data implies."
   [observed {:keys [resets-at window-start last-pct]}]
   (when (>= (count observed) 3)
@@ -286,8 +286,8 @@
           proj (max last-pct pred)
           lo   (max last-pct (- pred half-width))
           hi   (max last-pct (+ pred half-width))]
-      {:method :linear
-       :name   "Frequentist (linear, b≥0)"
+      {:method :rate-level
+       :name   "Rate (level), frequentist"
        ;; Report the constrained slope directly. For a horizontal fit
        ;; this is 0, even when proj > last_pct (the fit's intercept can
        ;; be above the most recent sample on synthetic decreasing data).
@@ -297,7 +297,7 @@
 
 ;; --- 3. Frequentist-2: OLS on rates (not cumulative level) ---
 
-(defn rate-ols-projection
+(defn rate-freq-projection
   "Frequentist projection via OLS on observed rates (d/dt pct).
 
    Models rate ~ N(μ, σ²) from non-overlapping inter-sample intervals,
@@ -307,8 +307,8 @@
      lo   = last_pct + max(0, μ̂ − z·σ/√n) × hours_remaining
      hi   = last_pct + (μ̂ + z·σ/√n) × hours_remaining
 
-   Unlike linear-projection (OLS on cumulative level), residuals here are
-   from a stationary process so σ² is small and the lower bound is
+   Unlike rate-level-projection (OLS on cumulative level), residuals here
+   are from a stationary process so σ² is small and the lower bound is
    physically meaningful: it represents a slow-but-nonzero sustained rate,
    not a nearly-flat linear fit to an S-shaped curve."
   [observed {:keys [now resets-at last-pct]}]
@@ -325,8 +325,8 @@
             proj    (+ last-pct (* (max 0.0 mean-r) hours-l))
             lo      (max last-pct (+ last-pct (* lo-r hours-l)))
             hi      (max last-pct (+ last-pct (* (+ mean-r (* z-90 se-r)) hours-l)))]
-        {:method :linear-rate
-         :name   "Frequentist (rate OLS)"
+        {:method :rate-freq
+         :name   "Rate, frequentist"
          :rate   (max 0.0 mean-r)
          :proj   proj
          :band   {:lo lo :hi hi}}))))
@@ -432,7 +432,7 @@
               var-r  (* sigma sigma (- 1.0 (* lambda (- lambda alpha))))]
           [e-r (Math/sqrt (max 0.0 var-r))])))))
 
-(defn bayes-projection
+(defn rate-bayes-projection
   "Bayesian Gaussian model with conjugate update on the rate R.
 
    1. Empirical prior: R ~ N(μ₀, σ₀²) centered at 0.55 %/hr.
@@ -460,8 +460,8 @@
             mean-proj (+ last-pct (* mu* dt-hr))
             lo        (max last-pct (- mean-proj (* z-90 sd-proj)))
             hi        (max last-pct (+ mean-proj (* z-90 sd-proj)))]
-        {:method :bayes
-         :name   "Bayesian (empirical prior, BM)"
+        {:method :rate-bayes
+         :name   "Rate, Bayesian"
          :rate   mu*
          :proj   mean-proj
          :band   {:lo lo :hi hi}}))))
@@ -579,7 +579,7 @@
               lo   (max last-pct (gamma-quantile shape scale 0.05))
               hi   (max last-pct (gamma-quantile shape scale 0.95))]
           {:method :gamma-freq
-           :name   "Frequentist (Gamma GLM)"
+           :name   "Gamma, frequentist"
            :proj   (max last-pct mean)
            :band   {:lo lo :hi hi}})))))
 
@@ -614,7 +614,7 @@
             lo (max last-pct (gamma-quantile post-shape post-scale 0.05))
             hi (max last-pct (gamma-quantile post-shape post-scale 0.95))]
         {:method :gamma-bayes
-         :name   "Bayesian (Gamma)"
+         :name   "Gamma, Bayesian"
          :proj   (max last-pct post-mean)
          :band   {:lo lo :hi hi}}))))
 
@@ -661,7 +661,7 @@
             hi       (+ last-pct (gamma-quantile rem-shape beta' 0.95))]
         (when (pos? rem-shape)
           {:method :gp-freq
-           :name   "Frequentist (Γ-process)"
+           :name   "Gamma process, frequentist"
            :proj   (max last-pct proj)
            :band   {:lo (max last-pct lo) :hi (max last-pct hi)}})))))
 
@@ -721,7 +721,7 @@
             hi (+ last-pct (beta-prime-quantile rem-shape a-post b-post 0.95))]
         (when (pos? rem-shape)
           {:method :gp-bayes
-           :name   "Bayesian (Γ-process)"
+           :name   "Gamma process, Bayesian"
            :proj   (max last-pct proj)
            :band   {:lo (max last-pct lo) :hi (max last-pct hi)}})))))
 
@@ -732,8 +732,8 @@
   of method maps (in display order), filtering out methods that lacked
   enough data."
   [observed window-info]
-  (->> [(rate-ols-projection observed window-info)
-        (bayes-projection observed window-info)
+  (->> [(rate-freq-projection observed window-info)
+        (rate-bayes-projection observed window-info)
         (gamma-freq-projection observed window-info)
         (gamma-bayes-projection observed window-info)
         (gp-freq-projection observed window-info)
