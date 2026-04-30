@@ -245,12 +245,14 @@
 (defn summary-stats
   "Right-rail readout. Lists each method's projected end-of-window
    percent, with confidence band when the method provides one."
-  [{:keys [last-pct projections resets-at now samples]}]
+  [{:keys [last-pct projections resets-at now samples rate-phr]}]
   (let [hours-left (max 0.0 (/ (- resets-at now) 3600.0))]
     [:div.usage-stats
      [:div.stat [:div.k "current"]   [:div.v (format "%.0f%%" (double last-pct))]]
      [:div.stat [:div.k "resets in"] [:div.v (format "%.1f h" hours-left)]]
      [:div.stat [:div.k "samples"]   [:div.v (str samples)]]
+     (when rate-phr
+       [:div.stat [:div.k "rate"] [:div.v (format "%.1f %%/hr" (double rate-phr))]])
      (when (seq projections)
        [:div.method-projections
         [:div.k "projected at reset"]

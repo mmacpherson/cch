@@ -918,9 +918,9 @@
               [:div.container
                (nav-bar :usage)
                [:p.subtitle
-                "Current 7-day rate-limit window. Two forward projections: "
-                "constrained linear regression (frequentist, b≥0) and "
-                "Bayesian with empirical prior. Hover a method's row, line, "
+                "Current 7-day rate-limit window with six projection methods "
+                "(rate-based, Gamma GLM, and Gamma process — frequentist and "
+                "Bayesian variants of each). Hover a method's row, line, "
                 "or legend entry to reveal its 90% interval band."]
                [:p.meta
                 [:a {:href "/usage"} "↻ refresh"]]

@@ -206,7 +206,12 @@
                         :window-start window-start :last-pct last-pct
                         :historical-finals hist-finals}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
-          projs        (proj/all-projections obs-pairs window-info)]
+          projs        (proj/all-projections obs-pairs window-info)
+          rs           (proj/rate-samples obs-pairs)
+          recent-rate  (when (>= (count rs) 2)
+                         (let [recent (take-last 3 rs)]
+                           (/ (reduce + 0.0 (map :rate recent))
+                              (count recent))))]
       {:observed        obs-pairs
        :rate-5h-samples (rate-5h-samples (epoch->iso window-start))
        :resets-at       resets-at
@@ -214,7 +219,8 @@
        :now             now
        :last-pct        last-pct
        :samples         (or (raw-sample-count (epoch->iso window-start) :seven-day) 0)
-       :projections     (or projs [])})))
+       :projections     (or projs [])
+       :rate-phr        recent-rate})))
 
 ;; Cache current-window for 30s — data arrives at most once per minute
 ;; via the statusLine hook, so re-running 4 queries + LOESS + projections
