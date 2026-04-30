@@ -3,7 +3,6 @@
             [cch.config :as config]
             [cch.config-db :as cdb]
             [cch.db :as db]
-            [cch.log :as log]
             [babashka.fs :as fs]
             [babashka.process :as p]
             [clojure.string :as str]))

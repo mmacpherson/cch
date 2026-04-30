@@ -8,7 +8,8 @@
     - warm-DB p50/p95/p99 overhead of wrap-logging vs. a bare no-op handler
     - cold-DB cost (DB path does not yet exist)
     - CCH_LOG_SYNC=1 cost for comparison"
-  (:require [cch.log :as log]
+  (:require [cch.db :as db]
+            [cch.log :as log]
             [cch.middleware :as mw]
             [babashka.fs :as fs]
             [babashka.process :as p]))
@@ -61,12 +62,12 @@
 
 (defn -main [& _]
   (println "=== wrap-logging hot-path overhead ===\n")
-  (println (str "DB path: " (log/db-path)))
-  (println (str "DB exists: " (fs/exists? (log/db-path))))
+  (println (str "DB path: " (db/db-path)))
+  (println (str "DB exists: " (fs/exists? (db/db-path))))
   (println)
 
   ;; Ensure warm DB for the main measurement
-  (log/ensure-db! (log/db-path))
+  (log/ensure-db! (db/db-path))
 
   (println "Warm DB, NO writer (per-call sqlite3 spawn):")
   (bench "bare no-op handler"    1000 #(no-op sample-input))
@@ -91,9 +92,9 @@
       (log/stop-writer!)))
 
   (println "\nIsolating the cost within wrap-logging:")
-  (bench "ensure-db! (warm)"     1000 #(log/ensure-db! (log/db-path)))
+  (bench "ensure-db! (warm)"     1000 #(log/ensure-db! (db/db-path)))
   (bench "p/process sqlite3"     100
-         #(p/process ["sqlite3" (log/db-path) "SELECT 1;"]
+         #(p/process ["sqlite3" (db/db-path) "SELECT 1;"]
                      {:out :discard :err :discard}))
 
   (println "\nCold DB (first-call ensure-db! path):")

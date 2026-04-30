@@ -2,7 +2,6 @@
   (:require [babashka.fs :as fs]
             [cch.config-db :as cdb]
             [cch.db :as db]
-            [cch.log :as log]
             [clojure.test :refer [deftest is testing use-fixtures]]))
 
 ;; Each test gets a fresh temp DB; with-redefs swaps db-path so both

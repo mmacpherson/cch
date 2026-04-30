@@ -21,7 +21,6 @@
   (:require [babashka.process :as p]
             [babashka.fs :as fs]
             [cch.db :as db]
-            [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]))
 
@@ -192,10 +191,10 @@
                    :order-by [[:timestamp :desc]]
                    :limit (int limit)}
             (not (str/blank? cwd-prefix))
-            (assoc :where [:like :cwd (str cwd-prefix "%")]))]
-    (let [fmt (requiring-resolve 'honey.sql/format)]
-      (->> (db/query (first (fmt q {:inline true})))
-           (filter :session_id)))))
+            (assoc :where [:like :cwd (str cwd-prefix "%")]))
+        fmt (requiring-resolve 'honey.sql/format)]
+    (->> (db/query (first (fmt q {:inline true})))
+         (filter :session_id))))
 
 (defn query-events
   "Query recent events. Returns a seq of maps.
@@ -212,9 +211,9 @@
                session    (update :where (fnil conj [:and]) [:= :session-id session])
                decision   (update :where (fnil conj [:and]) [:= :decision decision])
                since      (update :where (fnil conj [:and]) [:> :timestamp since])
-               cwd-prefix (update :where (fnil conj [:and]) [:like :cwd (str cwd-prefix "%")]))]
-    (let [fmt (requiring-resolve 'honey.sql/format)]
-      (db/query (first (fmt q {:inline true}))))))
+               cwd-prefix (update :where (fnil conj [:and]) [:like :cwd (str cwd-prefix "%")]))
+        fmt (requiring-resolve 'honey.sql/format)]
+    (db/query (first (fmt q {:inline true})))))
 
 ;; --- Context snapshots ---
 

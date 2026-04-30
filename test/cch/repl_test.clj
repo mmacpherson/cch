@@ -10,7 +10,6 @@
   (:require [babashka.fs :as fs]
             [bencode.core :as b]
             [cch.db :as db]
-            [cch.log :as log]
             [cch.server :as server]
             [clojure.test :refer [deftest is testing]])
   (:import (java.net Socket ServerSocket)))
