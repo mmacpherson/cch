@@ -298,23 +298,32 @@
       r5h           r5h
       r7d           r7d)))
 
-(defn- compute-bayes-stats
-  "Bayesian projection for one window."
-  [window-key]
-  (when-let [resets-at (latest-resets-at window-key)]
-    (let [base-cfg              (window-config window-key)
-          learned               (when (= window-key :seven-day) (learned-prior))
+(defn- compute-window-stats
+  "Assemble observations for `window-key`, run `proj-fn` to get the
+   forward projection, and return the statusLine stats map.
+   `proj-fn` must satisfy `[observed window-info] → {:proj ...} | nil`."
+  [window-key proj-fn]
+  (when-let [raw-resets-at (latest-resets-at window-key)]
+    (let [now          (-> (Instant/now) .getEpochSecond)
+          span         (span-secs window-key)
+          resets-at    (if (<= raw-resets-at now)
+                         (+ raw-resets-at span)
+                         raw-resets-at)
+          base-cfg     (window-config window-key)
+          learned      (when (= window-key :seven-day) (learned-prior))
           {:keys [prior-mu prior-sigma]} (merge base-cfg learned)
           wpath        (window-sql-path window-key)
-          window-start (- resets-at (span-secs window-key))
-          in-window    (filtered-samples (epoch->iso window-start) window-key)
-          now          (-> (Instant/now) .getEpochSecond)
+          window-start (- resets-at span)
+          raw-samples  (filtered-samples (epoch->iso window-start) window-key)
+          in-window    (filterv #(= (:resets-at %) resets-at) raw-samples)
           last-pct     (:pct (last in-window))
+          hist-finals  (when (= window-key :seven-day) (historical-final-pcts))
           window-info  {:now now :resets-at resets-at
                         :window-start window-start :last-pct last-pct
-                        :prior-mu prior-mu :prior-sigma prior-sigma}
+                        :prior-mu prior-mu :prior-sigma prior-sigma
+                        :historical-finals hist-finals}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
-          proj-result  (when last-pct (proj/bayes-projection obs-pairs window-info))
+          proj-result  (when last-pct (proj-fn obs-pairs window-info))
           local-rate   (if (= window-key :seven-day)
                          (fused-burn-rate-7d resets-at now)
                          (recent-burn-rate-phr wpath resets-at now))]
@@ -339,8 +348,8 @@
 
 (defn- do-refresh! []
   (reset! forecast-cache
-          {:five_hour (compute-bayes-stats :five-hour)
-           :seven_day (compute-bayes-stats :seven-day)}))
+          {:five_hour  (compute-window-stats :five-hour  proj/bayes-projection)
+           :seven_day  (compute-window-stats :seven-day  proj/bayes-projection)}))
 
 (defn start-bg-refresh!
   "Start a background thread that blocks on a channel until signaled,
