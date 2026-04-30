@@ -466,6 +466,298 @@
          :proj   mean-proj
          :band   {:lo lo :hi hi}}))))
 
+;; --- Gamma-based projections (model final pct directly) ---
+
+;; Default Gamma prior for Bayesian methods when < 2 historical weeks
+;; exist. Centered on ~95% (typical heavy-use week), sd ≈ 19%.
+;; Gamma(25, 3.8): mean = 95, var = 361, covers 60–130 at 90% CI.
+;; Replaced by empirical MLE once ≥ 2 historical finals accumulate.
+(def ^:private default-gamma-prior {:shape 25.0 :scale 3.8})
+
+;; Gamma distribution utilities — bb doesn't ship commons-math, so we
+;; implement the pieces we need: digamma, MLE, and CDF/quantile via
+;; the regularized incomplete gamma function.
+
+(defn- digamma
+  "ψ(x) — the digamma function via Bernoulli-number asymptotic expansion
+   with recurrence reduction for small x."
+  [x]
+  (let [x (double x)]
+    (if (<= x 0.0)
+      Double/NaN
+      (loop [x x result 0.0]
+        (if (>= x 8.0)
+          (let [ix  (/ 1.0 x)
+                ix2 (* ix ix)]
+            (+ result (Math/log x) (* -0.5 ix)
+               (* ix2 (+ (/ -1.0 12.0)
+                         (* ix2 (+ (/ 1.0 120.0)
+                                   (* ix2 (/ -1.0 252.0))))))))
+          (recur (+ x 1.0) (- result (/ 1.0 x))))))))
+
+(defn- trigamma
+  "ψ₁(x) — trigamma function, asymptotic + recurrence."
+  [x]
+  (let [x (double x)]
+    (if (<= x 0.0)
+      Double/NaN
+      (loop [x x result 0.0]
+        (if (>= x 8.0)
+          (let [ix2 (/ 1.0 (* x x))]
+            (+ result (/ 1.0 x) (* 0.5 ix2)
+               (* ix2 (/ 1.0 (* 6.0 x)))
+               (* ix2 ix2 (/ -1.0 (* 30.0 x)))))
+          (recur (+ x 1.0) (+ result (/ 1.0 (* x x)))))))))
+
+(defn- gamma-mle
+  "MLE for Gamma(k, θ) from samples. Returns {:shape k :scale θ}
+   or nil with fewer than 2 positive samples.
+   Uses Newton-Raphson on the shape parameter."
+  [xs]
+  (let [xs (filterv pos? xs)
+        n  (count xs)]
+    (when (>= n 2)
+      (let [sum-x    (reduce + 0.0 xs)
+            sum-logx (reduce + 0.0 (map #(Math/log %) xs))
+            x-bar    (/ sum-x n)
+            log-xbar (Math/log x-bar)
+            mean-logx (/ sum-logx n)
+            s        (- log-xbar mean-logx)
+            ;; Initial estimate via Minka's approximation
+            k0       (/ (+ 0.5 s) s)
+            k        (loop [k k0 iter 0]
+                       (if (>= iter 50)
+                         k
+                         (let [dk (/ (- (Math/log k) (digamma k) s)
+                                    (- (/ 1.0 k) (trigamma k)))]
+                           (if (< (Math/abs dk) 1e-8)
+                             k
+                             (recur (max 0.001 (- k dk)) (inc iter))))))]
+        {:shape k :scale (/ x-bar k)}))))
+
+;; --- Gamma CDF / quantile via Wilson-Hilferty normal approximation ---
+;; Extremely accurate for shape ≥ 1 (our data always has shape >> 1).
+;; Avoids the numerical instability of series/CF for large shape.
+
+(defn- gamma-cdf
+  "CDF of Gamma(shape, scale) via Wilson-Hilferty cube-root transform to normal."
+  [shape scale x]
+  (let [x (double x)]
+    (if (<= x 0.0)
+      0.0
+      (let [k     (double shape)
+            mu    (* k (double scale))
+            ;; Wilson-Hilferty: (X/(kθ))^{1/3} ≈ N(1 - 1/9k, 1/9k)
+            ratio (/ x mu)
+            c     (/ 1.0 (* 9.0 k))
+            z     (/ (- (Math/pow ratio (/ 1.0 3.0)) (- 1.0 c))
+                     (Math/sqrt c))]
+        (std-normal-cdf z)))))
+
+(defn- gamma-quantile
+  "Inverse CDF of Gamma(shape, scale) via Wilson-Hilferty."
+  [shape scale p]
+  (let [k    (double shape)
+        mu   (* k (double scale))
+        ;; Invert: x = kθ · (1 - 1/9k + z_p·√(1/9k))³
+        c    (/ 1.0 (* 9.0 k))
+        z-p  (loop [lo -8.0 hi 8.0 iter 0]
+               (if (>= iter 60)
+                 (* 0.5 (+ lo hi))
+                 (let [mid  (* 0.5 (+ lo hi))
+                       cdf  (std-normal-cdf mid)]
+                   (if (< (Math/abs (- cdf p)) 1e-12)
+                     mid
+                     (if (< cdf p) (recur mid hi (inc iter))
+                         (recur lo mid (inc iter)))))))
+        cube (+ 1.0 (- c) (* z-p (Math/sqrt c)))]
+    (max 0.0 (* mu cube cube cube))))
+
+(defn gamma-freq-projection
+  "Frequentist Gamma GLM on final percentage.
+   MLE fit of Gamma(k, θ) to historical finals. At time-fraction f,
+   current pct implies final ≈ pct/f — added as an extra observation
+   with weight proportional to f (more informative as the window
+   progresses). Prediction interval from Gamma quantiles."
+  [observed {:keys [now resets-at window-start last-pct historical-finals]}]
+  (when (pos? last-pct)
+    (let [f (/ (double (- now window-start))
+               (double (- resets-at window-start)))
+          implied (/ last-pct (max 0.01 f))
+          hist    (or (seq historical-finals)
+                      [(* (:shape default-gamma-prior) (:scale default-gamma-prior))])
+          n-implied (max 1 (long (* f (count hist))))
+          all-finals (into (vec hist) (repeat n-implied implied))]
+      (when-let [{:keys [shape scale]} (gamma-mle all-finals)]
+        (let [mean (* shape scale)
+              lo   (max last-pct (gamma-quantile shape scale 0.05))
+              hi   (max last-pct (gamma-quantile shape scale 0.95))]
+          {:method :gamma-freq
+           :name   "Frequentist (Gamma GLM)"
+           :proj   (max last-pct mean)
+           :band   {:lo lo :hi hi}})))))
+
+(defn gamma-bayes-projection
+  "Bayesian Gamma model on final percentage.
+   Prior: Gamma(α₀, β₀) fitted from historical finals.
+   Likelihood: at time-fraction f, observed pct ~ Gamma(α₀·f, β₀)
+   approximately (thinned Poisson arrivals).
+   Posterior is conjugate: Gamma(α_post, β_post).
+   Credible interval from posterior predictive quantiles."
+  [observed {:keys [now resets-at window-start last-pct historical-finals]}]
+  (let [{:keys [shape scale]} (or (gamma-mle historical-finals)
+                                  default-gamma-prior)]
+    (when shape
+      (let [f      (/ (double (- now window-start))
+                      (double (- resets-at window-start)))
+            f      (max 0.001 f)
+            ;; Prior on final pct: Gamma(shape, scale) from historicals
+            ;; Convert to rate parameterization: α=shape, β=1/scale
+            alpha0 shape
+            beta0  (/ 1.0 scale)
+            ;; Observation model: at fraction f, pct ~ Gamma(α·f, β)
+            ;; Conjugate update: α_post = α₀ + pct/scale_obs,
+            ;; but simpler: treat implied_final = pct/f as a noisy
+            ;; observation of the final pct. Precision scales with f.
+            ;;
+            ;; Bayesian update on Gamma rate parameter β:
+            ;; Prior: β ~ Gamma(α₀, ...) → posterior with n obs
+            ;; For Gamma with known shape, conjugate prior on rate is Gamma.
+            ;; posterior shape: α₀ + n·k_obs
+            ;; posterior rate:  β₀ + Σ x_i
+            ;; Here n=1, observation = last-pct, but scaled:
+            ;; we observe pct at fraction f, equivalent to observing
+            ;; from a Gamma(shape*f, scale) — partial window.
+            alpha-obs (* shape f)
+            ;; Posterior: combine prior belief about final with
+            ;; what the partial observation tells us.
+            ;; Weight prior vs observation by precision (f for obs, 1-f for prior)
+            w-prior (- 1.0 f)
+            w-obs   f
+            ;; Posterior mean as precision-weighted combination
+            implied (if (pos? last-pct) (/ last-pct f) (* alpha0 (/ 1.0 beta0)))
+            post-mean (+ (* w-prior (* alpha0 (/ 1.0 beta0)))
+                         (* w-obs implied))
+            ;; Posterior variance shrinks as f grows
+            prior-var (* alpha0 (/ 1.0 (* beta0 beta0)))
+            post-var  (* prior-var (- 1.0 (* 0.8 f f)))
+            ;; Map back to Gamma params for the posterior predictive
+            post-scale (/ post-var (max 0.01 post-mean))
+            post-shape (/ post-mean (max 0.001 post-scale))
+            lo (max last-pct (gamma-quantile post-shape post-scale 0.05))
+            hi (max last-pct (gamma-quantile post-shape post-scale 0.95))]
+        {:method :gamma-bayes
+         :name   "Bayesian (Gamma)"
+         :proj   (max last-pct post-mean)
+         :band   {:lo lo :hi hi}}))))
+
+;; --- Gamma process projections (model the trajectory) ---
+;;
+;; A Gamma process {G(t)} models monotonically increasing usage:
+;;   G(0) = 0, increments G(t)-G(s) ~ Gamma(α(t-s), β) independent.
+;; At the full window T, G(T) ~ Gamma(αT, β).
+;; Given G(s) = pct, the remaining: G(T)-G(s) ~ Gamma(α(T-s), β).
+;; So: final = pct + Remaining.
+
+(defn- gp-estimate-params
+  "Estimate Gamma process (α, β) from historical final percentages.
+   finals ~ Gamma(αT, β) where T = 1 (normalized window).
+   Returns {:alpha shape, :beta scale} or nil."
+  [historical-finals]
+  (when-let [{:keys [shape scale]} (gamma-mle historical-finals)]
+    {:alpha shape :beta scale}))
+
+(defn gp-freq-projection
+  "Gamma process frequentist projection.
+   Estimates (α, β) from historical finals, then predicts:
+     final = pct + Remaining, where Remaining ~ Gamma(α·(1-f), β)
+   Optionally refines β from within-window increments."
+  [observed {:keys [now resets-at window-start last-pct historical-finals]}]
+  (let [{:keys [alpha beta]} (or (gp-estimate-params historical-finals)
+                                 default-gamma-prior)]
+    (when alpha
+      (let [T-secs   (double (- resets-at window-start))
+            f        (/ (double (- now window-start)) T-secs)
+            f        (max 0.001 (min 0.999 f))
+            rem-shape (* alpha (- 1.0 f))
+            rs       (rate-samples observed)
+            beta'    (if (>= (count rs) 3)
+                       (let [sum-dpct (reduce + 0.0 (map #(* (:rate %) (:dt-hr %)) rs))
+                             sum-dt-f (reduce + 0.0 (map #(/ (:dt-hr %) (/ T-secs 3600.0)) rs))]
+                         (if (pos? sum-dt-f)
+                           (/ sum-dpct (* alpha sum-dt-f))
+                           beta))
+                       beta)
+            rem-mean (* rem-shape beta')
+            proj     (+ last-pct rem-mean)
+            lo       (+ last-pct (gamma-quantile rem-shape beta' 0.05))
+            hi       (+ last-pct (gamma-quantile rem-shape beta' 0.95))]
+        (when (pos? rem-shape)
+          {:method :gp-freq
+           :name   "Frequentist (Γ-process)"
+           :proj   (max last-pct proj)
+           :band   {:lo (max last-pct lo) :hi (max last-pct hi)}})))))
+
+;; Beta CDF for the Bayesian posterior predictive (Beta-prime quantile).
+
+(defn- beta-prime-quantile
+  "Quantile of BetaPrime(α, β) scaled by b_post.
+   BetaPrime(α, β) = B/(1-B) where B ~ Beta(α, β).
+   For our case α, β >> 1, Beta is well-approximated by Normal.
+   Returns scale · B/(1-B) at the p-th quantile."
+  [a b scale p]
+  (let [a    (double a)
+        b    (double b)
+        ;; Beta(a,b) normal approximation
+        mu   (/ a (+ a b))
+        var  (/ (* a b) (* (+ a b) (+ a b) (+ a b 1.0)))
+        sd   (Math/sqrt var)
+        ;; Normal quantile via bisection on std-normal-cdf
+        z-p  (loop [lo -8.0 hi 8.0 iter 0]
+               (if (>= iter 60)
+                 (* 0.5 (+ lo hi))
+                 (let [mid (* 0.5 (+ lo hi))
+                       cdf (std-normal-cdf mid)]
+                   (if (< (Math/abs (- cdf p)) 1e-12)
+                     mid
+                     (if (< cdf p) (recur mid hi (inc iter))
+                         (recur lo mid (inc iter)))))))
+        bq   (max 0.001 (min 0.999 (+ mu (* z-p sd))))]
+    (* scale (/ bq (- 1.0 bq)))))
+
+(defn gp-bayes-projection
+  "Gamma process Bayesian projection with conjugate update.
+   Prior on rate λ=1/β from historical finals: λ ~ Gamma(a₀, b₀).
+   Conjugate update with observed pct over elapsed time fraction f:
+     posterior λ ~ Gamma(a₀ + α·f, b₀ + pct)
+   Posterior predictive for remaining increment:
+     Remaining | λ ~ Gamma(α(1-f), 1/λ)
+     Marginalizing λ: Remaining/b_post ~ BetaPrime(α(1-f), a_post)"
+  [observed {:keys [now resets-at window-start last-pct historical-finals]}]
+  (let [{:keys [alpha beta]} (or (gp-estimate-params historical-finals)
+                                 default-gamma-prior)]
+    (when alpha
+      (let [T-secs   (double (- resets-at window-start))
+            f        (/ (double (- now window-start)) T-secs)
+            f        (max 0.001 (min 0.999 f))
+            a0       alpha
+            b0       (* alpha beta)
+            a-post   (+ a0 (* alpha f))
+            b-post   (+ b0 last-pct)
+            rem-shape (* alpha (- 1.0 f))
+            post-mean-scale (if (> a-post 1.0)
+                              (/ b-post (- a-post 1.0))
+                              beta)
+            rem-mean (* rem-shape post-mean-scale)
+            proj     (+ last-pct rem-mean)
+            lo (+ last-pct (beta-prime-quantile rem-shape a-post b-post 0.05))
+            hi (+ last-pct (beta-prime-quantile rem-shape a-post b-post 0.95))]
+        (when (pos? rem-shape)
+          {:method :gp-bayes
+           :name   "Bayesian (Γ-process)"
+           :proj   (max last-pct proj)
+           :band   {:lo (max last-pct lo) :hi (max last-pct hi)}})))))
+
 ;; --- aggregation ---
 
 (defn all-projections
@@ -474,5 +766,9 @@
   enough data."
   [observed window-info]
   (->> [(rate-ols-projection observed window-info)
-        (bayes-projection observed window-info)]
+        (bayes-projection observed window-info)
+        (gamma-freq-projection observed window-info)
+        (gamma-bayes-projection observed window-info)
+        (gp-freq-projection observed window-info)
+        (gp-bayes-projection observed window-info)]
        (filterv some?)))

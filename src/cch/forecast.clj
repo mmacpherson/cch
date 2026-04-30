@@ -169,25 +169,82 @@
              (mapv (fn [{:keys [ts pct resets_at]}]
                      {:ts (long ts) :pct (double pct) :resets-at (long resets_at)})))))
 
+(def ^:private prior-decay-lambda 0.85)
+
+(def ^:private prior-sigma-floor 0.03)
+
+(defn weighted-prior-params
+  "Pure fn: given a seq of completed-window rows [{:final_pct N} ...] ordered
+   newest-first, returns {:mu :sigma} in %/hr units using exponentially-decayed
+   weights (most-recent weight = 1, each older week × prior-decay-lambda).
+   Returns nil when fewer than 2 windows are supplied."
+  [rows]
+  (when (>= (count rows) 2)
+    (let [rates (mapv #(/ (double (:final_pct %)) (* 7.0 24.0)) rows)
+          ws    (mapv #(Math/pow prior-decay-lambda %) (range (count rates)))
+          sw    (reduce + 0.0 ws)
+          mu    (/ (reduce + 0.0 (map * ws rates)) sw)
+          sw2   (reduce + 0.0 (map #(* % %) ws))
+          var   (/ (reduce + 0.0 (map (fn [w r] (* w (Math/pow (- r mu) 2.0))) ws rates))
+                   (- sw (/ sw2 sw)))
+          sigma (max prior-sigma-floor (Math/sqrt var))]
+      {:mu mu :sigma sigma})))
+
+(def ^:private historical-finals-sql
+  (str "SELECT final_pct FROM ("
+       "  SELECT MAX(CAST(json_extract(payload,'$.rate_limits.seven_day.used_percentage') AS REAL))"
+       "    AS final_pct"
+       "  FROM context_snapshots"
+       "  WHERE json_extract(payload,'$.rate_limits.seven_day.resets_at') < strftime('%s','now')"
+       "    AND json_extract(payload,'$.rate_limits.seven_day.used_percentage') IS NOT NULL"
+       "    AND session_id NOT LIKE 'test%'"
+       "  GROUP BY json_extract(payload,'$.rate_limits.seven_day.resets_at')"
+       "  ORDER BY json_extract(payload,'$.rate_limits.seven_day.resets_at') DESC"
+       "  LIMIT 12"
+       ") WHERE final_pct >= 10"))
+
+(defn- historical-final-pcts
+  "Final used_percentage for each completed 7-day window, newest-first, up to 12."
+  []
+  (some->> (db/query historical-finals-sql)
+           (mapv #(double (:final_pct %)))))
+
+(defn- learned-prior
+  "Derive an empirical Bayes prior (μ/σ in %/hr) from completed windows.
+   Returns nil during the first week when there is no history."
+  []
+  (some->> (db/query historical-finals-sql)
+           (weighted-prior-params)))
+
 (defn- build-current-window []
-  (when-let [resets-at (latest-resets-at :seven-day)]
-    (let [window-start (- resets-at (* 7 86400))
-          in-window    (filtered-samples (epoch->iso window-start) :seven-day)
-          now          (-> (Instant/now) .getEpochSecond)
-          last-pct     (:pct (last in-window))
+  (when-let [raw-resets-at (latest-resets-at :seven-day)]
+    (let [now          (-> (Instant/now) .getEpochSecond)
+          ;; After a weekly reset the DB still has the old resets_at until
+          ;; Claude Code posts a fresh snapshot. Shift to the new window.
+          resets-at    (if (<= raw-resets-at now)
+                         (+ raw-resets-at (* 7 86400))
+                         raw-resets-at)
+          window-start (- resets-at (* 7 86400))
+          raw-samples  (filtered-samples (epoch->iso window-start) :seven-day)
+          ;; Stale sessions cache old rate-limit state and keep reporting
+          ;; the expired resets_at with high pct values for hours after a
+          ;; reset. Only keep samples tagged with the current resets_at.
+          in-window    (filterv #(= (:resets-at %) resets-at) raw-samples)
+          last-pct     (or (:pct (last in-window)) 0.0)
+          hist-finals  (historical-final-pcts)
           window-info  {:now now :resets-at resets-at
-                        :window-start window-start :last-pct last-pct}
+                        :window-start window-start :last-pct last-pct
+                        :historical-finals hist-finals}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
           projs        (proj/all-projections obs-pairs window-info)]
-      (when (and last-pct (seq projs))
-        {:observed        obs-pairs
-         :rate-5h-samples (rate-5h-samples (epoch->iso window-start))
-         :resets-at       resets-at
-         :window-start    window-start
-         :now             now
-         :last-pct        last-pct
-         :samples         (or (raw-sample-count (epoch->iso window-start) :seven-day) 0)
-         :projections     projs}))))
+      {:observed        obs-pairs
+       :rate-5h-samples (rate-5h-samples (epoch->iso window-start))
+       :resets-at       resets-at
+       :window-start    window-start
+       :now             now
+       :last-pct        last-pct
+       :samples         (or (raw-sample-count (epoch->iso window-start) :seven-day) 0)
+       :projections     (or projs [])})))
 
 ;; Cache current-window for 30s — data arrives at most once per minute
 ;; via the statusLine hook, so re-running 4 queries + LOESS + projections
@@ -250,46 +307,6 @@
 
 ;; Exponential decay applied across completed weeks — most-recent week has
 ;; weight 1, each older week is multiplied by this factor.
-(def ^:private prior-decay-lambda 0.85)
-
-;; Floor on σ so that a handful of nearly-identical weeks don't collapse
-;; the prior to a spike and overwhelm the within-week likelihood.
-(def ^:private prior-sigma-floor 0.03)
-
-(defn weighted-prior-params
-  "Pure fn: given a seq of completed-window rows [{:final_pct N} ...] ordered
-   newest-first, returns {:mu :sigma} in %/hr units using exponentially-decayed
-   weights (most-recent weight = 1, each older week × prior-decay-lambda).
-   Returns nil when fewer than 2 windows are supplied."
-  [rows]
-  (when (>= (count rows) 2)
-    (let [rates (mapv #(/ (double (:final_pct %)) (* 7.0 24.0)) rows)
-          ws    (mapv #(Math/pow prior-decay-lambda %) (range (count rates)))
-          sw    (reduce + 0.0 ws)
-          mu    (/ (reduce + 0.0 (map * ws rates)) sw)
-          ;; Bessel-corrected weighted variance
-          sw2   (reduce + 0.0 (map #(* % %) ws))
-          var   (/ (reduce + 0.0 (map (fn [w r] (* w (Math/pow (- r mu) 2.0))) ws rates))
-                   (- sw (/ sw2 sw)))
-          sigma (max prior-sigma-floor (Math/sqrt var))]
-      {:mu mu :sigma sigma})))
-
-(defn- learned-prior
-  "Query completed 7-day windows (newest-first, up to 12) and derive an
-   empirical Bayes prior via weighted-prior-params. Returns nil during the
-   first week when there is no history."
-  []
-  (let [sql (str "SELECT MAX(CAST(json_extract(payload,'$.rate_limits.seven_day.used_percentage') AS REAL))"
-                 "  AS final_pct"
-                 " FROM context_snapshots"
-                 " WHERE json_extract(payload,'$.rate_limits.seven_day.resets_at') < strftime('%s','now')"
-                 "   AND json_extract(payload,'$.rate_limits.seven_day.used_percentage') IS NOT NULL"
-                 "   AND session_id NOT LIKE 'test%'"
-                 " GROUP BY json_extract(payload,'$.rate_limits.seven_day.resets_at')"
-                 " ORDER BY json_extract(payload,'$.rate_limits.seven_day.resets_at') DESC"
-                 " LIMIT 12")]
-    (weighted-prior-params (db/query sql))))
-
 (defn- fused-burn-rate-7d
   "Inverse-variance weighted fusion of 7d-direct and 5h-scaled burn rates,
    both in 7d-percent/hr. 5h weight = 7.5 (proportional to its tick frequency)."

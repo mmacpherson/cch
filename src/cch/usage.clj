@@ -26,19 +26,7 @@
    :x1 (- chart-w (:right margin))
    :y1 (- chart-h (:bottom margin))})
 
-(defn- y-max
-  "Pick a y-axis ceiling that always includes 100 and the highest
-  projection (with band), rounded up to a tidy 10s. Capped so a
-  runaway projection doesn't squash the chart."
-  [data]
-  (let [proj-max (apply max 0.0
-                        (mapcat (fn [{:keys [proj band]}]
-                                  [proj (or (:hi band) proj)])
-                                (:projections data)))
-        hi (max 100.0
-                proj-max
-                (apply max 0.0 (map :pct (:observed data))))]
-    (-> hi (/ 10.0) Math/ceil long (* 10) (min 200))))
+(defn- y-max [_data] 125)
 
 (defn- scale-x [{:keys [window-start resets-at]} {:keys [x0 x1]}]
   ;; Ratios sneak in when integer dividends collide with integer divisors.
@@ -81,8 +69,12 @@
   "Color + display order per projection method. Methods not in this
    map are still rendered (with a default gray) but lose stable
    ordering across page loads."
-  {:linear-rate {:color "#2563eb" :order 0}   ; frequentist — blue
-   :bayes       {:color "#f59e0b" :order 1}}) ; Bayesian — orange
+  {:linear-rate {:color "#2563eb" :order 0}   ; frequentist rate — blue
+   :bayes       {:color "#f59e0b" :order 1}   ; Bayesian rate — orange
+   :gamma-freq  {:color "#8b5cf6" :order 2}   ; frequentist Gamma — purple
+   :gamma-bayes {:color "#ec4899" :order 3}   ; Bayesian Gamma — pink
+   :gp-freq     {:color "#14b8a6" :order 4}   ; frequentist Γ-process — teal
+   :gp-bayes    {:color "#f43f5e" :order 5}}) ; Bayesian Γ-process — rose
 
 (defn- method-color [m]
   (get-in method-style [m :color] "#6b7280"))
@@ -96,7 +88,7 @@
   "Render the usage chart. Pure function of the data bundle. Returns a
   [:svg ...] tree, or a [:p ...] fallback when there's no data."
   [data]
-  (if (or (nil? data) (empty? (:observed data)))
+  (if (nil? data)
     [:p.has-text-grey
      "Not enough rate-limit data yet to plot. The page populates as the "
      "statusLine reports usage."]
@@ -107,23 +99,15 @@
           sy   (scale-y y-top rect)
           {:keys [x0 y0 x1 y1]} rect
           obs-pts    (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)]) observed)
-          ;; LOESS-style smoothed curve. Bandwidth 0.08 of the observed
-          ;; span — tight enough that the line tracks raw data through
-          ;; sharp transitions (e.g. a long plateau followed by a jump
-          ;; up) instead of bowing over them and leaving raw points
-          ;; visibly under the line. drop-stale already enforces
-          ;; monotonicity on the input, so PAV inside loess-smooth is
-          ;; effectively a no-op here — kept for safety against future
-          ;; data sources where monotonicity isn't guaranteed.
-          smoothed   (some->> (proj/loess-smooth observed 80 0.08)
-                              (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)])))
+          smoothed   (when (seq observed)
+                       (some->> (proj/loess-smooth observed 80 0.08)
+                                (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)]))))
           proj-x0 (sx now)
           proj-x1 (sx resets-at)
           y-ticks (range 0 (inc y-top) 25)
           day-ticks (->> (iterate #(+ % 86400) window-start)
                          (take-while #(<= % resets-at)))
           line-for (fn [proj-pct] [[proj-x0 (sy last-pct)] [proj-x1 (sy proj-pct)]])
-          ;; rgba helper so each band fills with its method's color at low alpha
           rgba (fn [hex a]
                  (let [r (Integer/parseInt (subs hex 1 3) 16)
                        g (Integer/parseInt (subs hex 3 5) 16)
@@ -267,17 +251,16 @@
      [:div.stat [:div.k "current"]   [:div.v (format "%.0f%%" (double last-pct))]]
      [:div.stat [:div.k "resets in"] [:div.v (format "%.1f h" hours-left)]]
      [:div.stat [:div.k "samples"]   [:div.v (str samples)]]
-     [:div.method-projections
-      [:div.k "projected at reset"]
-      ;; Strip parenthetical sub-clauses from the method name —
-      ;; the full name lives in the legend under the chart.
-      (for [{:keys [method name proj band]} (ordered-projections projections)
-            :let [short-name (str/trim (clojure.string/replace name #"\s*\(.*\)\s*$" ""))]]
-        [:div.method-row {:data-method (clojure.core/name method)}
-         [:span.swatch {:style (str "background:" (method-color method))}]
-         [:span.method-name short-name]
-         [:span.method-proj (format "%.0f%%" (double proj))
-          (when-let [b (fmt-band band)] [:span.aux b])]])]]))
+     (when (seq projections)
+       [:div.method-projections
+        [:div.k "projected at reset"]
+        (for [{:keys [method name proj band]} (ordered-projections projections)
+              :let [short-name (str/trim (clojure.string/replace name #"\s*\(.*\)\s*$" ""))]]
+          [:div.method-row {:data-method (clojure.core/name method)}
+           [:span.swatch {:style (str "background:" (method-color method))}]
+           [:span.method-name short-name]
+           [:span.method-proj (format "%.0f%%" (double proj))
+            (when-let [b (fmt-band band)] [:span.aux b])]])])]))
 
 (def page-css
   "div.usage-grid { display: grid; grid-template-columns: 1fr 280px; gap: 1.5em; align-items: start; }
@@ -303,9 +286,17 @@
       side-panel method-row. Scope at .usage-grid so :has() reaches the
       side panel. Each method gets two rules: lift its band, fatten its line. */
    div.usage-grid:has([data-method=\"linear\"]:hover) svg.usage-chart .band-region[data-method=\"linear\"],
-   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .band-region[data-method=\"bayes\"] { opacity: 1; }
+   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .band-region[data-method=\"bayes\"],
+   div.usage-grid:has([data-method=\"gamma-freq\"]:hover) svg.usage-chart .band-region[data-method=\"gamma-freq\"],
+   div.usage-grid:has([data-method=\"gamma-bayes\"]:hover) svg.usage-chart .band-region[data-method=\"gamma-bayes\"],
+   div.usage-grid:has([data-method=\"gp-freq\"]:hover) svg.usage-chart .band-region[data-method=\"gp-freq\"],
+   div.usage-grid:has([data-method=\"gp-bayes\"]:hover) svg.usage-chart .band-region[data-method=\"gp-bayes\"] { opacity: 1; }
    div.usage-grid:has([data-method=\"linear\"]:hover) svg.usage-chart .proj-line[data-method=\"linear\"],
-   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"bayes\"] { stroke-width: 3; }
+   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"bayes\"],
+   div.usage-grid:has([data-method=\"gamma-freq\"]:hover) svg.usage-chart .proj-line[data-method=\"gamma-freq\"],
+   div.usage-grid:has([data-method=\"gamma-bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"gamma-bayes\"],
+   div.usage-grid:has([data-method=\"gp-freq\"]:hover) svg.usage-chart .proj-line[data-method=\"gp-freq\"],
+   div.usage-grid:has([data-method=\"gp-bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"gp-bayes\"] { stroke-width: 3; }
    /* Side panel */
    div.usage-stats { display: flex; flex-direction: column; gap: 0.6em; font-family: var(--bulma-family-primary); }
    div.usage-stats .stat { padding: 0.5em 0.75em; background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 4px; }

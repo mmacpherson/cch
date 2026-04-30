@@ -249,14 +249,19 @@
 ;; --- aggregator ---
 
 (deftest all-projections-filters-empty-methods
-  (testing "with too few samples, all-projections returns empty (no errors)"
-    (is (= [] (p/all-projections [(snap 0 0)]
-                                 {:window-start 0 :now 0 :resets-at 86400 :last-pct 0})))))
+  (testing "with too few rate samples and zero pct, only default-prior methods fire"
+    (let [results (p/all-projections [(snap 0 0)]
+                                     {:window-start 0 :now 0 :resets-at 86400 :last-pct 0})
+          methods (set (map :method results))]
+      (is (not (contains? methods :linear-rate)))
+      (is (not (contains? methods :bayes)))
+      (is (not (contains? methods :gamma-freq)) "gamma-freq needs pos? last-pct"))))
 
 (deftest all-projections-includes-both-methods-on-rich-data
   (let [obs (linear-samples 12 0 0.6)
         win (window-info obs 48)
-        methods (set (map :method (p/all-projections obs win)))]
+        results (p/all-projections obs win)
+        methods (set (map :method results))]
     (is (contains? methods :linear-rate))
     (is (contains? methods :bayes))
-    (is (= 2 (count methods)) "expected linear-rate and bayes")))
+    (is (>= (count methods) 2) "at least linear-rate and bayes")))

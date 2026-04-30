@@ -24,12 +24,13 @@
    :projections  projections})
 
 (deftest chart-svg-empty-data
-  (testing "no data → human-readable fallback, not an empty <svg>"
+  (testing "nil data → human-readable fallback"
     (let [out (u/chart-svg nil)]
       (is (re-find #"^:p" (str (first out))) "tag is :p (with optional class)")
-      (is (re-find #"Not enough" (str out))))
-    (let [out (u/chart-svg (assoc (make-data) :observed []))]
-      (is (re-find #"^:p" (str (first out)))))))
+      (is (re-find #"Not enough" (str out)))))
+  (testing "empty observed → still renders SVG scaffolding"
+    (let [out (u/chart-svg (assoc (make-data) :observed [] :projections []))]
+      (is (= :svg (first out))))))
 
 (deftest chart-svg-renders-svg
   (testing "with data, returns a [:svg ...] tree"
