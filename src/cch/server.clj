@@ -886,12 +886,13 @@
          :window-size    (:context_window_size ctx)
          :model-id       (get-in body [:model :id])
          :payload        body-str})
-      (forecast/signal-new-data!)
       {:status 204 :headers {} :body ""})
     (catch Exception e
       {:status 500
        :headers {"Content-Type" "application/json"}
-       :body (json/generate-string {:error (.getMessage e)})})))
+       :body (json/generate-string {:error (.getMessage e)})})
+    (finally
+      (forecast/signal-new-data!))))
 
 (defn- usage-html
   "Render the /usage page (server-side, hiccup → string)."
