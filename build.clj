@@ -92,9 +92,20 @@
     (spit launcher
           (str "#!/usr/bin/env bash\n"
                "# cch launcher — runs the bundled JRE against the bundled uberjar.\n"
+               "#\n"
+               "# JVM tuning: cch handles ~thousands of cheap dispatches/day. We don't\n"
+               "# need a multi-GB heap or a parallel GC; SerialGC has the smallest\n"
+               "# footprint and is appropriate for a low-throughput single-process\n"
+               "# server. -Xmx256m caps total heap; observed working set is ~80MB.\n"
+               "# Override via $CCH_JAVA_OPTS for debugging.\n"
                "set -euo pipefail\n"
                "here=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"\n"
-               "exec \"$here/bin/java\" -jar \"$here/lib/cch.jar\" \"$@\"\n"))
+               "exec \"$here/bin/java\" \\\n"
+               "  -Xmx256m \\\n"
+               "  -XX:+UseSerialGC \\\n"
+               "  -XX:MaxMetaspaceSize=128m \\\n"
+               "  ${CCH_JAVA_OPTS:-} \\\n"
+               "  -jar \"$here/lib/cch.jar\" \"$@\"\n"))
     (.setExecutable launcher true false))
   (let [{:keys [out]} (sh/sh "du" "-sh" runtime-dir)]
     (println "Built" runtime-dir (str/trim out))))
