@@ -348,25 +348,50 @@
 
 (defn- do-refresh! []
   (reset! forecast-cache
-          {:five_hour  (compute-window-stats :five-hour  proj/rate-bayes-projection)
-           :seven_day  (compute-window-stats :seven-day  proj/rate-bayes-projection)}))
+          {:five_hour    (compute-window-stats :five-hour  proj/rate-bayes-projection)
+           :seven_day    (compute-window-stats :seven-day  proj/rate-bayes-projection)
+           :computed_at  (-> (Instant/now) .getEpochSecond)}))
+
+(defn- safe-refresh! []
+  ;; Catch Throwable, not Exception — an Error (OOM, init failure, etc.)
+  ;; would otherwise escape and kill the loop, freezing the cache.
+  (try (do-refresh!)
+       (catch Throwable t
+         (binding [*out* *err*]
+           (println "cch.forecast: refresh failed:" (.getMessage t))))))
 
 (defn start-bg-refresh!
-  "Start a background thread that blocks on a channel until signaled,
-   sleeps `debounce-ms` to absorb concurrent bursts, then computes once.
-   Closing the channel (stop-bg-refresh!) unblocks <!! with nil → clean exit.
-   Computes immediately on startup to seed the cache."
-  [& {:keys [debounce-ms] :or {debounce-ms 3000}}]
+  "Start a background thread that refreshes the forecast cache.
+
+   Two wakeup paths, so liveness does not depend on signal delivery:
+     - signal channel: a /context-snapshot POST signals immediately,
+       loop debounces `debounce-ms` to coalesce bursts, then refreshes.
+     - timer: every `max-stale-ms` the loop refreshes anyway, so even
+       if signals are dropped/lost the cache never goes stale.
+
+   Closing the channel (stop-bg-refresh!) makes the next take return nil → exit."
+  [& {:keys [debounce-ms max-stale-ms]
+      :or   {debounce-ms 3000 max-stale-ms 60000}}]
   (let [ch (async/chan (async/dropping-buffer 1))
         t  (Thread.
              (fn []
-               (try (do-refresh!) (catch Exception _))
+               (safe-refresh!)
                (loop []
-                 (when (async/<!! ch)       ; nil = channel closed → exit
-                   (try (Thread/sleep (long debounce-ms))
-                        (catch InterruptedException _))
-                   (try (do-refresh!) (catch Exception _))
-                   (recur)))))]
+                 (let [timeout-ch (async/timeout max-stale-ms)
+                       [v port]   (try (async/alts!! [ch timeout-ch])
+                                       (catch Throwable t
+                                         (binding [*out* *err*]
+                                           (println "cch.forecast: alts!! failed:" (.getMessage t)))
+                                         [:tick timeout-ch]))
+                       signaled?  (identical? port ch)
+                       closed?    (and signaled? (nil? v))]
+                   (when-not closed?
+                     (when signaled?
+                       ;; debounce to absorb a burst of concurrent posts
+                       (try (Thread/sleep (long debounce-ms))
+                            (catch InterruptedException _)))
+                     (safe-refresh!)
+                     (recur))))))]
     (reset! signal-ch-ref ch)
     (.setDaemon t true)
     (.start t)

@@ -133,6 +133,24 @@
             (is (> @calls calls-after-throws)
                 "subsequent signal must trigger another refresh attempt")))))))
 
+(deftest timer-backstop-refreshes-without-signals
+  ;; Liveness must not depend on signal delivery: even with zero signals,
+  ;; the bg loop must keep the cache fresh via its timer wakeup.
+  (with-fresh-bg 50
+    (fn [debounce-ms]
+      (start-bg-refresh! :debounce-ms debounce-ms :max-stale-ms 150)
+      (Thread/sleep 100) ; initial seed
+      (let [updates (atom 0)
+            cache   @#'cch.forecast/forecast-cache]
+        (add-watch cache ::tick-test (fn [_ _ _ _] (swap! updates inc)))
+        (try
+          ;; Send no signals — wait long enough for ≥2 timer ticks.
+          (Thread/sleep 500)
+          (is (>= @updates 2)
+              "timer backstop must drive refreshes when no signals arrive")
+          (finally
+            (remove-watch cache ::tick-test)))))))
+
 (deftest signal-debounces-burst
   (with-fresh-bg 200
     (fn [debounce-ms]
