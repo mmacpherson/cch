@@ -18,15 +18,19 @@
 
   Output is a markdown-formatted report on stdout. Pipe to a file in
   bench/reports/<date>.md to keep a record."
-  (:require [criterium.core :as c]
+  (:require [babashka.fs :as fs]
+            [cch.db :as db]
             [cch.projections :as proj]
+            [cch.server :as server]
+            [cheshire.core :as json]
+            [criterium.core :as c]
+            [hato.client :as http]
             [hooks.command-audit :as cmd-audit]
             [hooks.command-guard :as cmd-guard]
             [hooks.protect-files :as protect]
-            [hooks.scope-lock :as scope]
-            [hato.client :as http]
-            [cheshire.core :as json])
-  (:import (java.time Instant)))
+            [hooks.scope-lock :as scope])
+  (:import (java.net ServerSocket)
+           (java.time Instant)))
 
 (defn- now-epoch [] (.getEpochSecond (Instant/now)))
 
@@ -143,22 +147,44 @@
 ;; ---------------------------------------------------------------------------
 ;; End-to-end HTTP dispatch
 
-(def ^:private dispatch-url "http://127.0.0.1:8888/dispatch/PreToolUse")
 (def ^:private dispatch-payload
   (json/generate-string
     {:hook_event_name "PreToolUse"
      :tool_name       "Bash"
-     :cwd             "/tmp"
+     :cwd             "/tmp/cch-bench"
      :tool_input      {:command "ls -la"}}))
 (def ^:private headers {"Content-Type" "application/json"})
 
-(defn- run-batch [start end]
+(defn- free-port []
+  (with-open [s (ServerSocket. 0)]
+    (.getLocalPort s)))
+
+(defn- with-ephemeral-server
+  "Run f against a fresh in-process dispatcher backed by a tmp DB on a
+  free port. Tears it all down on the way out so the bench never touches
+  the production DB at ~/.local/share/cch/events.db."
+  [f]
+  (let [tmp-dir   (str (fs/create-temp-dir {:prefix "cch-bench-"}))
+        tmp-db    (str tmp-dir "/events.db")
+        port      (free-port)
+        original  db/db-path]
+    (alter-var-root #'db/db-path (constantly (constantly tmp-db)))
+    (let [{:keys [stop]} (binding [*out* (java.io.StringWriter.)]
+                           (server/start! {:port port :host "127.0.0.1"}))]
+      (try
+        (f port)
+        (finally
+          (stop)
+          (alter-var-root #'db/db-path (constantly original))
+          (fs/delete-tree tmp-dir))))))
+
+(defn- run-batch [url start end]
   (let [t0   (System/nanoTime)
         lats (long-array (- end start))]
     (loop [i start]
       (when (< i end)
         (let [a (System/nanoTime)]
-          (http/post dispatch-url
+          (http/post url
                      {:body dispatch-payload :headers headers
                       :throw-exceptions? false})
           (aset lats (- i start) (- (System/nanoTime) a))
@@ -186,28 +212,30 @@
                      (ms (percentile lats 0.999))))))
 
 (defn http-bench []
-  (println "\n## End-to-end HTTP dispatch")
-  (println)
-  (println "10,000 sequential POSTs to" (str "`" dispatch-url "`,"))
-  (println "binned into non-overlapping windows of the same run. The cold→hot")
-  (println "curve is the JIT compiler converting hot methods from interpreted")
-  (println "bytecode to C2-compiled native code.")
-  (println)
-  (try
-    (http/get "http://127.0.0.1:8888/forecast" {:throw-exceptions? false})
-    (catch Exception _
-      (println "**ERROR**: server not reachable at 127.0.0.1:8888 — start it first.")
-      (System/exit 1)))
-  (let [cold (run-batch 0 100)
-        mid  (run-batch 100 1000)
-        warm (run-batch 1000 5000)
-        hot  (run-batch 5000 10000)]
-    (println "| Phase | n | mean (ms) | p50 (ms) | p90 (ms) | p99 (ms) | p99.9 (ms) |")
-    (println "| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-    (emit-http-row "cold (0–100)"    cold)
-    (emit-http-row "mid  (100–1k)"   mid)
-    (emit-http-row "warm (1k–5k)"    warm)
-    (emit-http-row "hot  (5k–10k)"   hot)))
+  (log-progress "Starting ephemeral dispatcher (tmp DB, free port)...")
+  (with-ephemeral-server
+    (fn [port]
+      (let [url (str "http://127.0.0.1:" port "/dispatch/PreToolUse")]
+        (log-progress (str "  → " url))
+        (log-progress "Running 10,000 sequential POSTs (~30s)...")
+        (println "\n## End-to-end HTTP dispatch")
+        (println)
+        (println "10,000 sequential POSTs to a freshly-spawned in-process")
+        (println "dispatcher backed by a tmp SQLite DB. The cold→hot curve")
+        (println "is HotSpot C2 compiling hot methods from interpreted bytecode")
+        (println "to native. The dispatcher is torn down at the end so the")
+        (println "production DB is never touched.")
+        (println)
+        (let [cold (run-batch url 0 100)
+              mid  (run-batch url 100 1000)
+              warm (run-batch url 1000 5000)
+              hot  (run-batch url 5000 10000)]
+          (println "| Phase | n | mean (ms) | p50 (ms) | p90 (ms) | p99 (ms) | p99.9 (ms) |")
+          (println "| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+          (emit-http-row "cold (0–100)"  cold)
+          (emit-http-row "mid  (100–1k)" mid)
+          (emit-http-row "warm (1k–5k)"  warm)
+          (emit-http-row "hot  (5k–10k)" hot))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Entry point
