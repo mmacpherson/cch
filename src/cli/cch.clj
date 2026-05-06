@@ -17,7 +17,8 @@
             [cli.install :as install]
             [cli.list-cmd :as list-cmd]
             [cli.log-cmd :as log-cmd]
-            [cli.service-cmd :as service-cmd]))
+            [cli.service-cmd :as service-cmd])
+  (:gen-class))
 
 (defn print-usage []
   (println "cch — Claude Code Hooks")

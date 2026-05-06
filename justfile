@@ -78,6 +78,10 @@ install bin="~/bin":
 uninstall bin="~/bin":
     scripts/uninstall {{bin}}
 
+# Build standalone runtime image (target/cch-runtime/)
+build:
+    clj -T:build all
+
 # Remove generated files
 clean:
-    rm -rf .cpcache .nrepl-port
+    rm -rf .cpcache .nrepl-port target
