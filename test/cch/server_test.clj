@@ -5,8 +5,8 @@
   reconciled responses match the per-hook composed-handler output.
   Uses a tmp DB so hook_config state is isolated per run."
   (:require [babashka.fs :as fs]
-            [babashka.http-client :as http]
             [babashka.process :as p]
+            [hato.client :as http]
             [cch.config-db :as cdb]
             [cch.db :as db]
             [cch.events :as cch-events]
@@ -54,7 +54,7 @@
         resp  (http/post (url (str "/dispatch/" event))
                          {:body     body
                           :headers  {"Content-Type" "application/json"}
-                          :throw    false})
+                          :throw-exceptions?    false})
         parsed (when-not (str/blank? (:body resp))
                  (try (json/parse-string (:body resp) true)
                       (catch Exception _ nil)))]
@@ -78,7 +78,7 @@
 (deftest test-legacy-hooks-route-gone
   (testing "POST /hooks/<name> returns 404 (dispatcher model only)"
     (let [resp (http/post (url "/hooks/scope-lock")
-                          {:body "{}" :headers {"Content-Type" "application/json"} :throw false})]
+                          {:body "{}" :headers {"Content-Type" "application/json"} :throw-exceptions? false})]
       (is (= 404 (:status resp))))))
 
 (deftest test-unknown-event-returns-empty
@@ -248,7 +248,7 @@
         (is (= {:note "ui-crud-test"} (:options row))))
 
       (let [del-resp (http/delete (url "/api/config?hook=scope-lock&scope=repo%3A%2Ftmp%2Ftest-crud")
-                                  {:throw false})]
+                                  {:throw-exceptions? false})]
         (is (= 200 (:status del-resp))))
 
       (let [all (json/parse-string (:body (http/get (url "/api/config"))) true)]
@@ -272,7 +272,7 @@
     (let [resp (http/post (url "/api/config")
                           {:body (json/generate-string {:hook-name "x"})
                            :headers {"Content-Type" "application/json"}
-                           :throw false})]
+                           :throw-exceptions? false})]
       (is (= 400 (:status resp))))))
 
 ;; --- Hook matrix page ---
@@ -329,7 +329,7 @@
           resp (http/post (url "/context-snapshot")
                           {:body (json/generate-string body)
                            :headers {"Content-Type" "application/json"}
-                           :throw false})]
+                           :throw-exceptions? false})]
       (is (= 204 (:status resp)))
       (testing "row landed with both indexed columns populated"
         (let [r (-> (p/sh ["sqlite3" "-json" *tmp-db*
@@ -345,7 +345,7 @@
 
 (deftest test-forecast-endpoint
   (testing "GET /forecast returns JSON with five_hour and seven_day keys"
-    (let [resp (http/get (url "/forecast") {:throw false})
+    (let [resp (http/get (url "/forecast") {:throw-exceptions? false})
           body (json/parse-string (:body resp) true)]
       (is (= 200 (:status resp)))
       (is (map? body))
@@ -357,8 +357,8 @@
     (http/post (url "/hooks/toggle")
                {:body    "hook=protect-files&scope=global&enabled=false"
                 :headers {"Content-Type" "application/x-www-form-urlencoded"}
-                :throw   false})
-    ;; bb http-client follows 303s by default; we can't easily observe the
+                :throw-exceptions?   false})
+    ;; hato follows 303s by default; we can't easily observe the
     ;; Location header. The visible behavior is that the row is updated.
     (let [row (cdb/get-row "protect-files" cdb/global-scope)]
       (is (false? (:enabled row))))
