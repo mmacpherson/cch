@@ -106,6 +106,33 @@
           (finally
             (remove-watch cache ::signal-test)))))))
 
+(deftest bg-loop-survives-throwable-from-refresh
+  ;; Regression: a Throwable (Error, not Exception) escaping do-refresh! used
+  ;; to kill the bg thread silently, freezing /forecast on a stale snapshot.
+  (with-fresh-bg 100
+    (fn [debounce-ms]
+      (let [calls (atom 0)
+            mode  (atom :throw)
+            real  @#'cch.forecast/do-refresh!]
+        (with-redefs [cch.forecast/do-refresh!
+                      (fn []
+                        (swap! calls inc)
+                        (case @mode
+                          :throw (throw (Error. "simulated fatal"))
+                          :ok    (real)))]
+          (start-bg-refresh! :debounce-ms debounce-ms)
+          (Thread/sleep 300) ; initial seed throws
+          (signal-new-data!)
+          (Thread/sleep 300) ; second refresh also throws
+          (let [calls-after-throws @calls]
+            (is (>= calls-after-throws 2)
+                "thread must keep handling signals after throwing")
+            (reset! mode :ok)
+            (signal-new-data!)
+            (Thread/sleep 300)
+            (is (> @calls calls-after-throws)
+                "subsequent signal must trigger another refresh attempt")))))))
+
 (deftest signal-debounces-burst
   (with-fresh-bg 200
     (fn [debounce-ms]
