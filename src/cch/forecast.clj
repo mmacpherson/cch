@@ -351,6 +351,14 @@
           {:five_hour  (compute-window-stats :five-hour  proj/rate-bayes-projection)
            :seven_day  (compute-window-stats :seven-day  proj/rate-bayes-projection)}))
 
+(defn- safe-refresh! []
+  ;; Catch Throwable, not Exception — an Error (OOM, init failure, etc.)
+  ;; would otherwise escape and kill the loop, freezing the cache.
+  (try (do-refresh!)
+       (catch Throwable t
+         (binding [*out* *err*]
+           (println "cch.forecast: refresh failed:" (.getMessage t))))))
+
 (defn start-bg-refresh!
   "Start a background thread that blocks on a channel until signaled,
    sleeps `debounce-ms` to absorb concurrent bursts, then computes once.
@@ -360,12 +368,16 @@
   (let [ch (async/chan (async/dropping-buffer 1))
         t  (Thread.
              (fn []
-               (try (do-refresh!) (catch Exception _))
+               (safe-refresh!)
                (loop []
-                 (when (async/<!! ch)       ; nil = channel closed → exit
+                 (when (try (async/<!! ch)  ; nil = channel closed → exit
+                            (catch Throwable t
+                              (binding [*out* *err*]
+                                (println "cch.forecast: signal recv failed:" (.getMessage t)))
+                              :signal))
                    (try (Thread/sleep (long debounce-ms))
                         (catch InterruptedException _))
-                   (try (do-refresh!) (catch Exception _))
+                   (safe-refresh!)
                    (recur)))))]
     (reset! signal-ch-ref ch)
     (.setDaemon t true)
