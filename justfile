@@ -82,6 +82,11 @@ uninstall bin="~/bin":
 build:
     clj -T:build all
 
+# Run performance benchmarks (Criterium pure + 10k HTTP dispatch loop)
+# Pipe to bench/reports/<date>.md to keep a record.
+bench *args:
+    clj -M:bench {{args}}
+
 # Remove generated files
 clean:
     rm -rf .cpcache .nrepl-port target
