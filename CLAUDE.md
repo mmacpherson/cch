@@ -23,8 +23,9 @@ When writing new code or beads issues, prefer portable references (`<repo-root>`
 ## Build & Test
 
 ```bash
-bb test                    # Run all tests (29 tests, 70 assertions)
-bb -cp src:resources -m cli.cch <command>   # Run CLI commands
+just test                  # Run all tests (clj -X:test)
+clj -M:cli <command>       # Run CLI commands
+clj -M:server              # Run the dispatcher (HTTP + nREPL)
 ```
 
 ## Architecture
@@ -53,7 +54,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 1. Create `src/hooks/my_hook.clj` with a pure check function + `defhook` wrapper
 2. Add metadata to `src/cli/registry.clj`
 3. Write tests in `test/hooks/my_hook_test.clj`
-4. Run `bb test` to verify
+4. Run `just test` to verify
 
 **Hook return values:** `nil` = allow, `{:decision :ask/:deny :reason "..."}` = prompt/block.
 
@@ -66,8 +67,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ## Important Constraints
 
-- Hook execution budget: <50ms total including bb startup
-- No pod dependencies in the hot path (adds startup latency)
+- Hook execution budget: <50ms per dispatch — hooks run in-process inside
+  the long-running JVM server (HTTP-type entries in settings.json POST to
+  localhost), so JVM startup is paid once at boot, not per hook
 - SQLite logging must be fire-and-forget (non-blocking)
 - Settings.json writes must be atomic (tmp + rename)
 

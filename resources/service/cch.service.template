@@ -6,7 +6,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/cch/repo
-ExecStart=/usr/bin/env bb -m cli.cch serve
+ExecStart=/usr/bin/env clj -M:server
 Restart=on-failure
 RestartSec=3
 

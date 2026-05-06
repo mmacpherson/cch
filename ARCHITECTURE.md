@@ -338,4 +338,4 @@ This is why hooks should keep decision logic in standalone functions rather than
 
 4. **Explicit over magic.** Hook entries in settings.json are tagged with `# cch:name` for traceability. Config files are plain EDN at known paths.
 
-5. **Test like Claude Code would.** Integration tests spawn `bb -m hooks.name` as a subprocess with JSON on stdin — the exact invocation path Claude Code uses.
+5. **Test like Claude Code would.** Integration tests subprocess hooks via `java -cp <classpath> clojure.main -m hooks.name` with JSON on stdin — exercising the full protocol stack the dispatcher runs in-process.

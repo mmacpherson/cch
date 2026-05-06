@@ -1,8 +1,8 @@
 # cch — Claude Code Hooks
 
-A Babashka-based framework for authoring, installing, and debugging [Claude Code](https://claude.ai/code) hooks. Replaces ad-hoc shell scripts with composable, testable, observable Clojure functions.
+A Clojure framework for authoring, installing, and debugging [Claude Code](https://claude.ai/code) hooks. Replaces ad-hoc shell scripts with composable, testable, observable functions running inside a long-lived JVM dispatcher.
 
-**Why Babashka?** Hooks fire on every tool call. Babashka starts in ~9ms (vs 18-21s for Node.js-based alternatives), has JSON/EDN/filesystem built-in, and Clojure's data-first idiom is a natural fit for JSON-in/JSON-out hooks.
+**Why a long-running server?** Hooks fire on every tool call. Claude Code's HTTP hook transport POSTs each event to `localhost:8888`, so JVM startup is paid once at boot — every hook dispatch is a sub-millisecond function call after that. Clojure's data-first idiom is a natural fit for JSON-in/JSON-out hooks.
 
 ## Quick Start
 
@@ -10,21 +10,21 @@ A Babashka-based framework for authoring, installing, and debugging [Claude Code
 # Clone and set up
 git clone <repo-url> ~/projects/claude-code-hooks
 cd ~/projects/claude-code-hooks
-bb -cp src:resources -m cli.cch init
+clj -M:cli init
 
 # See available hooks
-bb -cp src:resources -m cli.cch list
+clj -M:cli list
 
 # Install a hook (project-local by default)
-bb -cp src:resources -m cli.cch install scope-lock
+clj -M:cli install scope-lock
 
 # Check event history
-bb -cp src:resources -m cli.cch log
+clj -M:cli log
 ```
 
 ### Prerequisites
 
-- [Babashka](https://babashka.org/) v1.12+ (`brew install babashka` or `curl -sLO https://raw.githubusercontent.com/babashka/babashka/master/install`)
+- JDK 21+ and the [Clojure CLI](https://clojure.org/guides/install_clojure) (`clj`)
 - SQLite3 CLI (usually pre-installed on Linux/macOS)
 
 ## How It Works
@@ -185,7 +185,7 @@ Every hook follows a two-part structure:
   (is (= :ask (:decision (hook/check-something "/repo/migrations/001.sql" "Write")))))
 ```
 
-Run tests: `bb test`
+Run tests: `just test`
 
 ### Hook Decisions
 
@@ -258,11 +258,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — execution context
 
 ```bash
 # Run tests
-bb test
+just test
 
-# Test a hook manually
+# Test a hook manually (subprocess, like Claude Code does)
 echo '{"cwd":"/repo","tool_input":{"file_path":"/etc/passwd"}}' \
-  | bb -cp src:resources -m hooks.scope-lock
+  | clj -M -m hooks.scope-lock
 
 # Query the event log
 sqlite3 ~/.local/share/cch/events.db "SELECT * FROM events ORDER BY id DESC LIMIT 10;"

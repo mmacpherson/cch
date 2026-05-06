@@ -19,14 +19,14 @@ Create a new cch hook based on the user's description.
 
 4. **Write tests** in `test/hooks/<name>_test.clj`:
    - Unit tests for the pure check function (no I/O, explicit args)
-   - At least one integration test running `bb -cp src:resources -m hooks.<name>` as a subprocess
+   - At least one integration test running the hook as a subprocess via `test-support/run-hook` (which spawns `java -cp <abs-cp> clojure.main -m hooks.<name>`)
 
-5. **Run tests**: `bb test`
+5. **Run tests**: `just test`
 
 6. **Test manually**:
    ```bash
    echo '{"cwd":"/repo","tool_name":"Edit","tool_input":{"file_path":"/path"}}' \
-     | bb -cp src:resources -m hooks.<name>
+     | clj -M -m hooks.<name>
    ```
 
 ## Hook Pattern Reference

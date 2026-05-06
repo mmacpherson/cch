@@ -9,10 +9,12 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 
 mkdir -p "$bin" "$HOME/.local/share/cch"
 
-# cch — bash shim that invokes bb with the right classpath.
+# cch — bash shim. cd into the repo so clj picks up our deps.edn
+# regardless of the user's CWD.
 cat > "$bin/cch" <<EOF
 #!/usr/bin/env bash
-exec bb -cp "\$HOME/.local/share/cch/repo/src:\$HOME/.local/share/cch/repo/resources" -m cli.cch "\$@"
+cd "\$HOME/.local/share/cch/repo" || exit 1
+exec clj -M:cli "\$@"
 EOF
 chmod +x "$bin/cch"
 
