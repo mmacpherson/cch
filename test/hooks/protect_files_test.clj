@@ -4,7 +4,8 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [hooks.protect-files :as pf]))
+            [hooks.protect-files :as pf]
+            [test-support :as ts]))
 
 (def repo-root
   (str/trim (:out (p/sh ["git" "rev-parse" "--show-toplevel"]))))
@@ -115,9 +116,8 @@
 
 (deftest test-cli-integration
   (let [run (fn [json-input]
-              (p/sh {:dir repo-root
-                     :in  json-input}
-                    "bb" "-cp" "src:resources" "-m" "hooks.protect-files"))]
+              (ts/run-hook "hooks.protect-files" json-input
+                           {:dir repo-root}))]
 
     (testing ".env edit returns JSON deny response"
       (let [input  (format "{\"cwd\":\"%s\",\"tool_input\":{\"file_path\":\"%s/.env\"}}"
@@ -148,9 +148,8 @@
             (fs/create-dirs (str real-root "/src"))
             (let [input  (format "{\"cwd\":\"%s\",\"tool_input\":{\"file_path\":\"%s/src/a.clj\"}}"
                                  real-root real-root)
-                  result (p/sh {:dir real-root :in input}
-                               "bb" "-cp" (str repo-root "/src:" repo-root "/resources")
-                               "-m" "hooks.protect-files")
+                  result (ts/run-hook "hooks.protect-files" input
+                                      {:dir real-root})
                   parsed (json/parse-string (:out result) true)]
               (is (zero? (:exit result)))
               (is (= "deny" (get-in parsed [:hookSpecificOutput :permissionDecision])))

@@ -8,7 +8,7 @@
   We hit the protocol directly so this test exercises the same wire
   format that bin/cch-eval uses."
   (:require [babashka.fs :as fs]
-            [bencode.core :as b]
+            [nrepl.bencode :as b]
             [cch.db :as db]
             [cch.server :as server]
             [clojure.test :refer [deftest is testing]])
@@ -47,7 +47,10 @@
           (try
             (is (= "3" (eval-once nport "(+ 1 2)")))
             (testing "in-process atoms are inspectable"
-              (let [v (eval-once nport "(count @cch.events/subscribers)")]
+              ;; Use #' var ref so the eval works regardless of whether
+              ;; the runtime enforces ns-private (JVM does, sci is lax).
+              ;; @@var: first @ derefs the Var to its atom, second @ derefs the atom.
+              (let [v (eval-once nport "(count @@#'cch.events/subscribers)")]
                 (is (re-matches #"\d+" v))))
             (finally
               (stop)

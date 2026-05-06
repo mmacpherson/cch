@@ -4,7 +4,8 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [hooks.push-gate :as pg]))
+            [hooks.push-gate :as pg]
+            [test-support :as ts]))
 
 (def repo-root
   (str/trim (:out (p/sh ["git" "rev-parse" "--show-toplevel"]))))
@@ -70,9 +71,7 @@
 ;; --- CLI integration: verify PreToolUse response shape -------------------
 
 (defn- run-hook [real-root json-input]
-  (p/sh {:dir real-root :in json-input}
-        "bb" "-cp" (str repo-root "/src:" repo-root "/resources")
-        "-m" "hooks.push-gate"))
+  (ts/run-hook "hooks.push-gate" json-input {:dir real-root}))
 
 (deftest test-cli-integration-non-push-passes-through
   (let [tmp-repo (str (fs/create-temp-dir {:prefix "push-gate-cli-"}))]

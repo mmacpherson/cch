@@ -55,9 +55,16 @@
 
        ;; Command-mode entry point: read JSON from stdin, run through the
        ;; composed handler, write JSON to stdout.
+       ;; System/exit on completion: hooks may spawn subprocesses (sqlite3
+       ;; logger) or hold lingering thread state that delays a clean JVM
+       ;; exit by up to ~60s. Forcing exit is safe because -main is the
+       ;; full CLI lifecycle — any remaining threads are background work
+       ;; we don't need to wait for.
        (defn ~'-main [& _args#]
          (let [raw-input#  (proto/read-input)
                event-name# (or (:hook_event_name raw-input#) "PreToolUse")
                input#      (assoc raw-input# :cch/hook-name ~(str hook-name))
                result#     (~'composed input#)]
-           (proto/write-response! event-name# result#))))))
+           (proto/write-response! event-name# result#)
+           (flush)
+           (System/exit 0))))))

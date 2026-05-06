@@ -19,7 +19,7 @@
   Google Fonts (Roboto / Roboto Condensed). No client JS — filter
   changes are plain GET form submits."
   (:require [babashka.fs :as fs]
-            [babashka.nrepl.server :as nrepl]
+            [nrepl.server :as nrepl]
             [cch.config :as config]
             [cch.config-db :as cdb]
             [cch.db :as db]
@@ -1230,11 +1230,11 @@
 (defn- start-nrepl!
   "Start an in-process nREPL bound to 127.0.0.1:<port> and write a
   .nrepl-port file in cwd so editor tooling auto-discovers it. Returns
-  the server map that babashka.nrepl.server/stop-server! consumes, or
-  nil when port is nil/blank."
+  the server map that nrepl.server/stop-server consumes, or nil when
+  port is nil/blank."
   [port]
   (when port
-    (let [server (nrepl/start-server! {:host "127.0.0.1" :port port})]
+    (let [server (nrepl/start-server :bind "127.0.0.1" :port port)]
       (try (spit ".nrepl-port" (str port))
            (catch Exception _ nil))
       (println (format "nREPL server: 127.0.0.1:%d  (.nrepl-port written)" port))
@@ -1244,7 +1244,7 @@
   "Best-effort shutdown — silences exceptions, deletes .nrepl-port."
   [server]
   (when server
-    (try (nrepl/stop-server! server) (catch Exception _ nil))
+    (try (nrepl/stop-server server) (catch Exception _ nil))
     (try (fs/delete-if-exists ".nrepl-port") (catch Exception _ nil))))
 
 (defn start!

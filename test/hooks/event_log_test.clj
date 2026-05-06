@@ -11,7 +11,8 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]))
+            [clojure.test :refer [deftest is testing]]
+            [test-support :as ts]))
 
 (def repo-root
   (str/trim (:out (p/sh ["git" "rev-parse" "--show-toplevel"]))))
@@ -19,11 +20,10 @@
 (defn- run-with-db
   "Subprocess hooks.event-log against a test-scoped DB, synchronously."
   [db-path json-input]
-  (p/sh {:dir    repo-root
-         :in     json-input
-         :extra-env {"CCH_LOG_SYNC" "1"
-                     "XDG_DATA_HOME" (str (fs/parent (fs/parent db-path)))}}
-        "bb" "-cp" "src:resources" "-m" "hooks.event-log"))
+  (ts/run-hook "hooks.event-log" json-input
+               {:dir    repo-root
+                :extra-env {"CCH_LOG_SYNC" "1"
+                            "XDG_DATA_HOME" (str (fs/parent (fs/parent db-path)))}}))
 
 (defn- query-last
   "Read the most recent events row as a map."

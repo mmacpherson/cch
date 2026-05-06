@@ -1,12 +1,10 @@
 (ns cch.db
-  "Persistent read-only SQLite connection for server-context readers.
-
-  Call open-db! once at server startup to hold a go-sqlite3 pod connection.
-  All callers (forecast, log queries, config-db reads) share that connection
-  via query. Falls back to shelling out to sqlite3 when no connection is open
-  (CLI context, tests). The hook hot path never calls this namespace."
-  (:require [babashka.process :as p]
-            [clojure.string :as str]))
+  "SQLite read access for server-context callers (forecast, log queries,
+  config-db reads). Uses next.jdbc against a read-only connection to
+  events.db. SQLite WAL mode means this read path coexists with the
+  cch.log writer subprocess without locking contention."
+  (:require [next.jdbc :as jdbc]
+            [next.jdbc.result-set :as rs]))
 
 (defn db-path
   "Returns the SQLite database path, respecting XDG_DATA_HOME."
@@ -15,38 +13,32 @@
            (str (System/getProperty "user.home") "/.local/share"))
        "/cch/events.db"))
 
-(def ^:private conn (atom nil))
+(defn- jdbc-spec
+  "Build a fresh spec on each call so tests that redef db-path see the
+   change. SQLite JDBC datasources are cheap to construct."
+  []
+  ;; mode=rwc lets the spec also work for a not-yet-created DB during
+  ;; test setup before any writer has run; the writer subprocess in
+  ;; cch.log remains the actual schema-creator at the application level.
+  {:dbtype "sqlite" :dbname (db-path)})
 
 (defn open-db!
-  "Load the go-sqlite3 pod and open a persistent read-only connection.
-   Call once at server startup."
-  []
-  (require '[babashka.pods :as pods])
-  ((resolve 'babashka.pods/load-pod) 'org.babashka/go-sqlite3 "0.3.13")
-  (require '[pod.babashka.go-sqlite3])
-  (let [get-conn (resolve 'pod.babashka.go-sqlite3/get-connection)
-        q        (resolve 'pod.babashka.go-sqlite3/query)
-        c        (get-conn (str "file:" (db-path) "?mode=ro"))]
-    (reset! conn c)
-    (q c "SELECT 1")))
+  "Reserved for future explicit init (e.g. when this becomes a pooled
+   datasource). Currently a no-op — datasources are created per query."
+  [])
 
 (defn close-db!
-  "Close the persistent connection. Call at server shutdown."
-  []
-  (when-let [c @conn]
-    (when-let [close-fn (resolve 'pod.babashka.go-sqlite3/close-connection)]
-      (close-fn c))
-    (reset! conn nil)))
+  "Symmetric counterpart to open-db!; also a no-op today."
+  [])
 
 (defn query
-  "Run a SQL query. Uses the persistent pod connection if available,
-   otherwise falls back to shelling out to sqlite3."
+  "Run a SQL query string and return rows as a vector of unqualified
+   keyword-keyed maps (matching the previous shell-out output shape so
+   callers don't change). Returns nil on empty results or when the DB
+   file is missing."
   [sql]
-  (if-let [c @conn]
-    (let [q (resolve 'pod.babashka.go-sqlite3/query)]
-      (q c sql))
-    (let [result (p/sh ["sqlite3" "-json" (db-path) sql])]
-      (when (and (zero? (:exit result))
-                 (not (str/blank? (:out result))))
-        (let [parse (requiring-resolve 'cheshire.core/parse-string)]
-          (parse (:out result) true))))))
+  (try
+    (let [rows (jdbc/execute! (jdbc/get-datasource (jdbc-spec)) [sql]
+                              {:builder-fn rs/as-unqualified-maps})]
+      (when (seq rows) (vec rows)))
+    (catch java.sql.SQLException _ nil)))

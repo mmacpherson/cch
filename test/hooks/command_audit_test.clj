@@ -4,7 +4,8 @@
             [cheshire.core :as json]
             [babashka.fs :as fs]
             [babashka.process :as p]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [test-support :as ts]))
 
 ;; Actual repo root for integration tests
 (def repo-root
@@ -57,9 +58,8 @@
 
 (deftest test-cli-integration-emits-top-level-decision-shape
   (let [run (fn [json-input]
-              (p/sh {:dir repo-root
-                     :in  json-input}
-                    "bb" "-cp" "src:resources" "-m" "hooks.command-audit"))]
+              (ts/run-hook "hooks.command-audit" json-input
+                           {:dir repo-root}))]
 
     (testing "no config present: command runs, no feedback"
       (let [input  (json/generate-string
@@ -84,9 +84,7 @@
                             :cwd             real-root
                             :tool_name       "Bash"
                             :tool_input      {:command "rm -rf /"}})
-                  result (p/sh {:dir real-root :in input}
-                               "bb" "-cp" (str repo-root "/src:" repo-root "/resources")
-                               "-m" "hooks.command-audit")
+                  result (ts/run-hook "hooks.command-audit" input {:dir real-root})
                   parsed (json/parse-string (:out result) true)]
               (is (zero? (:exit result)))
               ;; The whole point: top-level keys, not PreToolUse shape.
@@ -111,9 +109,7 @@
                             :cwd             real-root
                             :tool_name       "Bash"
                             :tool_input      {:command "ls"}})
-                  result (p/sh {:dir real-root :in input}
-                               "bb" "-cp" (str repo-root "/src:" repo-root "/resources")
-                               "-m" "hooks.command-audit")
+                  result (ts/run-hook "hooks.command-audit" input {:dir real-root})
                   parsed (json/parse-string (:out result) true)]
               (is (zero? (:exit result)))
               (is (= "block" (:decision parsed)))

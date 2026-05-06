@@ -4,7 +4,8 @@
             [cheshire.core :as json]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [hooks.scope-lock :as scope]))
+            [hooks.scope-lock :as scope]
+            [test-support :as ts]))
 
 ;; Use the actual repo root for integration tests
 (def repo-root
@@ -137,9 +138,8 @@
 
 (deftest test-cli-integration
   (let [run (fn [json-input]
-              (p/sh {:dir repo-root
-                     :in  json-input}
-                    "bb" "-cp" "src:resources" "-m" "hooks.scope-lock"))]
+              (ts/run-hook "hooks.scope-lock" json-input
+                           {:dir repo-root}))]
 
     (testing "allowed edit exits 0, no output"
       (let [input  (format "{\"cwd\":\"%s\",\"tool_input\":{\"file_path\":\"%s/src/foo.py\"}}"
@@ -177,9 +177,8 @@
             (fs/create-dirs (str real-root "/src"))
             (let [input  (format "{\"cwd\":\"%s\",\"tool_input\":{\"file_path\":\"%s/src/a.clj\"}}"
                                  real-root real-root)
-                  result (p/sh {:dir real-root :in input}
-                               "bb" "-cp" (str repo-root "/src:" repo-root "/resources")
-                               "-m" "hooks.scope-lock")
+                  result (ts/run-hook "hooks.scope-lock" input
+                                      {:dir real-root})
                   parsed (json/parse-string (:out result) true)]
               (is (zero? (:exit result)))
               (is (= "deny" (get-in parsed [:hookSpecificOutput :permissionDecision])))

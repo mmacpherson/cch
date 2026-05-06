@@ -10,7 +10,7 @@ lint:
 
 # Run test suite
 test:
-    bb test
+    clj -X:test
 
 # Run pre-commit hooks on all files
 lint-all:
@@ -38,7 +38,8 @@ doctor:
         fi
     }
     echo "Dependencies:"
-    check bb
+    check java
+    check clj
     check clj-kondo
     check sqlite3
     check pre-commit
@@ -50,7 +51,7 @@ doctor:
         count=$(sqlite3 "$db" "SELECT COUNT(*) FROM events;" 2>/dev/null || echo "?")
         printf "  ✓ %-14s %s events\n" "events.db" "$count"
     else
-        printf "  · %-14s not initialized (run: bb -cp src:resources -m cli.cch init)\n" "events.db"
+        printf "  · %-14s not initialized (run: clj -M:cli init)\n" "events.db"
     fi
     echo ""
     echo "Config:"
@@ -58,7 +59,7 @@ doctor:
     if [ -f "$cfg" ]; then
         printf "  ✓ %-14s %s\n" "global config" "$cfg"
     else
-        printf "  · %-14s not found (run: bb -cp src:resources -m cli.cch init)\n" "global config"
+        printf "  · %-14s not found (run: clj -M:cli init)\n" "global config"
     fi
     echo ""
     if $ok; then

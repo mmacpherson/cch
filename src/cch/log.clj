@@ -112,6 +112,9 @@
     (try (.put queue ::stop) (catch Exception _ nil))
     (try (.join thread 1000) (catch Exception _ nil))
     (try (.close ^java.io.Closeable (:in proc)) (catch Exception _ nil))
+    ;; Wait for sqlite3 to exit so its WAL/SHM cleanup completes before
+    ;; callers (e.g. tests) try to delete the DB directory.
+    (try (deref (:exit proc) 1000 nil) (catch Exception _ nil))
     (reset! writer-state nil)))
 
 ;; --- log-event! ---

@@ -28,14 +28,14 @@ repos:
         language: system
         files: '\.(clj|cljc|edn)$'
 
-      - id: bb-test
-        name: bb test
-        entry: bb test
+      - id: clj-test
+        name: clj test
+        entry: clj -X:test
         language: system
         pass_filenames: false
-        files: '\.(clj|edn)$'
+        files: '\.(clj|cljc|edn)$'
 
 # CI configuration
 ci:
-  skip: [bb-test, clj-kondo]
+  skip: [clj-test, clj-kondo]
   autoupdate_schedule: monthly
