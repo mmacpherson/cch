@@ -8,9 +8,7 @@
     options    — JSON blob, hook-specific (nullable)
 
   Writes (upsert!, delete!) use the sqlite3 CLI. Reads (list-all,
-  list-for-scope, get-row) use cch.db/query, which shares the
-  persistent pod connection in server context and falls back to the
-  sqlite3 CLI otherwise.
+  list-for-scope, get-row) go through cch.db/query (next.jdbc).
 
   Repo scope format: 'repo:<abs-path>'. The absolute path must already
   be canonicalized by the caller (fs/canonicalize) so equality checks
@@ -19,7 +17,8 @@
             [cch.db :as db]
             [cch.log :as log]
             [cheshire.core :as json]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [honey.sql :as sql]))
 
 (def ^:const global-scope "global")
 
@@ -80,29 +79,26 @@
 (defn list-all
   "All rows, ordered by hook then scope. Returns a seq of maps."
   []
-  (let [fmt (requiring-resolve 'honey.sql/format)]
-    (some->> (db/query (first (fmt {:select cols :from [:hook-config]
-                                    :order-by [[:hook-name :asc] [:scope :asc]]}
-                                   {:inline true})))
-             (map parse-row))))
+  (some->> (db/query (first (sql/format {:select cols :from [:hook-config]
+                                         :order-by [[:hook-name :asc] [:scope :asc]]}
+                                        {:inline true})))
+           (map parse-row)))
 
 (defn list-for-scope
   "Rows belonging to one scope."
   [scope]
-  (let [fmt (requiring-resolve 'honey.sql/format)]
-    (some->> (db/query (first (fmt {:select cols :from [:hook-config]
-                                    :where [:= :scope scope]
-                                    :order-by [[:hook-name :asc]]}
-                                   {:inline true})))
-             (map parse-row))))
+  (some->> (db/query (first (sql/format {:select cols :from [:hook-config]
+                                         :where [:= :scope scope]
+                                         :order-by [[:hook-name :asc]]}
+                                        {:inline true})))
+           (map parse-row)))
 
 (defn get-row
   "Look up a single row. Returns nil if absent."
   [hook-name scope]
-  (let [fmt (requiring-resolve 'honey.sql/format)]
-    (some-> (db/query (first (fmt {:select cols :from [:hook-config]
-                                   :where [:and [:= :hook-name hook-name] [:= :scope scope]]
-                                   :limit 1}
-                                  {:inline true})))
-            first
-            parse-row)))
+  (some-> (db/query (first (sql/format {:select cols :from [:hook-config]
+                                        :where [:and [:= :hook-name hook-name] [:= :scope scope]]
+                                        :limit 1}
+                                       {:inline true})))
+          first
+          parse-row))

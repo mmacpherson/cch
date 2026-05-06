@@ -11,10 +11,10 @@
        enabled on the writer's connection so the dashboard's read
        queries don't block writes.
 
-    2. **Per-call fallback.** When no writer is registered (legacy
-       `bb -m hooks.X` subprocess invocation, tests without setup),
-       log-event! spawns a fresh `sqlite3` per insert via `p/process`.
-       Measured at p50 ~3ms / p99 ~8ms — same as before.
+    2. **Per-call fallback.** When no writer is registered (subprocess
+       invocations of hooks, tests without setup), log-event! spawns a
+       fresh `sqlite3` per insert via `p/process`. Measured at p50 ~3ms
+       / p99 ~8ms — same as before.
 
   CCH_LOG_SYNC=1 forces synchronous `p/sh` regardless of the writer,
   so tests can assert on rows immediately after a log call."
@@ -22,7 +22,8 @@
             [babashka.fs :as fs]
             [cch.db :as db]
             [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [honey.sql :as sql]))
 
 
 (defn ensure-db!
@@ -176,11 +177,10 @@
   Done as a SQL DISTINCT — avoids pulling the full table into memory
   for the dashboard's Repo dropdown. Returns a seq of strings."
   []
-  (let [fmt (requiring-resolve 'honey.sql/format)]
-    (->> (db/query (first (fmt {:select-distinct [:cwd] :from [:events]
-                                :where [:!= :cwd nil]}
-                               {:inline true})))
-         (keep :cwd))))
+  (->> (db/query (first (sql/format {:select-distinct [:cwd] :from [:events]
+                                     :where [:!= :cwd nil]}
+                                    {:inline true})))
+       (keep :cwd)))
 
 (defn recent-sessions
   "Return up to `limit` most-recently-active session IDs as
@@ -194,9 +194,8 @@
                    :order-by [[:timestamp :desc]]
                    :limit (int limit)}
             (not (str/blank? cwd-prefix))
-            (assoc :where [:like :cwd (str cwd-prefix "%")]))
-        fmt (requiring-resolve 'honey.sql/format)]
-    (->> (db/query (first (fmt q {:inline true})))
+            (assoc :where [:like :cwd (str cwd-prefix "%")]))]
+    (->> (db/query (first (sql/format q {:inline true})))
          (filter :session_id))))
 
 (defn query-events
@@ -214,9 +213,8 @@
                session    (update :where (fnil conj [:and]) [:= :session-id session])
                decision   (update :where (fnil conj [:and]) [:= :decision decision])
                since      (update :where (fnil conj [:and]) [:> :timestamp since])
-               cwd-prefix (update :where (fnil conj [:and]) [:like :cwd (str cwd-prefix "%")]))
-        fmt (requiring-resolve 'honey.sql/format)]
-    (db/query (first (fmt q {:inline true})))))
+               cwd-prefix (update :where (fnil conj [:and]) [:like :cwd (str cwd-prefix "%")]))]
+    (db/query (first (sql/format q {:inline true})))))
 
 ;; --- Context snapshots ---
 
@@ -246,12 +244,11 @@
 (defn latest-context-snapshot
   "Most recent context snapshot for a session. Returns a map or nil."
   [session-id]
-  (let [fmt (requiring-resolve 'honey.sql/format)]
-    (first
-      (db/query
-        (first (fmt {:select   [:used-pct :current-tokens :window-size :model-id :timestamp]
-                     :from     [:context-snapshots]
-                     :where    [:= :session-id session-id]
-                     :order-by [[:id :desc]]
-                     :limit    1}
-                    {:inline true}))))))
+  (first
+    (db/query
+      (first (sql/format {:select   [:used-pct :current-tokens :window-size :model-id :timestamp]
+                          :from     [:context-snapshots]
+                          :where    [:= :session-id session-id]
+                          :order-by [[:id :desc]]
+                          :limit    1}
+                         {:inline true})))))
