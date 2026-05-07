@@ -4,15 +4,18 @@
 <dict>
   <key>Label</key>
   <string>com.cch.server</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{{PATH}}</string>
+  </dict>
   <key>WorkingDirectory</key>
   <string>{{HOME}}/.local/share/cch/repo</string>
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/env</string>
-    <string>bb</string>
-    <string>-m</string>
-    <string>cli.cch</string>
-    <string>serve</string>
+    <string>clj</string>
+    <string>-M:server</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

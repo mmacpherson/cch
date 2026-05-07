@@ -36,6 +36,25 @@
       (is (str/includes? rendered "<key>RunAtLoad</key>")
           "plist preserves the KeepAlive/RunAtLoad keys"))))
 
+(deftest macos-template-runs-clj-server
+  (testing "launchd plist invokes `clj -M:server`, matching the systemd unit and the bash shim"
+    (let [rendered (#'svc/render-template "service/com.cch.server.plist.template")]
+      (is (str/includes? rendered "<string>clj</string>")
+          "uses clj — full JVM Clojure is required (bb can't load nrepl/http-kit)")
+      (is (str/includes? rendered "<string>-M:server</string>")
+          "uses the :server alias from deps.edn"))))
+
+(deftest macos-template-bakes-in-path-at-install-time
+  (testing "launchd plist — {{PATH}} is replaced with the install-time PATH so `clj` and the JDK are findable"
+    (let [rendered (#'svc/render-template "service/com.cch.server.plist.template")]
+      (is (not (str/includes? rendered "{{PATH}}"))
+          "no unresolved {{PATH}} tokens remain")
+      (is (str/includes? rendered "<key>EnvironmentVariables</key>")
+          "EnvironmentVariables block is present so launchd doesn't strip PATH")
+      (when-let [path (System/getenv "PATH")]
+        (is (str/includes? rendered path)
+            "the current PATH is baked into the rendered plist")))))
+
 ;; --- OS classification ---
 
 (deftest host-os-returns-a-known-keyword

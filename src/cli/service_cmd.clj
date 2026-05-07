@@ -64,14 +64,19 @@
 ;; --- Template rendering ---
 
 (defn- render-template
-  "Read the classpath resource and substitute {{HOME}} with the user's
-  home dir. systemd uses its own %h specifier natively so only the
-  launchd template actually uses {{HOME}}, but we run the substitution
-  unconditionally — it's harmless on the systemd template."
+  "Read the classpath resource and substitute {{HOME}} and {{PATH}}.
+  systemd uses its own %h specifier natively so only the launchd
+  template actually uses {{HOME}}; the substitution is harmless on
+  the systemd template either way.
+
+  {{PATH}} captures the user's current PATH at install time, which
+  launchd otherwise scrubs down to a minimal default that doesn't
+  include Homebrew prefixes (so `clj` and the JDK aren't findable)."
   [resource-path]
   (-> (io/resource resource-path)
       slurp
-      (str/replace "{{HOME}}" (home-dir))))
+      (str/replace "{{HOME}}" (home-dir))
+      (str/replace "{{PATH}}" (or (System/getenv "PATH") ""))))
 
 ;; --- Preconditions ---
 
