@@ -206,7 +206,7 @@
                         :window-start window-start :last-pct last-pct
                         :historical-finals hist-finals}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
-          projs        (proj/all-projections obs-pairs window-info)
+          projection   (proj/rate-bayes-projection obs-pairs window-info)
           rs           (proj/rate-samples obs-pairs)
           recent-rate  (when (>= (count rs) 2)
                          (let [recent (take-last 3 rs)]
@@ -219,7 +219,7 @@
        :now             now
        :last-pct        last-pct
        :samples         (or (raw-sample-count (epoch->iso window-start) :seven-day) 0)
-       :projections     (or projs [])
+       :projection      projection
        :rate-phr        recent-rate})))
 
 ;; Cache current-window for 30s — data arrives at most once per minute

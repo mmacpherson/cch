@@ -1,16 +1,14 @@
 (ns cch.usage
   "Server-rendered 7-day rate-limit window page.
 
-  Renders observed used_percentage as an SVG chart, plus one forward
-  projection line per method from cch.projections. The Bayesian
-  credible interval is shown as a band; other methods are shown as
-  lines only (their bands are tabulated in the right-hand stats panel).
+  Renders observed used_percentage as an SVG chart, plus a single
+  Bayesian forward projection (mean line + 90% credible interval band)
+  from cch.projections.
 
   Pure functions of the data bundle from cch.forecast/current-window —
   easy to test without a server."
   (:require [cch.forecast :as forecast]
-            [cch.projections :as proj]
-            [clojure.string :as str])
+            [cch.projections :as proj])
   (:import (java.time Instant ZoneId)
            (java.time.format DateTimeFormatter)))
 
@@ -63,24 +61,10 @@
                 ["Z"])]
     (apply str (interpose " " body))))
 
-;; --- projection method styling ---
+;; --- projection styling ---
 
-(def ^:private method-style
-  "Color + display order per projection method. Methods not in this
-   map are still rendered (with a default gray) but lose stable
-   ordering across page loads."
-  {:rate-freq   {:color "#2563eb" :order 0}   ; rate frequentist — blue
-   :rate-bayes  {:color "#f59e0b" :order 1}   ; rate Bayesian — orange
-   :gamma-freq  {:color "#8b5cf6" :order 2}   ; Gamma frequentist — purple
-   :gamma-bayes {:color "#ec4899" :order 3}   ; Gamma Bayesian — pink
-   :gp-freq     {:color "#14b8a6" :order 4}   ; Gamma process frequentist — teal
-   :gp-bayes    {:color "#f43f5e" :order 5}}) ; Gamma process Bayesian — rose
+(def ^:private projection-color "#f59e0b") ; orange
 
-(defn- method-color [m]
-  (get-in method-style [m :color] "#6b7280"))
-
-(defn- ordered-projections [projections]
-  (sort-by #(get-in method-style [(:method %) :order] 99) projections))
 
 ;; --- chart svg ---
 
@@ -92,7 +76,7 @@
     [:p.has-text-grey
      "Not enough rate-limit data yet to plot. The page populates as the "
      "statusLine reports usage."]
-    (let [{:keys [observed resets-at window-start now last-pct projections]} data
+    (let [{:keys [observed resets-at window-start now last-pct projection]} data
           rect (plot-area)
           y-top (y-max data)
           sx   (scale-x data rect)
@@ -178,39 +162,23 @@
                   :font-size 10
                   :fill "var(--bulma-text-weak)"}
            "now"]])
-       ;; --- per-method bands and projection lines, clipped to plot area ---
-       [:g {:clip-path "url(#plot-clip)"}
-        ;; bands first so lines render on top of them
-        (for [{:keys [method band]} (ordered-projections projections)
-              :when band]
-          [:path {:d (band-path (line-for (:hi band))
-                                (line-for (:lo band)))
-                  :fill (rgba (method-color method) 0.22)
-                  :stroke "none"
-                  :class "band-region"
-                  :data-method (name method)}])
-        ;; For each method: a fat transparent hit-track (continuous, ignores
-        ;; dashes) under the visible dashed line. The track is what the
-        ;; pointer interacts with — so the gaps in the dashed line don't
-        ;; create dead zones for hover.
-        (for [{:keys [method proj]} (ordered-projections projections)
-              :let [pts (points-attr (line-for proj))
-                    mname (name method)]]
-          [:g {:class "proj-group" :data-method mname}
-           [:polyline {:points pts
-                       :fill "none"
-                       :stroke "transparent"
-                       :stroke-width 14
-                       :class "proj-hit"
-                       :data-method mname}]
-           [:polyline {:points pts
-                       :fill "none"
-                       :stroke (method-color method)
-                       :stroke-width 2.7
-                       :stroke-opacity 0.9
-                       :stroke-dasharray "5 4"
-                       :class (str "proj-line proj-" mname)
-                       :data-method mname}]])]
+       ;; --- projection band + line, clipped to plot area ---
+       (when projection
+         (let [{:keys [proj band]} projection]
+           [:g {:clip-path "url(#plot-clip)"}
+            (when band
+              [:path {:d (band-path (line-for (:hi band))
+                                    (line-for (:lo band)))
+                      :fill (rgba projection-color 0.18)
+                      :stroke "none"
+                      :class "band-region"}])
+            [:polyline {:points (points-attr (line-for proj))
+                        :fill "none"
+                        :stroke projection-color
+                        :stroke-width 2.7
+                        :stroke-opacity 0.9
+                        :stroke-dasharray "5 4"
+                        :class "proj-line"}]]))
        ;; --- observed: smoothed line + small raw dots ---
        (when (seq smoothed)
          [:polyline {:points (points-attr smoothed)
@@ -226,26 +194,23 @@
                    :class "observed-point"}])])))
 
 (defn legend
-  "Inline legend. Hovering a method entry isolates that method on the
-   chart (others fade) via the CSS rules in page-css."
-  [data]
+  "Inline legend: observed series + projected usage swatches."
+  [_data]
   [:div.legend
    [:span.legend-item
     [:span.swatch.observed] " observed"]
-   (for [{:keys [method name]} (ordered-projections (:projections data))]
-     [:span.legend-item {:data-method (clojure.core/name method)}
-      [:span.swatch {:style (str "background:" (method-color method))}]
-      " " name])
-   ])
+   [:span.legend-item
+    [:span.swatch {:style (str "background:" projection-color)}]
+    " projected (90% CI)"]])
 
 (defn- fmt-band [{:keys [lo hi]}]
   (when (and lo hi (not= lo hi))
     (format " (%.0f%% — %.0f%%)" (double lo) (double hi))))
 
 (defn summary-stats
-  "Right-rail readout. Lists each method's projected end-of-window
-   percent, with confidence band when the method provides one."
-  [{:keys [last-pct projections resets-at now samples rate-phr]}]
+  "Right-rail readout: current pct, time remaining, sample count, burn
+   rate, and projected end-of-window pct with credible interval."
+  [{:keys [last-pct projection resets-at now samples rate-phr]}]
   (let [hours-left (max 0.0 (/ (- resets-at now) 3600.0))]
     [:div.usage-stats
      [:div.stat [:div.k "current"]   [:div.v (format "%.0f%%" (double last-pct))]]
@@ -253,64 +218,29 @@
      [:div.stat [:div.k "samples"]   [:div.v (str samples)]]
      (when rate-phr
        [:div.stat [:div.k "rate"] [:div.v (format "%.1f %%/hr" (double rate-phr))]])
-     (when (seq projections)
-       [:div.method-projections
-        [:div.k "projected at reset"]
-        (for [{:keys [method name proj band]} (ordered-projections projections)
-              :let [short-name (str/trim (clojure.string/replace name #"\s*\(.*\)\s*$" ""))]]
-          [:div.method-row {:data-method (clojure.core/name method)}
-           [:span.swatch {:style (str "background:" (method-color method))}]
-           [:span.method-name short-name]
-           [:span.method-proj (format "%.0f%%" (double proj))
-            (when-let [b (fmt-band band)] [:span.aux b])]])])]))
+     (when projection
+       (let [{:keys [proj band]} projection]
+         [:div.stat
+          [:div.k "projected at reset"]
+          [:div.v (format "%.0f%%" (double proj))
+           (when-let [b (fmt-band band)] [:span.aux b])]]))]))
 
 (def page-css
   "div.usage-grid { display: grid; grid-template-columns: 1fr 280px; gap: 1.5em; align-items: start; }
    div.usage-chart-block { background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 6px; padding: 0.75em; }
    svg.usage-chart .ref-100 { stroke: #dc2626; stroke-dasharray: none; }
-   /* Defaults: bands hidden, lines normal width, transitions on.
-      Hit tracks are wide + transparent — they catch the pointer along
-      the line including the gaps between dashes. The visible line on
-      top is non-interactive (pointer-events: none) so all hovers go
-      through the hit track. */
-   svg.usage-chart .proj-line { transition: stroke-width 0.18s ease; pointer-events: none; }
-   svg.usage-chart .proj-hit { pointer-events: stroke; cursor: pointer; }
-   svg.usage-chart .band-region { opacity: 0; transition: opacity 0.18s ease; pointer-events: none; }
    /* Legend layout */
    div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.6em; margin-bottom: 0.6em; display: flex; flex-wrap: wrap; gap: 0.5em 1em; line-height: 1.6; justify-content: center; }
    svg.rate-chart { margin-top: 1.5em; border-top: 1px solid var(--bulma-border); padding-top: 0.5em; }
-   div.legend .legend-item { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.05em 0.3em; border-radius: 3px; cursor: default; }
-   div.legend .legend-item[data-method]:hover { background: var(--bulma-scheme-main-bis); color: var(--bulma-text); }
+   div.legend .legend-item { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.05em 0.3em; border-radius: 3px; }
    div.legend .swatch { display: inline-block; width: 1.2em; height: 0.5em; border-radius: 1px; }
    div.legend .swatch.observed { background: #059669; }
-   div.legend .swatch.ref100 { background: #dc2626; }
-   /* Hover-from-anywhere: legend item, the projection line itself, or the
-      side-panel method-row. Scope at .usage-grid so :has() reaches the
-      side panel. Each method gets two rules: lift its band, fatten its line. */
-   div.usage-grid:has([data-method=\"linear\"]:hover) svg.usage-chart .band-region[data-method=\"linear\"],
-   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .band-region[data-method=\"bayes\"],
-   div.usage-grid:has([data-method=\"gamma-freq\"]:hover) svg.usage-chart .band-region[data-method=\"gamma-freq\"],
-   div.usage-grid:has([data-method=\"gamma-bayes\"]:hover) svg.usage-chart .band-region[data-method=\"gamma-bayes\"],
-   div.usage-grid:has([data-method=\"gp-freq\"]:hover) svg.usage-chart .band-region[data-method=\"gp-freq\"],
-   div.usage-grid:has([data-method=\"gp-bayes\"]:hover) svg.usage-chart .band-region[data-method=\"gp-bayes\"] { opacity: 1; }
-   div.usage-grid:has([data-method=\"linear\"]:hover) svg.usage-chart .proj-line[data-method=\"linear\"],
-   div.usage-grid:has([data-method=\"bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"bayes\"],
-   div.usage-grid:has([data-method=\"gamma-freq\"]:hover) svg.usage-chart .proj-line[data-method=\"gamma-freq\"],
-   div.usage-grid:has([data-method=\"gamma-bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"gamma-bayes\"],
-   div.usage-grid:has([data-method=\"gp-freq\"]:hover) svg.usage-chart .proj-line[data-method=\"gp-freq\"],
-   div.usage-grid:has([data-method=\"gp-bayes\"]:hover) svg.usage-chart .proj-line[data-method=\"gp-bayes\"] { stroke-width: 3; }
    /* Side panel */
    div.usage-stats { display: flex; flex-direction: column; gap: 0.6em; font-family: var(--bulma-family-primary); }
    div.usage-stats .stat { padding: 0.5em 0.75em; background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 4px; }
    div.usage-stats .k { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.05em; color: var(--bulma-text-weak); }
    div.usage-stats .v { font-family: var(--bulma-family-code); font-size: 1.05em; }
-   div.usage-stats .v .aux { font-size: 0.75em; color: var(--bulma-text-weak); margin-left: 0.4em; }
-   div.method-projections { padding: 0.5em 0.75em; background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 4px; display: flex; flex-direction: column; gap: 0.35em; }
-   div.method-row { display: grid; grid-template-columns: 0.9em 1fr auto; gap: 0.4em; align-items: center; font-family: var(--bulma-family-code); font-size: 0.85em; padding: 0.1em 0.25em; border-radius: 3px; cursor: default; transition: background 0.18s ease; }
-   div.method-row[data-method]:hover { background: var(--bulma-scheme-main-bis); }
-   div.method-row .swatch { width: 0.9em; height: 0.5em; border-radius: 1px; }
-   div.method-row .method-name { font-family: var(--bulma-family-primary); font-size: 0.8em; color: var(--bulma-text-weak); }
-   div.method-row .method-proj .aux { color: var(--bulma-text-weak); font-size: 0.9em; }")
+   div.usage-stats .v .aux { font-size: 0.75em; color: var(--bulma-text-weak); margin-left: 0.4em; }")
 
 (def ^:private rate-chart-h 280)
 

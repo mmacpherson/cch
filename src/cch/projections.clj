@@ -726,16 +726,3 @@
            :band   {:lo (max last-pct lo) :hi (max last-pct hi)}})))))
 
 ;; --- aggregation ---
-
-(defn all-projections
-  "Compute every projection method on the same data. Returns a vector
-  of method maps (in display order), filtering out methods that lacked
-  enough data."
-  [observed window-info]
-  (->> [(rate-freq-projection observed window-info)
-        (rate-bayes-projection observed window-info)
-        (gamma-freq-projection observed window-info)
-        (gamma-bayes-projection observed window-info)
-        (gp-freq-projection observed window-info)
-        (gp-bayes-projection observed window-info)]
-       (filterv some?)))

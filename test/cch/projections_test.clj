@@ -245,23 +245,3 @@
           thinned (p/thin-by-time obs 900)]
       (is (= 3 (count thinned)))
       (is (= [0 901 1801] (mapv :ts thinned))))))
-
-;; --- aggregator ---
-
-(deftest all-projections-filters-empty-methods
-  (testing "with too few rate samples and zero pct, only default-prior methods fire"
-    (let [results (p/all-projections [(snap 0 0)]
-                                     {:window-start 0 :now 0 :resets-at 86400 :last-pct 0})
-          methods (set (map :method results))]
-      (is (not (contains? methods :rate-freq)))
-      (is (not (contains? methods :rate-bayes)))
-      (is (not (contains? methods :gamma-freq)) "gamma-freq needs pos? last-pct"))))
-
-(deftest all-projections-includes-both-methods-on-rich-data
-  (let [obs (linear-samples 12 0 0.6)
-        win (window-info obs 48)
-        results (p/all-projections obs win)
-        methods (set (map :method results))]
-    (is (contains? methods :rate-freq))
-    (is (contains? methods :rate-bayes))
-    (is (>= (count methods) 2) "at least rate-freq and rate-bayes")))
