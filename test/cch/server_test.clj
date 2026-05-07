@@ -24,6 +24,27 @@
   (with-open [s (java.net.ServerSocket. 0)]
     (.getLocalPort s)))
 
+(defn- delete-tree-tolerantly
+  "fs/delete-tree races with SQLite WAL cleanup: SQLite can unlink
+   events.db-wal between our directory listing and our unlink call,
+   producing NoSuchFileException on a file that's already gone (which
+   is the desired end state). Walk the tree ourselves and treat
+   already-gone as success."
+  [dir]
+  (let [path (java.nio.file.Paths/get dir (into-array String []))]
+    (when (java.nio.file.Files/exists path (into-array java.nio.file.LinkOption []))
+      (java.nio.file.Files/walkFileTree
+        path
+        (proxy [java.nio.file.SimpleFileVisitor] []
+          (visitFile [file _attrs]
+            (try (java.nio.file.Files/delete file)
+                 (catch java.nio.file.NoSuchFileException _ nil))
+            java.nio.file.FileVisitResult/CONTINUE)
+          (postVisitDirectory [d _exc]
+            (try (java.nio.file.Files/delete d)
+                 (catch java.nio.file.NoSuchFileException _ nil))
+            java.nio.file.FileVisitResult/CONTINUE))))))
+
 (defn with-server [f]
   (let [tmp-dir (str (fs/create-temp-dir {:prefix "server-test-db-"}))
         db      (str tmp-dir "/events.db")
@@ -39,7 +60,7 @@
                   *tmp-db* db]
           (try (f) (finally
                      (stop :timeout 100)
-                     (fs/delete-tree tmp-dir))))))))
+                     (delete-tree-tolerantly tmp-dir))))))))
 
 (use-fixtures :once with-server)
 

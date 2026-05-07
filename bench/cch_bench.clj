@@ -159,6 +159,25 @@
   (with-open [s (ServerSocket. 0)]
     (.getLocalPort s)))
 
+(defn- delete-tree-tolerantly
+  "Avoid races with SQLite WAL cleanup that can unlink -wal between our
+   directory listing and our delete call (NoSuchFileException on a file
+   that's already gone is the desired end state)."
+  [dir]
+  (let [path (java.nio.file.Paths/get (str dir) (into-array String []))]
+    (when (java.nio.file.Files/exists path (into-array java.nio.file.LinkOption []))
+      (java.nio.file.Files/walkFileTree
+        path
+        (proxy [java.nio.file.SimpleFileVisitor] []
+          (visitFile [file _attrs]
+            (try (java.nio.file.Files/delete file)
+                 (catch java.nio.file.NoSuchFileException _ nil))
+            java.nio.file.FileVisitResult/CONTINUE)
+          (postVisitDirectory [d _exc]
+            (try (java.nio.file.Files/delete d)
+                 (catch java.nio.file.NoSuchFileException _ nil))
+            java.nio.file.FileVisitResult/CONTINUE))))))
+
 (defn- with-ephemeral-server
   "Run f against a fresh in-process dispatcher backed by a tmp DB on a
   free port. Tears it all down on the way out so the bench never touches
@@ -176,7 +195,7 @@
         (finally
           (stop)
           (alter-var-root #'db/db-path (constantly original))
-          (fs/delete-tree tmp-dir))))))
+          (delete-tree-tolerantly tmp-dir))))))
 
 (defn- run-batch [url start end]
   (let [t0   (System/nanoTime)
