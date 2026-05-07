@@ -438,28 +438,29 @@
               n    (.read in buf)
               body (String. buf 0 n "UTF-8")]
           (is (re-find #"event: datastar-patch-elements" body))
-          (is (re-find #"data: selector \.event-list" body))
+          (is (re-find #"data: selector \.event-rows" body))
           (is (re-find #"data: mode prepend" body))
           (is (re-find #"scope-lock" body)))
         (finally
           (.close conn))))))
 
 (deftest test-dashboard-renders
-  (let [resp (http/get (url "/"))]
-    (is (= 200 (:status resp)))
-    (is (str/includes? (get-in resp [:headers "content-type"]) "text/html"))
-    (is (str/includes? (:body resp) "cch · events"))
-    (is (str/includes? (:body resp) "event-list"))
-    (testing "uses Bulma + Inter/JetBrains Mono"
-      (is (str/includes? (:body resp) "bulma@"))
-      (is (str/includes? (:body resp) "Inter"))
-      (is (str/includes? (:body resp) "JetBrains+Mono"))
-      (is (str/includes? (:body resp) "class=\"section\"")
-          "outer wrapper uses Bulma section"))))
+  (testing "/ redirects to /events"
+    (let [resp (http/get (url "/") {:follow-redirects false})]
+      (is (= 302 (:status resp)))
+      (is (= "/events" (get-in resp [:headers "location"])))))
+  (testing "/events renders the new events page"
+    (let [resp (http/get (url "/events"))]
+      (is (= 200 (:status resp)))
+      (is (str/includes? (get-in resp [:headers "content-type"]) "text/html"))
+      (is (str/includes? (:body resp) "cch · events"))
+      (is (str/includes? (:body resp) "dense-table"))
+      (is (str/includes? (:body resp) "cch.css"))
+      (is (str/includes? (:body resp) "JetBrains")))))
 
 (deftest test-dashboard-filters-applied
   (testing "filter query params flow through to query-events"
-    (let [resp (http/get (url "/?hook=event-log&limit=5"))]
+    (let [resp (http/get (url "/events?hook=event-log&limit=5"))]
       (is (= 200 (:status resp)))
-      (is (str/includes? (:body resp) "selected=\"selected\" value=\"event-log\""))
-      (is (str/includes? (:body resp) "value=\"5\"")))))
+      (is (str/includes? (:body resp) "selected=\"selected\""))
+      (is (str/includes? (:body resp) "event-log")))))

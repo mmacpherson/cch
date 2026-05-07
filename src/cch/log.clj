@@ -200,21 +200,30 @@
 
 (defn query-events
   "Query recent events. Returns a seq of maps.
-  opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix"
-  [& {:keys [limit hook event session decision since cwd-prefix]}]
+  opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix, :q (text search)"
+  [& {:keys [limit hook event session decision since cwd-prefix q]}]
   (let [cols [:id :timestamp :session-id :hook-name :event-type
               :tool-name :file-path :cwd :decision :reason :elapsed-ms :extra]
-        q    (cond-> {:select   cols
+        qry  (cond-> {:select   cols
                       :from     [:events]
                       :order-by [[:id :desc]]
                       :limit    (or limit 20)}
                hook       (update :where (fnil conj [:and]) [:= :hook-name hook])
                event      (update :where (fnil conj [:and]) [:= :event-type event])
                session    (update :where (fnil conj [:and]) [:= :session-id session])
-               decision   (update :where (fnil conj [:and]) [:= :decision decision])
+               (= decision "observe")
+                          (update :where (fnil conj [:and]) [:is :decision nil])
+               (and decision (not= decision "observe"))
+                          (update :where (fnil conj [:and]) [:= :decision decision])
                since      (update :where (fnil conj [:and]) [:> :timestamp since])
-               cwd-prefix (update :where (fnil conj [:and]) [:like :cwd (str cwd-prefix "%")]))]
-    (db/query (first (sql/format q {:inline true})))))
+               cwd-prefix (update :where (fnil conj [:and]) [:like :cwd (str cwd-prefix "%")])
+               (not (str/blank? q))
+               (update :where (fnil conj [:and])
+                       [:or
+                        [:like :reason   (str "%" q "%")]
+                        [:like :file-path (str "%" q "%")]
+                        [:like :extra    (str "%" q "%")]]))]
+    (db/query (first (sql/format qry {:inline true})))))
 
 ;; --- Context snapshots ---
 

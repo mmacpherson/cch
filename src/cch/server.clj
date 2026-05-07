@@ -27,9 +27,11 @@
             [cch.forecast :as forecast]
             [cch.log :as log]
             [cch.protocol :as proto]
+            [cch.stats :as stats]
             [cch.usage :as usage]
             [cheshire.core :as json]
             [cli.registry :as registry]
+            [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [hiccup2.core :as hic]
@@ -197,14 +199,20 @@
   "Distinct cwds from events → worktree roots → filtered → [value label] pairs.
   Value is the worktree root (used by the cwd-prefix filter). Drops
   ephemeral tmp paths AND paths that aren't inside any git repo so the
-  Repo dropdown only lists actual repos."
+  Repo dropdown only lists actual repos.
+  Parallelizes git-meta lookups to avoid serial subprocess cost on cold cache."
   []
-  (let [cwds  (distinct-cwds)
-        roots (->> cwds
-                   (filter #(:in-repo? (git-meta %)))
-                   (map worktree-root-of)
-                   (remove ephemeral-path?)
-                   (into (sorted-set)))]
+  (let [cwds    (distinct-cwds)
+        metas   (->> cwds
+                     (remove ephemeral-path?)
+                     (pmap (fn [c] [c (git-meta c)]))
+                     (doall))
+        roots   (->> metas
+                     (filter (fn [[_ m]] (:in-repo? m)))
+                     (map (fn [[_ m]] (:root m)))
+                     (remove nil?)
+                     (remove ephemeral-path?)
+                     (into (sorted-set)))]
     (map (fn [r] [r (repo-dropdown-label r)]) roots)))
 
 (defn- select-with-options
@@ -229,6 +237,10 @@
    "command-audit" {:color   "#059669"
                     :tooltip "Bash audit log — records every command; flags configured patterns"}})
 
+(declare dashboard-css)
+(declare encode-query)
+(declare parse-query)
+
 (def ^:private nav-hook-svg
   "Inline version of the favicon glyph, sized for the nav brand. Uses
   currentColor so CSS in .nav-icon controls its color."
@@ -242,30 +254,87 @@
    [:circle {:cx 19 :cy 10 :r 2}]])
 
 (defn- nav-bar
-  "Primary nav at the top of every page. `active` is :events, :hooks, or
-  :usage — the active tab renders as a non-link label; others render as
-  ordinary links."
-  [active]
-  (let [tab (fn [k label href]
-              [:li {:class (when (= active k) "is-active")}
-               (if (= active k) [:a label] [:a {:href href} label])])]
-    [:div.nav-wrap
-     [:div.nav-title
-      [:span.nav-icon nav-hook-svg]
-      [:h1.nav-brand "cch"]]
-     [:div.tabs
-      [:ul
-       (tab :events "events" "/")
-       (tab :hooks  "hooks"  "/hooks")
-       (tab :usage  "usage"  "/usage")]]]))
+  "Primary nav at the top of every page. `active` is :overview, :events,
+  :hooks, or :usage — the active tab renders as a non-link label; others
+  render as ordinary links.
+  `css-regime` controls markup shape: `:bulma` emits the legacy Bulma-tabs
+  structure; `:custom` emits the new flat `.nav-tab` spans."
+  ([active] (nav-bar active :bulma))
+  ([active css-regime]
+   (if (= css-regime :custom)
+     (let [tab (fn [k label href]
+                 (if (= active k)
+                   [:span.nav-tab.active label]
+                   [:a.nav-tab {:href href} label]))]
+       [:nav.nav-wrap
+        [:a.nav-brand {:href "/"}
+         [:span.nav-icon nav-hook-svg]
+         "cch"]
+        [:div.nav-tabs
+         (tab :overview "overview" "/")
+         (tab :events   "events"   "/events")
+         (tab :hooks    "hooks"    "/hooks")
+         (tab :usage    "usage"    "/usage")]
+        [:div.nav-status
+         [:span.dot-online]
+         (str "dispatcher · :8888")]])
+     ;; Legacy Bulma structure
+     (let [tab (fn [k label href]
+                 [:li {:class (when (= active k) "is-active")}
+                  (if (= active k) [:a label] [:a {:href href} label])])]
+       [:div.nav-wrap
+        [:div.nav-title
+         [:span.nav-icon nav-hook-svg]
+         [:h1.nav-brand "cch"]]
+        [:div.tabs
+         [:ul
+          (tab :events "events" "/")
+          (tab :hooks  "hooks"  "/hooks")
+          (tab :usage  "usage"  "/usage")]]]))))
+
+(defn- page-head
+  "Shared <head> block. `css-regime` is :bulma (legacy) or :custom (new cch.css)."
+  [{:keys [title css-regime]
+    :or   {css-regime :bulma}}]
+  [:head
+   [:meta {:charset "utf-8"}]
+   [:title (str "cch · " title)]
+   [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
+   [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
+   (if (= css-regime :custom)
+     (list
+       [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
+       [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
+       [:link {:rel "stylesheet"
+               :href "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"}]
+       [:link {:rel "stylesheet" :href "/cch.css"}]
+       [:script {:type "module"
+                 :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}])
+     (list
+       [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
+       [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
+       [:link {:rel "stylesheet"
+               :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
+       [:link {:rel "stylesheet"
+               :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
+       [:script {:type "module"
+                 :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}]
+       [:style (hic/raw dashboard-css)]))])
 
 (defn- badge
-  [hook-name]
-  (let [{:keys [color tooltip]} (get hook-metadata hook-name)]
-    [:span.tag.is-light
-     (cond-> {:style (str "background:" (or color "#495057") ";color:white;")}
-       tooltip (assoc :title tooltip))
-     hook-name]))
+  ([hook-name] (badge hook-name :bulma))
+  ([hook-name css-regime]
+   (let [{:keys [color tooltip]} (get hook-metadata hook-name)]
+     (if (= css-regime :custom)
+       [:span.hook-badge
+        (cond-> {:style (str "border-color:" (or color "#495057")
+                             ";color:" (or color "#495057") ";")}
+          tooltip (assoc :title tooltip))
+        hook-name]
+       [:span.tag.is-light
+        (cond-> {:style (str "background:" (or color "#495057") ";color:white;")}
+          tooltip (assoc :title tooltip))
+        hook-name]))))
 
 (defn- pretty-extra
   "Pretty-print extra column JSON; if parse fails, return as-is."
@@ -337,6 +406,65 @@
                                   "—")]]
        [:h5 "payload"]
        [:pre (pretty-extra extra)]]]]))
+
+(defn- decision-dot [decision]
+  (let [cls (case decision
+              "allow" "dot-allow"
+              "ask"   "dot-ask"
+              "deny"  "dot-deny"
+              "dot-observe")]
+    [:span {:class (str "dot " cls)}]))
+
+(defn- event-row
+  "One event as a dense table row for the new events page."
+  [{:keys [id timestamp session_id hook_name event_type tool_name
+           file_path cwd decision reason elapsed_ms extra]}]
+  (let [observation? (and (= hook_name "event-log") (nil? decision))
+        short-ts     (when timestamp
+                       (subs timestamp (min 11 (count timestamp))
+                             (min 19 (count timestamp))))
+        {:keys [root repo-name branch in-repo?]} (when cwd (git-meta cwd))
+        repo-display (cond
+                       (and repo-name branch) (str repo-name " · " branch)
+                       repo-name              repo-name
+                       (and in-repo? root)    (repo-label root)
+                       cwd                    "(no repo)"
+                       :else                  "—")
+        file-basename (when-not (str/blank? file_path)
+                        (last (remove str/blank? (str/split file_path #"/"))))
+        context       (cond
+                        (not (str/blank? reason)) (apply str (take 80 reason))
+                        file-basename             file-basename
+                        :else                     "")]
+    (list
+      [:tr {:class    (when observation? "observed")
+            :data-on-click (str "$detail_" id " = !$detail_" id)
+            :style   "cursor:pointer"}
+       [:td.col-dot (decision-dot decision)]
+       [:td.col-time short-ts]
+       [:td.col-repo {:title cwd} repo-display]
+       [:td.col-hook (badge hook_name :custom)]
+       [:td.col-event event_type]
+       [:td.col-tool (dash tool_name)]
+       [:td.col-ctx {:title file_path} context]
+       [:td.col-ms (if elapsed_ms (format "%.1f" (double elapsed_ms)) "")]]
+      [:tr.detail-row {:data-show (str "$detail_" id)}
+       [:td {:colspan 8}
+        [:dl.row-detail
+         [:dt "id"]         [:dd id]
+         [:dt "timestamp"]  [:dd timestamp]
+         [:dt "session"]    [:dd (dash (when session_id
+                                        (str (subs session_id 0 (min 8 (count session_id))) "…")))]
+         [:dt "cwd"]        [:dd (dash cwd)]
+         [:dt "file"]       [:dd (dash file-basename)]
+         [:dt "decision"]   [:dd (dash decision)]
+         [:dt "reason"]     [:dd (dash reason)]
+         [:dt "elapsed"]    [:dd (if elapsed_ms
+                                   (format "%.2f ms" (double elapsed_ms))
+                                   "—")]
+         [:div.payload-block
+          [:div.payload-label "payload"]
+          [:pre (pretty-extra extra)]]]]])))
 
 (defn- events-for-hook
   "The events a specific hook registers for, per the registry.
@@ -424,6 +552,127 @@
     (input-field  "Limit"
                   {:type "number" :name "limit" :value (:limit q "50")
                    :min "1" :max "500"})]])
+
+(defn- filter-bar
+  "New-style filter bar for the custom CSS events page."
+  [q repos]
+  (let [sel (fn [label nm current opts]
+              (list
+                [:label label]
+                [:select {:name nm :onchange "this.form.submit()"}
+                 (for [[v lbl] opts]
+                   [:option (cond-> {:value v}
+                              (= v current) (assoc :selected "selected"))
+                    lbl])]))]
+    [:form.filter-bar {:method "get" :action "/events"}
+     (sel "repo"    "cwd-prefix" (:cwd-prefix q "")
+          (cons ["" "all"] repos))
+     (sel "hook"    "hook"       (:hook q "")
+          (cons ["" "all"]
+                (for [[n _] (sort-by first (registry/list-hooks))] [n n])))
+     (sel "event"   "event"      (:event q "")
+          (cons ["" "all"]
+                (for [e (hook-scoped-events (:hook q))] [e e])))
+     (sel "tool"    "tool"       (:tool q "")
+          [["" "all"]])
+     (sel "session" "session"    (:session q "")
+          (cons ["" "all"] (distinct-sessions (:cwd-prefix q))))
+     [:label "since"]
+     [:input {:type "text" :name "since" :value (:since q "")
+              :placeholder "2026-04-13" :class "search-box"
+              :style "width:10em"}]
+     [:input.search-box {:type "text" :name "q" :value (:q q "")
+                         :placeholder "search reason / file / command…"}]]))
+
+(defn- decision-chip-row
+  "Filter chips for decision types with counts."
+  [q decision-counts-map]
+  (let [total  (reduce + 0 (vals decision-counts-map))
+        active (:decision q)
+        chip   (fn [label value cnt]
+                 (let [params (if value
+                                (assoc q :decision value)
+                                (dissoc q :decision))
+                       href   (str "/events" (encode-query params))]
+                   [:a.chip {:href href
+                             :class (when (= active value) "active")}
+                    (when value (decision-dot value))
+                    label
+                    [:span.mono.muted (str " " cnt)]]))]
+    [:div.chip-row
+     (chip "all" nil total)
+     (chip "allow"   "allow"   (get decision-counts-map "allow" 0))
+     (chip "ask"     "ask"     (get decision-counts-map "ask" 0))
+     (chip "deny"    "deny"    (get decision-counts-map "deny" 0))
+     (chip "observe" "observe" (get decision-counts-map :observe 0))]))
+
+(defonce ^:private repos-cache (atom {:at 0 :val []}))
+(def ^:private repos-cache-ttl-ms 60000)
+
+(defn- cached-repos []
+  (let [now (System/currentTimeMillis)
+        {:keys [at val]} @repos-cache]
+    (if (< (- now at) repos-cache-ttl-ms)
+      val
+      (let [v (distinct-repos)]
+        (reset! repos-cache {:at now :val v})
+        v))))
+
+(defn- events-page-html
+  "Render the new /events page with dense table layout."
+  [q]
+  (let [filter-opts {:hook       (when-not (str/blank? (:hook q)) (:hook q))
+                     :event      (when-not (str/blank? (:event q)) (:event q))
+                     :session    (when-not (str/blank? (:session q)) (:session q))
+                     :since      (when-not (str/blank? (:since q)) (:since q))
+                     :cwd-prefix (when-not (str/blank? (:cwd-prefix q)) (:cwd-prefix q))}
+        f-repos    (future (cached-repos))
+        f-dc       (future (apply stats/decision-counts
+                                  (mapcat identity (select-keys filter-opts
+                                                                [:hook :event :session :since :cwd-prefix]))))
+        events     (log/query-events
+                     :limit      (or (some-> (:limit q) Long/parseLong) 50)
+                     :hook       (:hook filter-opts)
+                     :event      (:event filter-opts)
+                     :session    (:session filter-opts)
+                     :decision   (when-not (str/blank? (:decision q)) (:decision q))
+                     :since      (:since filter-opts)
+                     :cwd-prefix (:cwd-prefix filter-opts)
+                     :q          (when-not (str/blank? (:q q)) (:q q)))
+        dc         @f-dc
+        repos      @f-repos]
+    (str "<!doctype html>\n"
+         (hic/html
+           [:html {:lang "en"}
+            (page-head {:title "events" :css-regime :custom})
+            [:body
+             [:div.page-wrap
+              (nav-bar :events :custom)
+              [:div.page-header
+               [:h1 "Events"]
+               [:div.page-actions
+                [:a.btn {:href "/events" :data-on-load "@get('/events/stream')"} "⏸ live"]
+                [:a.btn {:href (str "/events" (encode-query q))} "↻ refresh"]
+                [:a.btn {:href "#"} "↓ export"]]]
+              [:p.page-subtitle
+               "centralized log of every Claude Code event cch is subscribed to."]
+              (filter-bar q repos)
+              (decision-chip-row q dc)
+              [:table.dense-table
+               [:thead
+                [:tr
+                 [:th.col-dot ""]
+                 [:th.col-time "time"]
+                 [:th.col-repo "repo · branch"]
+                 [:th.col-hook "hook"]
+                 [:th.col-event "event"]
+                 [:th.col-tool "tool"]
+                 [:th.col-ctx "context"]
+                 [:th.col-ms "ms"]]]
+               [:tbody.event-rows
+                {:data-signals-ifmissing (str "{" (str/join "," (map #(str "detail_" (:id %) ":false") events)) "}")
+                 :data-on-load "@get('/events/stream')"}
+                (for [e events] (event-row e))]]]]]))))
 
 (def dashboard-css
   ":root {
@@ -679,12 +928,20 @@
          (into {}))))
 
 (defn- handle-dashboard
-  "GET / — server-rendered HTML dashboard."
+  "GET / — server-rendered HTML dashboard (legacy Bulma events page)."
   [req]
   (let [q (parse-query (:query-string req))]
     {:status 200
      :headers {"Content-Type" "text/html; charset=utf-8"}
      :body (dashboard-html q)}))
+
+(defn- handle-events-page
+  "GET /events — new dense-table events page."
+  [req]
+  (let [q (parse-query (:query-string req))]
+    {:status 200
+     :headers {"Content-Type" "text/html; charset=utf-8"}
+     :body (events-page-html q)}))
 
 (defn- handle-health
   [hooks]
@@ -719,19 +976,17 @@
 
 (defn- event-fragment-frame
   "Format one event as a Datastar patch-elements SSE frame (v1 protocol).
-  Selector is '.event-list'; mode 'prepend' inserts the new card at the
-  top while leaving existing cards (and any open <details>) untouched.
+  Selector is '.event-rows'; mode 'prepend' inserts the new row at the
+  top of the tbody.
 
   SSE field values cannot contain raw newlines (\\n terminates a field
   per spec), so we substitute HTML numeric-entity &#10; for every
-  newline in the rendered fragment. Inside <pre> blocks the browser
-  still renders those entities as real line breaks — pretty-printed
-  JSON payloads look right in the expanded detail view."
+  newline in the rendered fragment."
   [event]
-  (let [html (str/replace (str (hic/html (event-card false event)))
+  (let [html (str/replace (str (hic/html (event-row event)))
                           "\n" "&#10;")]
     (str "event: datastar-patch-elements\n"
-         "data: selector .event-list\n"
+         "data: selector .event-rows\n"
          "data: mode prepend\n"
          "data: elements " html "\n"
          "\n")))
@@ -1170,6 +1425,27 @@
 <p><a href=\"/\">&larr; back to dashboard</a></p>
 </body></html>")
 
+(def ^:private mime-types
+  {".css"   "text/css; charset=utf-8"
+   ".js"    "application/javascript; charset=utf-8"
+   ".svg"   "image/svg+xml"
+   ".woff2" "font/woff2"
+   ".png"   "image/png"
+   ".json"  "application/json"})
+
+(defn- serve-static
+  "Serve a file from resources/public/ if it exists on the classpath."
+  [uri]
+  (when (and (not (str/includes? uri ".."))
+             (str/starts-with? uri "/"))
+    (let [path (str "public" uri)
+          ext  (re-find #"\.[^.]+$" uri)]
+      (when-let [res (io/resource path)]
+        {:status  200
+         :headers {"Content-Type"  (get mime-types ext "application/octet-stream")
+                   "Cache-Control" "public, max-age=3600"}
+         :body    (io/input-stream res)}))))
+
 (defn- route
   "Top-level request router. Reads path + method; dispatches."
   [hooks event-idx req]
@@ -1218,8 +1494,15 @@
        :headers {"Content-Type" "text/html; charset=utf-8"}
        :body debug-html}
 
+      (and (= request-method :get) (= uri "/events"))
+      (handle-events-page req)
+
       (and (= request-method :get) (= uri "/"))
-      (handle-dashboard req)
+      {:status 302 :headers {"Location" "/events"} :body ""}
+
+      (and (= request-method :get))
+      (or (serve-static uri)
+          {:status 404 :body "not found"})
 
       :else
       {:status 404 :body "not found"})))
