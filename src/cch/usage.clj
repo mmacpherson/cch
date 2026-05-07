@@ -217,7 +217,7 @@
      [:div.stat [:div.k "resets in"] [:div.v (format "%.1f h" hours-left)]]
      [:div.stat [:div.k "samples"]   [:div.v (str samples)]]
      (when rate-phr
-       [:div.stat [:div.k "rate"] [:div.v (format "%.1f %%/hr" (double rate-phr))]])
+       [:div.stat [:div.k "rate"] [:div.v (format "%.1f%%/hr" (double rate-phr))]])
      (when projection
        (let [{:keys [proj band]} projection]
          [:div.stat
