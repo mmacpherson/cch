@@ -169,7 +169,7 @@
             (when band
               [:path {:d (band-path (line-for (:hi band))
                                     (line-for (:lo band)))
-                      :fill (rgba projection-color 0.18)
+                      :fill (rgba projection-color 0.10)
                       :stroke "none"
                       :class "band-region"}])
             [:polyline {:points (points-attr (line-for proj))

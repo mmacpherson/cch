@@ -29,6 +29,19 @@ chmod +x "$HOME/.claude/statusline-command.sh"
 # Repo symlink: ~/.local/share/cch/repo → this checkout.
 ln -sfn "$repo" "$HOME/.local/share/cch/repo"
 
+# Runtime: deploy the jlink'd runtime if it was built (just build).
+runtime_src="$repo/target/cch-runtime"
+runtime_dst="$HOME/.local/share/cch/runtime"
+if [[ -d "$runtime_src" ]]; then
+  mkdir -p "$runtime_dst"
+  rsync -a --delete "$runtime_src/" "$runtime_dst/"
+  echo "  ~/.local/share/cch/runtime  (deployed from target/cch-runtime)"
+  if systemctl --user is-active cch.service &>/dev/null; then
+    systemctl --user restart cch.service
+    echo "  cch.service restarted"
+  fi
+fi
+
 echo "Installed:"
 echo "  $bin/cch        (bash shim)"
 echo "  $bin/cch-eval   -> $repo/bin/cch-eval"
