@@ -937,9 +937,10 @@
       [:div.stat-label "used"] [:div.stat-value (if current_pct (str (Math/round (double current_pct)) "%") "—")]]
      [:div.stat-tile {:class (when (and projected_pct (> projected_pct 85)) "warn")}
       [:div.stat-label "projected"]
-      [:div.stat-value (if projected_pct (str (Math/round (double projected_pct)) "%") "—")]
-      (when band
-        [:div.stat-sub {:style "opacity: 0.6"} (str (:lo band) "–" (:hi band) "%")])]
+      [:div.stat-value (if projected_pct (str (Math/round (double projected_pct)) "%") "—")
+       (when band
+         [:span {:style "font-size: 0.45em; opacity: 0.5; margin-left: 0.4em; font-weight: 400"}
+          (str (:lo band) "–" (:hi band) "%")])]]
      [:div.stat-tile
       [:div.stat-label "resets in"] [:div.stat-value (or (fmt-time secs_left) "—")]]
      [:div.stat-tile

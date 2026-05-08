@@ -31,10 +31,12 @@
     [:div.tile-row
      (stat-tile "used" (or (format-pct current_pct) "—")
                 :subtitle "7-day window")
-     (stat-tile "projected" (or (format-pct projected_pct) "—")
-                :subtitle (if band
-                            (str (:lo band) "–" (:hi band) "%")
-                            "at reset")
+     (stat-tile "projected"
+                (list (or (format-pct projected_pct) "—")
+                      (when band
+                        [:span {:style "font-size: 0.45em; opacity: 0.5; margin-left: 0.4em; font-weight: 400"}
+                         (str (:lo band) "–" (:hi band) "%")]))
+                :subtitle "at reset"
                 :css-class (when (and projected_pct (> projected_pct 85)) "warn"))
      (stat-tile "resets in" (or (format-secs-left secs_left) "—")
                 :subtitle "next window")
