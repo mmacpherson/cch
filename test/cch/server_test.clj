@@ -306,10 +306,9 @@
     (is (str/includes? (:body resp) "scope-lock"))
     (is (str/includes? (:body resp) "protect-files"))
     (is (str/includes? (:body resp) "global"))
-    (testing "uses Bulma table classes"
-      (is (str/includes? (:body resp) "table is-hoverable is-fullwidth")))
-    (testing "type badges rendered as Bulma tags"
-      (is (str/includes? (:body resp) "tag")))))
+    (testing "uses custom CSS with matrix table and hook badges"
+      (is (str/includes? (:body resp) "cch.css"))
+      (is (str/includes? (:body resp) "hook-badge")))))
 
 ;; --- /context-snapshot — schema variations of context_window.current_usage ---
 

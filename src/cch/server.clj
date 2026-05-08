@@ -1284,17 +1284,17 @@
    :agent  "#059669"})
 
 (defn- type-badge [t]
-  [:span.tag
-   {:style (str "background:" (get type-badge-colors t "#495057") ";color:white;")}
+  [:span.hook-badge
+   {:style (str "border-color:" (get type-badge-colors t "#495057"))}
    (name t)])
 
 (defn- toggle-form
   "Render the enable/disable toggle form cell for (hook, scope)."
   [hook-name scope current-enabled? source yaml-managed?]
   (if yaml-managed?
-    [:span.tag.is-warning.is-light
-     {:title "managed by .cch-config.yaml — edit the file to change"}
-     (if current-enabled? "✓ yaml" "✗ yaml")]
+    [:button.toggle.yaml {:disabled true
+                          :title "managed by .cch-config.yaml"}
+     (if current-enabled? "yaml" "yaml")]
     [:form {:method "post" :action "/hooks/toggle" :class "toggle-form"}
      [:input {:type "hidden" :name "hook"    :value hook-name}]
      [:input {:type "hidden" :name "scope"   :value scope}]
@@ -1307,22 +1307,6 @@
                                   (if current-enabled? "disable" "enable"))}
       (if current-enabled? "on" "off")]]))
 
-(def ^:private matrix-css
-  "/* Scope-as-rows layout — first column is the scope label; every other
-      column is a hook. Stacked column header: hook name over type badge. */
-   table.matrix th .hook-head { display: flex; flex-direction: column; gap: 0.2em; align-items: flex-start; }
-   table.matrix th .hook-name { font-weight: 600; font-size: 0.9em; }
-   table.matrix th .hook-type { font-size: 0.7em; }
-   table.matrix td.scope-name { font-weight: 500; font-family: var(--bulma-family-code); font-size: 0.85em; white-space: nowrap; }
-   table.matrix td.scope-name .yaml-badge { color: var(--bulma-text-weak); font-style: italic; font-weight: 400; font-family: var(--bulma-family-primary); }
-   table.matrix tr.scope-global { background: rgba(100, 100, 100, 0.05); }
-   .toggle-form { display: inline; margin: 0; }
-   button.toggle { padding: 2px 10px; font-size: 0.8em; border-radius: 3px; border: 1px solid var(--bulma-border); cursor: pointer; font-family: inherit; min-width: 3em; background: transparent; color: var(--bulma-text-weak); }
-   button.toggle.on  { background: #059669; color: white; border-color: #059669; }
-   button.toggle.on[data-source=\"db-repo\"]   { background: #047857; border-color: #047857; }
-   button.toggle.on[data-source=\"repo-yaml\"] { background: #7c3aed; border-color: #7c3aed; }
-   .cell-readonly { color: var(--bulma-text-weak); font-size: 0.85em; font-style: italic; }")
-
 (defn- matrix-cell
   "Render one (scope, hook) cell."
   [scope yaml? {:keys [name entry]}]
@@ -1331,7 +1315,7 @@
      (if (= :code t)
        (let [{:keys [enabled? source]} (effective-entry name scope)]
          (toggle-form name scope enabled? source yaml?))
-       [:span.cell-readonly "native"])]))
+       [:span {:style "color: var(--fg-muted); font-size: var(--font-xs); font-style: italic;"} "native"])]))
 
 (defn- matrix-row
   "One row per scope. First cell is the scope label; remaining cells are
@@ -1346,34 +1330,25 @@
 
 (defn- hooks-matrix-html
   [_q]
-  (let [scopes (all-scopes)
-        entries (for [[n e] (registry/list-hooks)] {:name n :entry e})]
-    (str "<!doctype html>\n"
-         (hic/html
+  (let [scopes      (all-scopes)
+        entries     (for [[n e] (registry/list-hooks)] {:name n :entry e})
+        fire-counts (stats/hook-fire-counts)]
+    (str (hic/html
            [:html {:lang "en"}
-            [:head
-             [:meta {:charset "utf-8"}]
-             [:title "cch · hooks"]
-             [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
-             [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
-             [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
-             [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
-             [:link {:rel "stylesheet"
-                     :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
-             [:link {:rel "stylesheet"
-                     :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
-             [:style (hic/raw dashboard-css)]
-             [:style (hic/raw matrix-css)]]
+            (page-head {:title "hooks" :css-regime :custom})
             [:body
-             [:section.section
-              [:div.container
-               (nav-bar :hooks)
-               [:p.subtitle
-                "Enable or disable each hook per scope. "
-                "Per-repo .cch-config.yaml files take precedence over DB rows — those cells are shown read-only."]
-               [:p.meta
-                [:a {:href "/hooks"} "↻ refresh"]]
-               [:table.table.is-hoverable.is-fullwidth.matrix
+             (nav-bar :hooks :custom)
+             [:div.page-wrap
+              [:div.page-header
+               [:div
+                [:h1 "hooks"]
+                [:p.subtitle
+                 "enable or disable each hook per scope — "
+                 "yaml-managed cells are read-only"]]
+               [:div.header-actions
+                [:a.btn {:href "/hooks"} "↻ refresh"]]]
+              [:div.surface {:style "overflow-x: auto;"}
+               [:table.matrix
                 [:thead
                  [:tr
                   [:th "scope"]
@@ -1381,14 +1356,13 @@
                     [:th {:title (:description entry)}
                      [:div.hook-head
                       [:div.hook-name name]
-                      [:div.hook-type (type-badge (registry/hook-type entry))]]])]]
+                      [:div.hook-type (type-badge (registry/hook-type entry))]
+                      [:div.fire-count (get fire-counts name 0)]]])]]
                 [:tbody
                  (for [scope scopes]
-                   (matrix-row scope entries))]]
-               [:p.meta
-                [:small
-                 (format "%d hook(s) · %d scope(s)"
-                         (count entries) (count scopes))]]]]]]))))
+                   (matrix-row scope entries))]]]
+              [:p {:style "margin-top: 0.8em; font-size: var(--font-xs); color: var(--fg-muted);"}
+               (format "%d hook(s) · %d scope(s)" (count entries) (count scopes))]]]]))))
 
 (defn- handle-hooks-page [req]
   (let [q (parse-query (:query-string req))]
