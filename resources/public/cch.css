@@ -231,7 +231,7 @@ h1, h2, h3, h4 { font-weight: 600; letter-spacing: -0.01em; }
 .dense-table tbody tr:hover { background: var(--accent-soft); }
 /* Column widths for table-layout:fixed — must be set on th */
 .dense-table .col-dot  { width: 1.6em; }
-.dense-table .col-time { width: 5.5em; font-family: var(--family-mono); color: var(--fg-muted); }
+.dense-table .col-time { width: 6.2em; font-family: var(--family-mono); color: var(--fg-muted); }
 .dense-table .col-repo { width: 22%; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
 .dense-table .col-hook { width: 11%; }
 .dense-table .col-event { width: 11%; font-weight: 500; }

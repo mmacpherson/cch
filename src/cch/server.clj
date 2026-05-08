@@ -454,10 +454,7 @@
        [:td.col-ctx {:title file_path} context]
        [:td.col-ms (when elapsed_ms
                     (let [ms (double elapsed_ms)]
-                      (cond
-                        (< ms 1.0)  "<1"
-                        (< ms 100)  (format "%.1f" ms)
-                        :else       (format "%.0f" ms))))]]
+                      (if (< ms 1.0) "<1" (str (Math/round ms)))))]]
       [:tr.detail-row {:data-show (str "$detail_" id)}
        [:td {:colspan 8}
         [:dl.row-detail
