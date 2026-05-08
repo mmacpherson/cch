@@ -432,10 +432,15 @@
                        :else                  "—")
         file-basename (when-not (str/blank? file_path)
                         (last (remove str/blank? (str/split file_path #"/"))))
+        extra-parsed  (try (json/parse-string extra true) (catch Exception _ nil))
+        tool-input    (:tool_input extra-parsed)
         context       (cond
-                        (not (str/blank? reason)) (apply str (take 80 reason))
-                        file-basename             file-basename
-                        :else                     "")]
+                        (not (str/blank? reason))    (apply str (take 80 reason))
+                        file-basename                file-basename
+                        (:command tool-input)        (apply str (take 80 (:command tool-input)))
+                        (:file_path tool-input)      (let [fp (:file_path tool-input)]
+                                                       (last (remove str/blank? (str/split fp #"/"))))
+                        :else                        "")]
     (list
       [:tr {:class    (when observation? "observed")
             :data-on-click (str "$detail_" id " = !$detail_" id)
