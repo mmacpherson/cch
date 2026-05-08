@@ -20,10 +20,10 @@ body {
   --c-ask-bg:   oklch(78% 0.14 75  / 0.12);
   --c-deny-bg:  oklch(68% 0.18 25  / 0.12);
 
-  --row-h:    28px;
-  --font-base: 13.5px;
-  --font-sm:  12px;
-  --font-xs:  10.5px;
+  --row-h:    30px;
+  --font-base: 14.5px;
+  --font-sm:  13px;
+  --font-xs:  11px;
 
   --family-ui:   system-ui, -apple-system, sans-serif;
   --family-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;

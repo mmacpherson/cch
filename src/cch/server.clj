@@ -452,7 +452,13 @@
        [:td.col-event event_type]
        [:td.col-tool (dash tool_name)]
        [:td.col-ctx {:title file_path} context]
-       [:td.col-ms (if elapsed_ms (format "%.1f" (double elapsed_ms)) "")]]
+       [:td.col-ms (when elapsed_ms
+                    (let [ms (double elapsed_ms)]
+                      (cond
+                        (< ms 0.01)  (format "%.0fµs" (* ms 1000))
+                        (< ms 1.0)   (format "%.2f" ms)
+                        (< ms 100)   (format "%.1f" ms)
+                        :else        (format "%.0f" ms))))]]
       [:tr.detail-row {:data-show (str "$detail_" id)}
        [:td {:colspan 8}
         [:dl.row-detail
