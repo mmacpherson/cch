@@ -229,15 +229,15 @@ h1, h2, h3, h4 { font-weight: 600; letter-spacing: -0.01em; }
 }
 .dense-table tbody tr { border-bottom: 1px solid oklch(22% 0.02 250 / 0.4); }
 .dense-table tbody tr:hover { background: var(--accent-soft); }
-/* Column widths for table-layout:fixed — must be set on th */
-.dense-table .col-dot  { width: 1.6em; }
-.dense-table .col-time { width: 105px; font-family: var(--family-mono); color: var(--fg-muted); }
-.dense-table .col-repo { width: 22%; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
-.dense-table .col-hook { width: 11%; }
-.dense-table .col-event { width: 11%; font-weight: 500; }
-.dense-table .col-tool { width: 5%; }
+/* Column widths for table-layout:fixed — all % so they never overflow */
+.dense-table .col-dot  { width: 2%; }
+.dense-table .col-time { width: 11%; font-family: var(--family-mono); color: var(--fg-muted); }
+.dense-table .col-repo { width: 19%; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
+.dense-table .col-hook { width: 10%; }
+.dense-table .col-event { width: 10%; font-weight: 500; }
+.dense-table .col-tool { width: 4%; }
 .dense-table .col-ctx  { color: var(--fg-muted); font-family: var(--family-mono); font-style: italic; }
-.dense-table .col-ms   { width: 4.5em; text-align: right; font-family: var(--family-mono); color: var(--fg-muted); }
+.dense-table .col-ms   { width: 4%; text-align: right; font-family: var(--family-mono); color: var(--fg-muted); }
 .dense-table tr.observed { opacity: 0.7; }
 .dense-table tr.detail-row { border-bottom: none; }
 .dense-table tr.detail-row td { padding: 0; height: auto; white-space: normal; max-width: none; }
