@@ -700,8 +700,8 @@
                   [:html
                    (page-head {:title "overview" :css-regime :custom})
                    [:body
-                    (nav-bar :overview :custom)
-                    (overview/page-body data)]]))}))
+                    (let [body (overview/page-body data)]
+                      (into [(first body)] (cons (nav-bar :overview :custom) (rest body))))]]))}))
 
 (defn- handle-health
   [hooks]
@@ -956,8 +956,8 @@
            [:html {:lang "en"}
             (page-head {:title "usage" :css-regime :custom})
             [:body
-             (nav-bar :usage :custom)
              [:div.page-wrap
+              (nav-bar :usage :custom)
               [:div.page-header
                [:div
                 [:h1 "usage"]
@@ -1104,8 +1104,8 @@
            [:html {:lang "en"}
             (page-head {:title "hooks" :css-regime :custom})
             [:body
-             (nav-bar :hooks :custom)
              [:div.page-wrap
+              (nav-bar :hooks :custom)
               [:div.page-header
                [:div
                 [:h1 "hooks"]
