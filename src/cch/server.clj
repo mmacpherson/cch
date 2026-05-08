@@ -238,7 +238,6 @@
    "command-audit" {:color   "#059669"
                     :tooltip "Bash audit log — records every command; flags configured patterns"}})
 
-(declare dashboard-css)
 (declare encode-query)
 (declare parse-query)
 
@@ -256,86 +255,49 @@
 
 (defn- nav-bar
   "Primary nav at the top of every page. `active` is :overview, :events,
-  :hooks, or :usage — the active tab renders as a non-link label; others
-  render as ordinary links.
-  `css-regime` controls markup shape: `:bulma` emits the legacy Bulma-tabs
-  structure; `:custom` emits the new flat `.nav-tab` spans."
-  ([active] (nav-bar active :bulma))
-  ([active css-regime]
-   (if (= css-regime :custom)
-     (let [tab (fn [k label href]
-                 (if (= active k)
-                   [:span.nav-tab.active label]
-                   [:a.nav-tab {:href href} label]))]
-       [:nav.nav-wrap
-        [:a.nav-brand {:href "/"}
-         [:span.nav-icon nav-hook-svg]
-         "cch"]
-        [:div.nav-tabs
-         (tab :overview "overview" "/")
-         (tab :events   "events"   "/events")
-         (tab :hooks    "hooks"    "/hooks")
-         (tab :usage    "usage"    "/usage")]
-        [:div.nav-status
-         [:span.dot-online]
-         (str "dispatcher · :8888")]])
-     ;; Legacy Bulma structure
-     (let [tab (fn [k label href]
-                 [:li {:class (when (= active k) "is-active")}
-                  (if (= active k) [:a label] [:a {:href href} label])])]
-       [:div.nav-wrap
-        [:div.nav-title
-         [:span.nav-icon nav-hook-svg]
-         [:h1.nav-brand "cch"]]
-        [:div.tabs
-         [:ul
-          (tab :events "events" "/")
-          (tab :hooks  "hooks"  "/hooks")
-          (tab :usage  "usage"  "/usage")]]]))))
+  :hooks, or :usage."
+  [active & _]
+  (let [tab (fn [k label href]
+              (if (= active k)
+                [:span.nav-tab.active label]
+                [:a.nav-tab {:href href} label]))]
+    [:nav.nav-wrap
+     [:a.nav-brand {:href "/"}
+      [:span.nav-icon nav-hook-svg]
+      "cch"]
+     [:div.nav-tabs
+      (tab :overview "overview" "/")
+      (tab :events   "events"   "/events")
+      (tab :hooks    "hooks"    "/hooks")
+      (tab :usage    "usage"    "/usage")]
+     [:div.nav-status
+      [:span.dot-online]
+      (str "dispatcher · :8888")]]))
 
 (defn- page-head
-  "Shared <head> block. `css-regime` is :bulma (legacy) or :custom (new cch.css)."
-  [{:keys [title css-regime]
-    :or   {css-regime :bulma}}]
+  "Shared <head> block."
+  [{:keys [title]}]
   [:head
    [:meta {:charset "utf-8"}]
    [:title (str "cch · " title)]
    [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
    [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
-   (if (= css-regime :custom)
-     (list
-       [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
-       [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
-       [:link {:rel "stylesheet"
-               :href "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=block"}]
-       [:link {:rel "stylesheet" :href "/cch.css"}]
-       [:script {:type "module"
-                 :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}])
-     (list
-       [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
-       [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
-       [:link {:rel "stylesheet"
-               :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
-       [:link {:rel "stylesheet"
-               :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
-       [:script {:type "module"
-                 :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}]
-       [:style (hic/raw dashboard-css)]))])
+   [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
+   [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
+   [:link {:rel "stylesheet"
+           :href "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=block"}]
+   [:link {:rel "stylesheet" :href "/cch.css"}]
+   [:script {:type "module"
+             :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}]])
 
 (defn- badge
-  ([hook-name] (badge hook-name :bulma))
-  ([hook-name css-regime]
-   (let [{:keys [color tooltip]} (get hook-metadata hook-name)]
-     (if (= css-regime :custom)
-       [:span.hook-badge
-        (cond-> {:style (str "border-color:" (or color "#495057")
-                             ";color:" (or color "#495057") ";")}
-          tooltip (assoc :title tooltip))
-        hook-name]
-       [:span.tag.is-light
-        (cond-> {:style (str "background:" (or color "#495057") ";color:white;")}
-          tooltip (assoc :title tooltip))
-        hook-name]))))
+  [hook-name & _]
+  (let [{:keys [color tooltip]} (get hook-metadata hook-name)]
+    [:span.hook-badge
+     (cond-> {:style (str "border-color:" (or color "#495057")
+                          ";color:" (or color "#495057") ";")}
+       tooltip (assoc :title tooltip))
+     hook-name]))
 
 (defn- pretty-extra
   "Pretty-print extra column JSON; if parse fails, return as-is."
@@ -348,65 +310,6 @@
 (defn- dash [v]
   (if (or (nil? v) (and (string? v) (str/blank? v))) "—" v))
 
-(defn- event-card
-  "One event rendered as a collapsible <article> — summary row on top,
-  full detail on expand. When `open-all?` is true, renders <details open>
-  so every card starts expanded — useful for scanning many events' full
-  payloads at once after filtering down."
-  [open-all? {:keys [id timestamp session_id hook_name event_type tool_name
-                     file_path cwd decision reason elapsed_ms extra]}]
-  (let [observation? (and (= hook_name "event-log") (nil? decision))
-        short-ts     (apply str (take 19 (or timestamp "")))
-        {:keys [root repo-name branch in-repo?]} (when cwd (git-meta cwd))
-        ;; Prefer origin-derived name + branch. If origin isn't set (bare
-        ;; checkout or fresh init), use the path-based repo-label (which
-        ;; handles `foo-worktrees/bar` layouts). Outside any repo, mark
-        ;; the row as "(no repo)" rather than pretending.
-        repo-display (cond
-                       (and repo-name branch)  (str repo-name " · " branch)
-                       repo-name               repo-name
-                       (and in-repo? root)     (repo-label root)
-                       cwd                     "(no repo)"
-                       :else                   "—")
-        ;; Trailing context cell: prefer the hook's reason (when a
-        ;; decision fired), else the basename of the file being
-        ;; touched, else nothing. Full values live in the expanded
-        ;; detail so the summary stays skimmable.
-        file-basename (when-not (str/blank? file_path)
-                        (last (remove str/blank? (str/split file_path #"/"))))
-        context      (cond
-                       (not (str/blank? reason)) (apply str (take 100 reason))
-                       file-basename             file-basename
-                       :else                     "")]
-    [:article.event {:class (if observation? "observed" "acted")}
-     [:details (when open-all? {:open "open"})
-      ;; summary is itself the CSS grid. The chevron is a real span (not
-      ;; ::before + ::marker) so browser default markers can't double up.
-      [:summary
-       [:span.chev "▸"]
-       [:span.ts short-ts]
-       [:span.repo {:title cwd} repo-display]
-       (badge hook_name)
-       [:span.evt event_type]
-       [:span.tool (dash tool_name)]
-       [:span.ctx {:title file_path} context]]
-      [:div.detail
-       [:dl
-        [:dt "id"]         [:dd id]
-        [:dt "timestamp"]  [:dd timestamp]
-        [:dt "session"]    [:dd (dash session_id)]
-        [:dt "hook"]       [:dd hook_name]
-        [:dt "event type"] [:dd event_type]
-        [:dt "tool"]       [:dd (dash tool_name)]
-        [:dt "cwd"]        [:dd (dash cwd)]
-        [:dt "file path"]  [:dd (dash file_path)]
-        [:dt "decision"]   [:dd (dash decision)]
-        [:dt "reason"]     [:dd (dash reason)]
-        [:dt "elapsed ms"] [:dd (if elapsed_ms
-                                  (format "%.2f" (double elapsed_ms))
-                                  "—")]]
-       [:h5 "payload"]
-       [:pre (pretty-extra extra)]]]]))
 
 (defn- decision-dot [decision]
   (let [cls (case decision
@@ -682,102 +585,6 @@
                  :data-on-load "@get('/events/stream')"}
                 (for [e events] (event-row e))]]]]]))))
 
-(def dashboard-css
-  ":root {
-     --bulma-family-primary: 'Inter', system-ui, sans-serif;
-     --bulma-family-secondary: 'Inter', system-ui, sans-serif;
-     --bulma-family-code: 'JetBrains Mono', ui-monospace, monospace;
-     --bulma-body-family: var(--bulma-family-primary);
-   }
-   @media (prefers-color-scheme: dark) {
-     :root:not([data-theme=\"light\"]) {
-       color-scheme: dark;
-       --bulma-scheme-main: hsl(221, 14%, 10%);
-       --bulma-scheme-main-bis: hsl(221, 14%, 13%);
-       --bulma-scheme-main-ter: hsl(221, 14%, 16%);
-       --bulma-scheme-invert: hsl(221, 14%, 96%);
-       --bulma-scheme-invert-bis: hsl(221, 14%, 92%);
-       --bulma-background: hsl(221, 14%, 16%);
-       --bulma-body-background-color: var(--bulma-scheme-main);
-       --bulma-body-color: hsl(221, 14%, 86%);
-       --bulma-text: hsl(221, 14%, 86%);
-       --bulma-text-weak: hsl(221, 14%, 66%);
-       --bulma-text-strong: hsl(221, 14%, 96%);
-       --bulma-border: hsl(221, 14%, 22%);
-       --bulma-border-weak: hsl(221, 14%, 18%);
-       --bulma-code-background: hsl(221, 14%, 13%);
-       --bulma-code: hsl(221, 14%, 86%);
-       --bulma-pre-background: hsl(221, 14%, 13%);
-       --bulma-link: hsl(209, 100%, 70%);
-       --bulma-link-hover: hsl(209, 100%, 80%);
-     }
-   }
-
-   /* Inter covers body + display; give headings weight and tighter tracking
-      for rhythm without pulling in a second face. */
-   h1, h2, h3, h4, h5, h6, th { font-family: var(--bulma-family-primary); font-weight: 600; letter-spacing: -0.01em; }
-   h1 { margin-bottom: 0.2em; letter-spacing: -0.02em; }
-
-   /* Top nav: hook glyph + product name on the left, tabs on the right.
-      Tabs component from Bulma handles active-state styling; we only
-      need layout. */
-   .nav-wrap { display: flex; align-items: center; gap: 1.5em; margin-bottom: 0.6em; }
-   .nav-title { display: flex; align-items: center; gap: 0.45em; }
-   .nav-icon { color: #059669; display: inline-flex; align-items: center; }
-   .nav-icon svg { display: block; }
-   .nav-brand { font-size: 1.4em; font-weight: 700; letter-spacing: -0.02em; color: var(--bulma-text-strong); margin: 0; }
-   .nav-wrap .tabs { margin-bottom: 0 !important; flex: 1; }
-   .nav-wrap .tabs ul { border-bottom: none; }
-   .subtitle { color: var(--bulma-text-weak); margin-top: 0; }
-   .meta { color: var(--bulma-text-weak); font-size: 0.85em; }
-
-   /* --- Event list (bespoke grid — Bulma doesn't express this shape) --- */
-   .event-list article.event { margin: 0; padding: 0; border-radius: 4px; border: none; background: transparent; }
-   .event-list article.event + article.event { margin-top: 2px; }
-   .event-list details { margin: 0; }
-
-   .event-list details summary {
-     display: grid;
-     grid-template-columns: 1em 11em 20em 7em 10em 6em minmax(10em, 1fr);
-     gap: 0.7em;
-     align-items: center;
-     cursor: pointer;
-     padding: 0.35em 0.6em;
-     border-radius: 4px;
-     font-size: 0.88em;
-     list-style: none;
-   }
-   .event-list details summary::-webkit-details-marker { display: none; }
-   .event-list details summary::marker { display: none; }
-   .event-list details summary::after { display: none; }
-   .event-list details summary .chev {
-     color: var(--bulma-text-weak);
-     transition: transform 0.1s;
-     font-size: 0.9em;
-     display: inline-block;
-   }
-   .event-list details[open] summary .chev { transform: rotate(90deg); }
-   .event-list details summary:hover { background: var(--bulma-background); }
-   .event-list article.observed summary { opacity: 0.65; }
-   .event-list article.acted summary { font-weight: 500; }
-
-   .event-list details summary > *:not(.tag) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-   .event-list details summary .tag { overflow: visible; }
-   .event-list details summary .ts { font-family: var(--bulma-family-code); color: var(--bulma-text-weak); }
-   .event-list details summary .repo { color: var(--bulma-text-weak); }
-   .event-list details summary .evt { font-weight: 500; }
-   .event-list details summary .ctx { color: var(--bulma-text-weak); font-style: italic; cursor: help; }
-
-   .event-list .detail { padding: 0.8em 1.2em 1em 2em; background: var(--bulma-background); border-radius: 0 0 4px 4px; font-size: 0.9em; }
-   .event-list .detail dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.3em 1em; margin: 0 0 1em 0; }
-   .event-list .detail dt { font-family: var(--bulma-family-secondary); color: var(--bulma-text-weak); font-size: 0.85em; margin: 0; }
-   .event-list .detail dd { margin: 0; font-family: var(--bulma-family-code); font-size: 0.85em; word-break: break-all; }
-   .event-list .detail h5 { margin: 1em 0 0.3em 0; font-size: 0.85em; color: var(--bulma-text-weak); }
-   .event-list .detail pre { font-size: 0.8em; white-space: pre-wrap; word-break: break-word; max-height: 30em; overflow: auto; background: var(--bulma-scheme-main-bis); padding: 0.7em; border-radius: 4px; margin: 0; }
-
-   /* Filter form spacing under Bulma .columns. */
-   .filters { margin: 1.5em 0; }")
-
 (defn- encode-query
   "Build a `?k=v&...` query string from a keyword-keyed map, dropping
   blank values. URL-encodes values."
@@ -789,66 +596,6 @@
     (if (seq pairs)
       (str "?" (str/join "&" pairs))
       "")))
-
-(defn- dashboard-html
-  [q]
-  (let [open-all? (= "all" (:open q ""))
-        ;; Query used when following an in-page link — preserves filters
-        ;; but toggles the open flag.
-        link-q    (dissoc q :open)
-        open-url  (str "/" (encode-query (assoc link-q :open "all")))
-        close-url (str "/" (encode-query link-q))
-        self-url  (str "/" (encode-query q))
-        events    (log/query-events
-                    :limit       (or (some-> (:limit q) Long/parseLong) 50)
-                    :hook        (when-not (str/blank? (:hook q)) (:hook q))
-                    :event       (when-not (str/blank? (:event q)) (:event q))
-                    :session     (when-not (str/blank? (:session q)) (:session q))
-                    :decision    (when-not (str/blank? (:decision q)) (:decision q))
-                    :since       (when-not (str/blank? (:since q)) (:since q))
-                    :cwd-prefix  (when-not (str/blank? (:cwd-prefix q)) (:cwd-prefix q)))
-        repos     (distinct-repos)]
-    (str "<!doctype html>\n"
-         (hic/html
-           [:html {:lang "en"}
-            [:head
-             [:meta {:charset "utf-8"}]
-             [:title "cch · events"]
-             [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
-             ;; No auto-refresh: it kills any <details open> state the user
-             ;; has opened and jumps the scroll position. Manual refresh
-             ;; (Cmd+R, or the link in the meta area) until we have
-             ;; something smarter like SSE-patched partial reloads.
-             [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
-             [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
-             [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
-             [:link {:rel "stylesheet"
-                     :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
-             [:link {:rel "stylesheet"
-                     :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
-             [:script {:type "module"
-                       :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}]
-             [:style (hic/raw dashboard-css)]]
-            [:body
-             [:section.section
-              [:div.container
-               (nav-bar :events)
-               [:p.subtitle
-                "Centralized log of every Claude Code event cch is subscribed to. "
-                "Refresh the page (Cmd+R) to load newer events."]
-               (filter-form q repos)
-               [:p.meta
-                (format "%d event(s) · " (count events))
-                [:a {:href self-url} "↻ refresh"]
-                " · "
-                (if open-all?
-                  [:a {:href close-url} "close all"]
-                  [:a {:href open-url} "open all"])
-                " · "
-                [:a {:href "/"} "clear filters"]]
-               [:div.event-list
-                {:data-on-load "@get('/events/stream')"}
-                (for [e events] (event-card open-all? e))]]]]]))))
 
 ;; --- Handlers ---
 
@@ -934,14 +681,6 @@
                      [(keyword k)
                       (java.net.URLDecoder/decode v "UTF-8")]))))
          (into {}))))
-
-(defn- handle-dashboard
-  "GET / — server-rendered HTML dashboard (legacy Bulma events page)."
-  [req]
-  (let [q (parse-query (:query-string req))]
-    {:status 200
-     :headers {"Content-Type" "text/html; charset=utf-8"}
-     :body (dashboard-html q)}))
 
 (defn- handle-events-page
   "GET /events — new dense-table events page."
