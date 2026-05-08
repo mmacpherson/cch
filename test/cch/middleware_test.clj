@@ -13,11 +13,12 @@
     (is (< (:cch/elapsed-ms (meta result)) 100))))
 
 (deftest test-wrap-timing-nil-result
-  (testing "timing preserves nil (allow) result"
+  (testing "timing wraps nil result in empty map with elapsed-ms metadata"
     (let [handler (fn [_] nil)
           wrapped (mw/wrap-timing handler)
           result  (wrapped {})]
-      (is (nil? result)))))
+      (is (= {} result))
+      (is (number? (:cch/elapsed-ms (meta result)))))))
 
 (deftest test-wrap-error-handler
   (testing "catches exceptions and returns deny"

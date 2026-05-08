@@ -20,10 +20,10 @@ body {
   --c-ask-bg:   oklch(78% 0.14 75  / 0.12);
   --c-deny-bg:  oklch(68% 0.18 25  / 0.12);
 
-  --row-h:    26px;
-  --font-base: 12px;
-  --font-sm:  11px;
-  --font-xs:  9.5px;
+  --row-h:    28px;
+  --font-base: 13.5px;
+  --font-sm:  12px;
+  --font-xs:  10.5px;
 
   --family-ui:   system-ui, -apple-system, sans-serif;
   --family-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
@@ -230,14 +230,14 @@ h1, h2, h3, h4 { font-weight: 600; letter-spacing: -0.01em; }
 .dense-table tbody tr { border-bottom: 1px solid oklch(22% 0.02 250 / 0.4); }
 .dense-table tbody tr:hover { background: var(--accent-soft); }
 /* Column widths for table-layout:fixed — must be set on th */
-.dense-table .col-dot  { width: 1.8em; }
-.dense-table .col-time { width: 6.5em; font-family: var(--family-mono); color: var(--fg-muted); }
+.dense-table .col-dot  { width: 1.6em; }
+.dense-table .col-time { width: 5.5em; font-family: var(--family-mono); color: var(--fg-muted); }
 .dense-table .col-repo { width: 22%; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
 .dense-table .col-hook { width: 11%; }
-.dense-table .col-event { width: 12%; font-weight: 500; }
+.dense-table .col-event { width: 11%; font-weight: 500; }
 .dense-table .col-tool { width: 5%; }
-.dense-table .col-ctx  { width: 20%; color: var(--fg-muted); font-family: var(--family-mono); font-style: italic; }
-.dense-table .col-ms   { width: 5em; text-align: right; font-family: var(--family-mono); color: var(--fg-muted); }
+.dense-table .col-ctx  { color: var(--fg-muted); font-family: var(--family-mono); font-style: italic; }
+.dense-table .col-ms   { width: 4.5em; text-align: right; font-family: var(--family-mono); color: var(--fg-muted); }
 .dense-table tr.observed { opacity: 0.7; }
 .dense-table tr.detail-row { border-bottom: none; }
 .dense-table tr.detail-row td { padding: 0; height: auto; white-space: normal; max-width: none; }

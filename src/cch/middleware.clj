@@ -8,15 +8,15 @@
             [cheshire.core :as json]))
 
 (defn wrap-timing
-  "Adds :cch/elapsed-ms to result metadata. Preserves nil (allow)."
+  "Adds :cch/elapsed-ms to result metadata. When the handler returns nil
+  (allow), wraps it in an empty map so the metadata survives — wrap-logging
+  treats a result with no :decision key the same as nil."
   [handler]
   (fn [input]
     (let [start   (System/nanoTime)
           result  (handler input)
           elapsed (/ (- (System/nanoTime) start) 1e6)]
-      (if result
-        (vary-meta result assoc :cch/elapsed-ms elapsed)
-        result))))
+      (vary-meta (or result {}) assoc :cch/elapsed-ms elapsed))))
 
 (defn wrap-error-handler
   "Catches exceptions and returns a deny decision with the error message."
@@ -76,7 +76,7 @@
          :elapsed-ms (:elapsed_ms pub-event)
          :extra      extra})
       (events/publish! pub-event)
-      result)))
+      (when (:decision result) result))))
 
 (def default-middleware
   "Default middleware stack. Order matters — compose-middleware reverses then
