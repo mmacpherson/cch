@@ -931,7 +931,7 @@
                        (cond (>= h 24) (str (quot h 24) "d " (mod h 24) "h")
                              (pos? h)  (str h "h " m "m")
                              :else     (str m "m")))))
-        samples  (count (or (:observed data) []))]
+        samples  (or (:samples data) (count (or (:observed data) [])))]
     [:div.tile-row
      [:div.stat-tile
       [:div.stat-label "used"] [:div.stat-value (if current_pct (str (Math/round (double current_pct)) "%") "—")]]
