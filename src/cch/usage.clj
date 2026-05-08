@@ -73,7 +73,7 @@
   [:svg ...] tree, or a [:p ...] fallback when there's no data."
   [data]
   (if (nil? data)
-    [:p.has-text-grey
+    [:p {:style "color: var(--fg-muted);"}
      "Not enough rate-limit data yet to plot. The page populates as the "
      "statusLine reports usage."]
     (let [{:keys [observed resets-at window-start now last-pct projection]} data
@@ -103,7 +103,7 @@
              :class   "usage-chart"}
        [:text {:x (/ (+ x0 x1) 2.0) :y 14
                :text-anchor "middle" :font-size 10
-               :fill "var(--bulma-text-weak)"}
+               :fill "var(--fg-muted)"}
         "quota used (%)"]
        [:defs
         [:clipPath {:id "plot-clip"}
@@ -115,7 +115,7 @@
                     (take-while #(>= % window-start)))
              :let [x (sx t)]]
          [:line {:x1 x :x2 x :y1 (sy 100) :y2 y1
-                 :stroke "var(--bulma-text-weak)"
+                 :stroke "var(--fg-muted)"
                  :stroke-width 1
                  :opacity 0.25
                  :class "reset-cycle-tick"}])
@@ -123,7 +123,7 @@
        ;; If observed usage is above this line you're ahead of pace; below means behind.
        [:line {:x1 (sx window-start) :x2 (sx resets-at)
                :y1 (sy 0) :y2 (sy 100)
-               :stroke "var(--bulma-text-weak)"
+               :stroke "var(--fg-muted)"
                :stroke-width 1
                :stroke-dasharray "6 3"
                :opacity 0.55
@@ -133,34 +133,34 @@
              :let [y (sy pct)]]
          [:g
           [:line {:x1 x0 :x2 x1 :y1 y :y2 y
-                  :stroke "var(--bulma-border)"
+                  :stroke "var(--border)"
                   :stroke-width 1
                   :stroke-dasharray (when-not (= pct 100) "2 4")
                   :class (when (= pct 100) "ref-100")}]
           [:text {:x (- x0 8) :y (+ y 4)
                   :text-anchor "end" :font-size 10
-                  :fill "var(--bulma-text-weak)"}
+                  :fill "var(--fg-muted)"}
            (str pct "%")]])
        ;; --- date ticks on x-axis ---
        (for [t day-ticks
              :let [x (sx t)]]
          [:g
           [:line {:x1 x :x2 x :y1 y1 :y2 (+ y1 4)
-                  :stroke "var(--bulma-border)" :stroke-width 1}]
+                  :stroke "var(--border)" :stroke-width 1}]
           [:text {:x x :y (+ y1 18)
                   :text-anchor "middle" :font-size 10
-                  :fill "var(--bulma-text-weak)"}
+                  :fill "var(--fg-muted)"}
            (fmt-day t)]])
        ;; --- "now" vertical guide ---
        (let [x (sx now)]
          [:g
           [:line {:x1 x :x2 x :y1 y0 :y2 y1
-                  :stroke "var(--bulma-text-weak)"
+                  :stroke "var(--fg-muted)"
                   :stroke-width 1
                   :stroke-dasharray "3 3"}]
           [:text {:x (+ x 4) :y (+ y0 12)
                   :font-size 10
-                  :fill "var(--bulma-text-weak)"}
+                  :fill "var(--fg-muted)"}
            "now"]])
        ;; --- projection band + line, clipped to plot area ---
        (when projection
@@ -225,22 +225,7 @@
           [:div.v (format "%.0f%%" (double proj))
            (when-let [b (fmt-band band)] [:span.aux b])]]))]))
 
-(def page-css
-  "div.usage-grid { display: grid; grid-template-columns: 1fr 280px; gap: 1.5em; align-items: start; }
-   div.usage-chart-block { background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 6px; padding: 0.75em; }
-   svg.usage-chart .ref-100 { stroke: #dc2626; stroke-dasharray: none; }
-   /* Legend layout */
-   div.legend { font-size: 0.8em; color: var(--bulma-text-weak); margin-top: 0.6em; margin-bottom: 0.6em; display: flex; flex-wrap: wrap; gap: 0.5em 1em; line-height: 1.6; justify-content: center; }
-   svg.rate-chart { margin-top: 1.5em; border-top: 1px solid var(--bulma-border); padding-top: 0.5em; }
-   div.legend .legend-item { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.05em 0.3em; border-radius: 3px; }
-   div.legend .swatch { display: inline-block; width: 1.2em; height: 0.5em; border-radius: 1px; }
-   div.legend .swatch.observed { background: #059669; }
-   /* Side panel */
-   div.usage-stats { display: flex; flex-direction: column; gap: 0.6em; font-family: var(--bulma-family-primary); }
-   div.usage-stats .stat { padding: 0.5em 0.75em; background: var(--bulma-scheme-main); border: 1px solid var(--bulma-border); border-radius: 4px; }
-   div.usage-stats .k { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.05em; color: var(--bulma-text-weak); }
-   div.usage-stats .v { font-family: var(--bulma-family-code); font-size: 1.05em; }
-   div.usage-stats .v .aux { font-size: 0.75em; color: var(--bulma-text-weak); margin-left: 0.4em; }")
+;; page-css removed — all styles live in cch.css now
 
 (def ^:private rate-chart-h 280)
 
@@ -318,7 +303,7 @@
              :class   "rate-chart"}
        [:text {:x (/ (+ x0 x1) 2.0) :y 14
                :text-anchor "middle" :font-size 10
-               :fill "var(--bulma-text-weak)"}
+               :fill "var(--fg-muted)"}
         "burn rate (%/hr)"]
        [:defs
         [:clipPath {:id "rate-clip"}
@@ -327,30 +312,30 @@
        (for [r r-ticks :let [y (sy r)]]
          [:g
           [:line {:x1 x0 :x2 x1 :y1 y :y2 y
-                  :stroke "var(--bulma-border)" :stroke-width 1
+                  :stroke "var(--border)" :stroke-width 1
                   :stroke-dasharray (when (pos? r) "2 4")}]
           [:text {:x (- x0 8) :y (+ y 4) :text-anchor "end" :font-size 10
-                  :fill "var(--bulma-text-weak)"}
+                  :fill "var(--fg-muted)"}
            (str r "%/h")]])
        ;; x-axis date ticks (aligned with main chart)
        (for [t (->> (iterate #(+ % 86400) window-start) (take-while #(<= % resets-at)))
              :let [x (sx t)]]
          [:g
           [:line {:x1 x :x2 x :y1 y1 :y2 (+ y1 4)
-                  :stroke "var(--bulma-border)" :stroke-width 1}]
+                  :stroke "var(--border)" :stroke-width 1}]
           [:text {:x x :y (+ y1 16) :text-anchor "middle" :font-size 10
-                  :fill "var(--bulma-text-weak)"}
+                  :fill "var(--fg-muted)"}
            (fmt-day t)]])
        ;; "now" guide
        (let [x (sx now)]
          [:line {:x1 x :x2 x :y1 y0 :y2 y1
-                 :stroke "var(--bulma-text-weak)" :stroke-width 1
+                 :stroke "var(--fg-muted)" :stroke-width 1
                  :stroke-dasharray "3 3"}])
        ;; reset-cycle vertical ticks (same as main chart)
        (for [t (->> (iterate #(- % 86400) resets-at) (take-while #(>= % window-start)))
              :let [x (sx t)]]
          [:line {:x1 x :x2 x :y1 (sy (min y-top 100)) :y2 y1
-                 :stroke "var(--bulma-text-weak)" :stroke-width 1 :opacity 0.25}])
+                 :stroke "var(--fg-muted)" :stroke-width 1 :opacity 0.25}])
        ;; area fill + line, clipped
        [:g {:clip-path "url(#rate-clip)"}
         (when area-d

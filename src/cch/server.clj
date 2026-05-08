@@ -1170,37 +1170,65 @@
     (finally
       (forecast/signal-new-data!))))
 
+(defn- usage-alert-bar
+  "Amber/red alert if projected > 85%."
+  [fc]
+  (when-let [{:keys [projected_pct]} (:seven_day fc)]
+    (cond
+      (> projected_pct 95)
+      [:div.alert-bar.alert-danger
+       [:span.alert-dot] (format "projected %.0f%% — reduce burn rate" projected_pct)]
+      (> projected_pct 85)
+      [:div.alert-bar.alert-warn
+       [:span.alert-dot] (format "projected %.0f%% — approaching limit" projected_pct)])))
+
+(defn- usage-stat-tiles
+  "Six-tile status strip for the usage page."
+  [fc data]
+  (let [{:keys [current_pct projected_pct secs_left local_rate_phr]} (:seven_day fc)
+        fmt-time (fn [s]
+                   (when (and s (pos? s))
+                     (let [h (quot s 3600) m (quot (mod s 3600) 60)]
+                       (cond (>= h 24) (str (quot h 24) "d " (mod h 24) "h")
+                             (pos? h)  (str h "h " m "m")
+                             :else     (str m "m")))))
+        samples  (count (or (:observed data) []))]
+    [:div.tile-row
+     [:div.stat-tile
+      [:div.stat-label "used"] [:div.stat-value (if current_pct (str (Math/round (double current_pct)) "%") "—")]]
+     [:div.stat-tile {:class (when (and projected_pct (> projected_pct 85)) "warn")}
+      [:div.stat-label "projected"] [:div.stat-value (if projected_pct (str (Math/round (double projected_pct)) "%") "—")]]
+     [:div.stat-tile
+      [:div.stat-label "resets in"] [:div.stat-value (or (fmt-time secs_left) "—")]]
+     [:div.stat-tile
+      [:div.stat-label "burn rate"]
+      [:div.stat-value (if local_rate_phr (format "%.1f%%/h" (double local_rate_phr)) "—")]]
+     [:div.stat-tile
+      [:div.stat-label "samples"] [:div.stat-value (str samples)]]
+     [:div.stat-tile
+      [:div.stat-label "window"] [:div.stat-value "7 day"]]]))
+
 (defn- usage-html
   "Render the /usage page (server-side, hiccup → string)."
   []
-  (let [data (usage/build-data)]
-    (str "<!doctype html>\n"
-         (hic/html
+  (let [data (usage/build-data)
+        fc   (forecast/statusline-stats)]
+    (str (hic/html
            [:html {:lang "en"}
-            [:head
-             [:meta {:charset "utf-8"}]
-             [:title "cch · usage"]
-             [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
-             [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
-             [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
-             [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
-             [:link {:rel "stylesheet"
-                     :href "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"}]
-             [:link {:rel "stylesheet"
-                     :href "https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css"}]
-             [:style (hic/raw dashboard-css)]
-             [:style (hic/raw usage/page-css)]]
+            (page-head {:title "usage" :css-regime :custom})
             [:body
-             [:section.section
-              [:div.container
-               (nav-bar :usage)
-               [:p.subtitle
-                "Current 7-day rate-limit window. The orange line projects "
-                "where usage will land at the next reset, with its 90% "
-                "credible interval as a shaded band."]
-               [:p.meta
-                [:a {:href "/usage"} "↻ refresh"]]
-               (usage/page-body data)]]]]))))
+             (nav-bar :usage :custom)
+             [:div.page-wrap
+              [:div.page-header
+               [:div
+                [:h1 "usage"]
+                [:p.subtitle
+                 "7-day rate-limit window — projection with 90% credible interval"]]
+               [:div.header-actions
+                [:a.btn {:href "/usage"} "↻ refresh"]]]
+              (usage-alert-bar fc)
+              (usage-stat-tiles fc data)
+              (usage/page-body data)]]]))))
 
 (defn- handle-usage
   "GET /usage — server-rendered weekly window plot."
