@@ -455,10 +455,9 @@
        [:td.col-ms (when elapsed_ms
                     (let [ms (double elapsed_ms)]
                       (cond
-                        (< ms 0.01)  (format "%.0fµs" (* ms 1000))
-                        (< ms 1.0)   (format "%.2f" ms)
-                        (< ms 100)   (format "%.1f" ms)
-                        :else        (format "%.0f" ms))))]]
+                        (< ms 1.0)  "<1"
+                        (< ms 100)  (format "%.1f" ms)
+                        :else       (format "%.0f" ms))))]]
       [:tr.detail-row {:data-show (str "$detail_" id)}
        [:td {:colspan 8}
         [:dl.row-detail
