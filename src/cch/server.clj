@@ -924,7 +924,7 @@
 (defn- usage-stat-tiles
   "Six-tile status strip for the usage page."
   [fc data]
-  (let [{:keys [current_pct projected_pct secs_left local_rate_phr]} (:seven_day fc)
+  (let [{:keys [current_pct projected_pct secs_left local_rate_phr band]} (:seven_day fc)
         fmt-time (fn [s]
                    (when (and s (pos? s))
                      (let [h (quot s 3600) m (quot (mod s 3600) 60)]
@@ -936,7 +936,10 @@
      [:div.stat-tile
       [:div.stat-label "used"] [:div.stat-value (if current_pct (str (Math/round (double current_pct)) "%") "—")]]
      [:div.stat-tile {:class (when (and projected_pct (> projected_pct 85)) "warn")}
-      [:div.stat-label "projected"] [:div.stat-value (if projected_pct (str (Math/round (double projected_pct)) "%") "—")]]
+      [:div.stat-label "projected"]
+      [:div.stat-value (if projected_pct (str (Math/round (double projected_pct)) "%") "—")]
+      (when band
+        [:div.stat-sub {:style "opacity: 0.6"} (str (:lo band) "–" (:hi band) "%")])]
      [:div.stat-tile
       [:div.stat-label "resets in"] [:div.stat-value (or (fmt-time secs_left) "—")]]
      [:div.stat-tile

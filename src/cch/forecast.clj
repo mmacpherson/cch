@@ -328,11 +328,14 @@
                          (fused-burn-rate-7d resets-at now)
                          (recent-burn-rate-phr wpath resets-at now))]
       (when last-pct
-        (let [raw-proj (or (:proj proj-result) last-pct)]
+        (let [raw-proj (or (:proj proj-result) last-pct)
+              band     (:band proj-result)]
           (cond-> {:current_pct   (Math/round last-pct)
                    :projected_pct (Double/parseDouble (format "%.1f" raw-proj))
                    :secs_left     (max 0 (- resets-at now))}
-            (some? local-rate) (assoc :local_rate_phr (Double/parseDouble (format "%.1f" local-rate)))))))))
+            (some? local-rate) (assoc :local_rate_phr (Double/parseDouble (format "%.1f" local-rate)))
+            band (assoc :band {:lo (Math/round (double (:lo band)))
+                               :hi (Math/round (double (:hi band)))})))))))
 
 (def ^:private forecast-cache (atom nil))
 (def ^:private bg-thread (atom nil))

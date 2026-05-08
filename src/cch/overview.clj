@@ -27,12 +27,14 @@
 (defn- quota-tiles
   "Four stat tiles from forecast data."
   [fc]
-  (let [{:keys [current_pct projected_pct secs_left local_rate_phr]} (:seven_day fc)]
+  (let [{:keys [current_pct projected_pct secs_left local_rate_phr band]} (:seven_day fc)]
     [:div.tile-row
      (stat-tile "used" (or (format-pct current_pct) "—")
                 :subtitle "7-day window")
      (stat-tile "projected" (or (format-pct projected_pct) "—")
-                :subtitle "at reset"
+                :subtitle (if band
+                            (str (:lo band) "–" (:hi band) "%")
+                            "at reset")
                 :css-class (when (and projected_pct (> projected_pct 85)) "warn"))
      (stat-tile "resets in" (or (format-secs-left secs_left) "—")
                 :subtitle "next window")
