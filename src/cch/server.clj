@@ -26,6 +26,7 @@
             [cch.events :as events]
             [cch.forecast :as forecast]
             [cch.log :as log]
+            [cch.overview :as overview]
             [cch.protocol :as proto]
             [cch.stats :as stats]
             [cch.usage :as usage]
@@ -950,6 +951,19 @@
      :headers {"Content-Type" "text/html; charset=utf-8"}
      :body (events-page-html q)}))
 
+(defn- handle-overview
+  "GET / — overview landing page."
+  [_req]
+  (let [data (overview/build-data)]
+    {:status 200
+     :headers {"Content-Type" "text/html; charset=utf-8"}
+     :body (str (hic/html
+                  [:html
+                   (page-head {:title "overview" :css-regime :custom})
+                   [:body
+                    (nav-bar :overview :custom)
+                    (overview/page-body data)]]))}))
+
 (defn- handle-health
   [hooks]
   {:status 200
@@ -1505,7 +1519,7 @@
       (handle-events-page req)
 
       (and (= request-method :get) (= uri "/"))
-      {:status 302 :headers {"Location" "/events"} :body ""}
+      (handle-overview req)
 
       (and (= request-method :get))
       (or (serve-static uri)

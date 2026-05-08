@@ -449,24 +449,45 @@ table.matrix .row-action { font-size: var(--font-xs); color: var(--fg-muted); wh
 .grid-23 { display: grid; grid-template-columns: 2fr 1fr; gap: 0.8em; }
 .grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.6em; }
 
-/* --- Overview-specific --- */
-.overview-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 0.6em; margin-bottom: 1em; }
-.sparkline { display: inline-block; vertical-align: middle; }
-.activity-strip { margin-bottom: 1em; }
-.top-hooks .hook-row {
-  display: flex;
-  align-items: center;
+/* --- Stat tiles --- */
+.tile-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
   gap: 0.6em;
-  padding: 0.4em 0;
-  border-bottom: 1px solid oklch(22% 0.02 250 / 0.3);
+  margin-bottom: 1em;
 }
-.top-hooks .hook-row:last-child { border-bottom: none; }
-.top-hooks .fires { font-family: var(--family-mono); font-size: var(--font-sm); }
-.top-hooks .deny-badge {
-  margin-left: auto;
+.stat-tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.8em 1em;
+}
+.stat-tile.warn { border-color: var(--c-ask); }
+.stat-label {
   font-size: var(--font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  margin-bottom: 0.2em;
+}
+.stat-value {
+  font-size: 1.6em;
+  font-weight: 600;
   font-family: var(--family-mono);
-  color: var(--c-deny);
+  line-height: 1.2;
+}
+.stat-sub {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  margin-top: 0.15em;
+}
+
+/* --- Overview-specific --- */
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1em;
+  margin-top: 1.5rem;
 }
 
 /* --- Usage-specific --- */

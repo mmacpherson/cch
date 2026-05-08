@@ -445,10 +445,10 @@
           (.close conn))))))
 
 (deftest test-dashboard-renders
-  (testing "/ redirects to /events"
-    (let [resp (http/get (url "/") {:follow-redirects false})]
-      (is (= 302 (:status resp)))
-      (is (= "/events" (get-in resp [:headers "location"])))))
+  (testing "/ renders the overview page"
+    (let [resp (http/get (url "/"))]
+      (is (= 200 (:status resp)))
+      (is (str/includes? (:body resp) "overview"))))
   (testing "/events renders the new events page"
     (let [resp (http/get (url "/events"))]
       (is (= 200 (:status resp)))
