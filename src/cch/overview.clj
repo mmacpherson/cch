@@ -127,9 +127,7 @@
    [:div.page-header
     [:div
      [:h1 "overview"]
-     [:p.subtitle "at-a-glance system health and activity"]]
-    [:div.header-actions
-     [:a.btn {:href "/events"} "all events →"]]]
+     [:p.subtitle "at-a-glance system health and activity"]]]
 
    ;; Stat tiles
    (quota-tiles forecast)
@@ -167,5 +165,4 @@
       [:thead [:tr [:th "time"] [:th "hook"] [:th "event"] [:th "tool"]]]
       [:tbody
        (for [e recent] (mini-event-row e))]]
-     [:div {:style "margin-top: 0.5rem; text-align: right;"}
-      [:a {:href "/events" :style "color: var(--accent); font-size: var(--font-sm);"} "all events →"]]]]])
+     ]]])

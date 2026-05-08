@@ -203,27 +203,6 @@
     [:span.swatch {:style (str "background:" projection-color)}]
     " projected (90% CI)"]])
 
-(defn- fmt-band [{:keys [lo hi]}]
-  (when (and lo hi (not= lo hi))
-    (format " (%.0f%% — %.0f%%)" (double lo) (double hi))))
-
-(defn summary-stats
-  "Right-rail readout: current pct, time remaining, sample count, burn
-   rate, and projected end-of-window pct with credible interval."
-  [{:keys [last-pct projection resets-at now samples rate-phr]}]
-  (let [hours-left (max 0.0 (/ (- resets-at now) 3600.0))]
-    [:div.usage-stats
-     [:div.stat [:div.k "current"]   [:div.v (format "%.0f%%" (double last-pct))]]
-     [:div.stat [:div.k "resets in"] [:div.v (format "%.1f h" hours-left)]]
-     [:div.stat [:div.k "samples"]   [:div.v (str samples)]]
-     (when rate-phr
-       [:div.stat [:div.k "rate"] [:div.v (format "%.1f%%/hr" (double rate-phr))]])
-     (when projection
-       (let [{:keys [proj band]} projection]
-         [:div.stat
-          [:div.k "projected at reset"]
-          [:div.v (format "%.0f%%" (double proj))
-           (when-let [b (fmt-band band)] [:span.aux b])]]))]))
 
 ;; page-css removed — all styles live in cch.css now
 
@@ -349,14 +328,10 @@
 (defn page-body
   "Hiccup body for the /usage page. Caller wraps with html/head/nav."
   [data]
-  [:div.usage-grid
-   ;; Single block wraps chart + legend so :has() can reach from a
-   ;; legend hover into the SVG to isolate the matching method.
-   [:div.usage-chart-block
-    (chart-svg data)
-    (legend data)
-    (rate-chart-svg data)]
-   (when data (summary-stats data))])
+  [:div.usage-chart-block
+   (chart-svg data)
+   (legend data)
+   (rate-chart-svg data)])
 
 (defn build-data
   "Public entry point — fetches the bundle from forecast. Indirection

@@ -79,34 +79,18 @@
                     (map (comp #(Double/parseDouble %) second)))]
       (is (every? #(<= -1.0 % 281.0) ys)))))
 
-(deftest summary-stats-renders-projection
-  (testing "right-rail stats include projected % and credible interval"
-    (let [out (str (u/summary-stats (make-data)))]
-      (is (re-find #"24%"   out) "current pct")
-      (is (re-find #"75%"   out) "projected pct")
-      (is (re-find #"60.*90" out) "band rendered as range")
-      (is (re-find #"projected at reset" out)))))
-
-(deftest summary-stats-without-projection
-  (testing "no projection → no projection stat row"
-    (let [out (str (u/summary-stats (assoc (make-data) :projection nil)))]
-      (is (not (re-find #"projected at reset" out)))
-      (is (re-find #"current" out) "core stats still present"))))
-
 (deftest legend-shows-observed-and-projected
   (let [out (str (u/legend (make-data)))]
     (is (re-find #"observed" out))
     (is (re-find #"projected" out))))
 
 (deftest page-body-no-data
-  (testing "no-data path renders the chart fallback but no stats panel"
+  (testing "no-data path renders the chart fallback"
     (let [out (str (u/page-body nil))]
-      (is (re-find #"Not enough" out))
-      (is (not (re-find #"usage-stats" out))))))
+      (is (re-find #"Not enough" out)))))
 
 (deftest page-body-with-data
-  (testing "data path renders chart + stats grid"
+  (testing "data path renders chart + legend"
     (let [out (str (u/page-body (make-data)))]
-      (is (re-find #"usage-grid"  out))
-      (is (re-find #"usage-stats" out))
-      (is (re-find #"svg"         out)))))
+      (is (re-find #"usage-chart-block" out))
+      (is (re-find #"svg" out)))))

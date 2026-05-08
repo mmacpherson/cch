@@ -491,7 +491,6 @@ table.matrix .row-action { font-size: var(--font-xs); color: var(--fg-muted); wh
 }
 
 /* --- Usage-specific --- */
-.usage-grid { display: grid; grid-template-columns: 1fr 280px; gap: 1.5em; align-items: start; }
 .usage-chart-block { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.75em; }
 svg.usage-chart .ref-100 { stroke: var(--c-deny); stroke-dasharray: none; }
 svg.rate-chart { margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 0.5em; }
@@ -500,12 +499,6 @@ svg.rate-chart { margin-top: 1.5em; border-top: 1px solid var(--border); padding
 .legend .legend-item { display: inline-flex; align-items: center; gap: 0.35em; padding: 0.05em 0.3em; border-radius: 3px; }
 .legend .swatch { display: inline-block; width: 1.2em; height: 0.5em; border-radius: 1px; }
 .legend .swatch.observed { background: #059669; }
-/* Side panel stats */
-.usage-stats { display: flex; flex-direction: column; gap: 0.6em; }
-.usage-stats .stat { padding: 0.5em 0.75em; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
-.usage-stats .k { font-size: var(--font-xs); text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-muted); }
-.usage-stats .v { font-family: var(--family-mono); font-size: 1.05em; }
-.usage-stats .v .aux { font-size: var(--font-xs); color: var(--fg-muted); margin-left: 0.4em; }
 
 /* --- Chart SVG token bridge ---
    Charts reference these via var() so they adapt to theme. */
