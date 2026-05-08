@@ -34,7 +34,7 @@
      (stat-tile "projected"
                 (list (or (format-pct projected_pct) "—")
                       (when band
-                        [:span {:style "font-size: 0.45em; opacity: 0.5; margin-left: 0.4em; font-weight: 400"}
+                        [:span {:style "font-size: 0.55em; opacity: 0.7; margin-left: 0.4em; font-weight: 400"}
                          (str (:lo band) "–" (:hi band) "%")]))
                 :subtitle "at reset"
                 :css-class (when (and projected_pct (> projected_pct 85)) "warn"))

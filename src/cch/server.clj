@@ -939,7 +939,7 @@
       [:div.stat-label "projected"]
       [:div.stat-value (if projected_pct (str (Math/round (double projected_pct)) "%") "—")
        (when band
-         [:span {:style "font-size: 0.45em; opacity: 0.5; margin-left: 0.4em; font-weight: 400"}
+         [:span {:style "font-size: 0.55em; opacity: 0.7; margin-left: 0.4em; font-weight: 400"}
           (str (:lo band) "–" (:hi band) "%")])]]
      [:div.stat-tile
       [:div.stat-label "resets in"] [:div.stat-value (or (fmt-time secs_left) "—")]]
