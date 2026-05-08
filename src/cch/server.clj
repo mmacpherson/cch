@@ -965,7 +965,7 @@
                  "7-day rate-limit window — projection with 90% credible interval"]]
                [:div.header-actions
                 [:a.btn {:href "/usage"} "↻ refresh"]]]
-              (usage-alert-bar fc)
+              ;; TODO: usage-alert-bar — revisit with actionable guidance
               (usage-stat-tiles fc data)
               (usage/page-body data)]]]))))
 
