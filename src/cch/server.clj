@@ -306,7 +306,7 @@
        [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
        [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
        [:link {:rel "stylesheet"
-               :href "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"}]
+               :href "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=block"}]
        [:link {:rel "stylesheet" :href "/cch.css"}]
        [:script {:type "module"
                  :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}])
