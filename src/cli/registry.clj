@@ -67,6 +67,12 @@
                     :events      [{:event "PreCompact"        :matcher nil}
                                   {:event "UserPromptSubmit"  :matcher nil}]
                     :description "Budget-aware compaction governor with repo-specific preservation"}
+   "codex-usage-capture"
+                   {:type        :code
+                    :ns          "hooks.codex-usage-capture"
+                    :event       "Stop"
+                    :matcher     nil
+                    :description "Mirrors Codex rate-limit snapshots into context_snapshots (no-op for non-Codex agents)"}
    "event-log"     {:type        :code
                     :ns          "hooks.event-log"
                     :events      [;; Tool events: matcher ".*" matches every tool.

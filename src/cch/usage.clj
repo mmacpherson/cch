@@ -361,6 +361,8 @@
 (defn build-data
   "Public entry point — fetches the bundle from forecast. Indirection
    kept so tests can pass synthetic bundles to chart-svg directly.
+   `agent` defaults to forecast/default-agent ('claude-code');
    `window-key` defaults to :seven-day."
-  ([] (build-data :seven-day))
-  ([window-key] (forecast/current-window window-key)))
+  ([] (forecast/current-window))
+  ([window-key] (forecast/current-window window-key))
+  ([agent window-key] (forecast/current-window agent window-key)))

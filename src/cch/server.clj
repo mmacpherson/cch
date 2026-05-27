@@ -899,19 +899,22 @@
 (defn- handle-context-snapshot
   "POST /context-snapshot — store a context window snapshot from the status line.
   Accepts the full statusLine JSON payload; extracts indexed columns and
-  stores the entire payload as a JSON blob."
+  stores the entire payload as a JSON blob. X-CCH-Agent header (defaults
+  to 'claude-code') tags the row so per-agent /usage views can filter."
   [req]
   (try
     (let [body-str (slurp (:body req))
           body     (json/parse-string body-str true)
-          ctx      (:context_window body)]
+          ctx      (:context_window body)
+          agent    (or (get-in req [:headers "x-cch-agent"]) "claude-code")]
       (log/log-context-snapshot!
         {:session-id     (:session_id body)
          :used-pct       (:used_percentage ctx)
          :current-tokens (coerce-current-tokens (:current_usage ctx))
          :window-size    (:context_window_size ctx)
          :model-id       (get-in body [:model :id])
-         :payload        body-str})
+         :payload        body-str
+         :agent          agent})
       {:status 204 :headers {} :body ""})
     (catch Exception e
       {:status 500
@@ -967,27 +970,41 @@
      [:div.stat-tile
       [:div.stat-label "samples"] [:div.stat-value (str samples)]]]))
 
+(defn- usage-href
+  "Build a /usage URL preserving the orthogonal axis. Omits defaults so
+  shared links stay short."
+  [{:keys [window agent]}]
+  (let [params (cond-> []
+                 (= window :five-hour) (conj "window=5h")
+                 (and agent (not= agent "claude-code"))
+                 (conj (str "agent=" agent)))]
+    (if (seq params)
+      (str "/usage?" (str/join "&" params))
+      "/usage")))
+
 (defn- filter-strip
   "Page-level filters: which window, which source CLI. Tab vocabulary
-   matches the top nav (.nav-tab). The source toggle is a stub until
-   the :agent column lands (claude-code-hooks-9a2); codex appears
-   disabled with a 'soon' hint."
-  [active-window]
+   matches the top nav (.nav-tab). Each axis preserves the other when
+   the user clicks a tab — switching agent keeps the chosen window, and
+   vice versa."
+  [active-window active-agent]
   [:div.filter-strip
    [:div.filter-group
     [:span.filter-label "Window"]
     [:div.filter-tabs
      (for [[k label] [[:five-hour "5h"] [:seven-day "7d"]]]
-       [:a.filter-tab {:href  (str "/usage?window=" (if (= k :five-hour) "5h" "7d"))
+       [:a.filter-tab {:href  (usage-href {:window k :agent active-agent})
                        :class (when (= k active-window) "active")
                        :aria-current (when (= k active-window) "page")}
         label])]]
    [:div.filter-group
     [:span.filter-label "Source"]
     [:div.filter-tabs
-     [:a.filter-tab.active {:href "/usage"} "Claude"]
-     [:a.filter-tab.disabled {:title "Codex support pending (claude-code-hooks-ql4)"
-                              :aria-disabled "true"} "Codex"]]]])
+     (for [[agent label] [["claude-code" "Claude"] ["codex" "Codex"]]]
+       [:a.filter-tab {:href  (usage-href {:window active-window :agent agent})
+                       :class (when (= agent active-agent) "active")
+                       :aria-current (when (= agent active-agent) "page")}
+        label])]]])
 
 (defn- parse-window
   "?window=5h|5hour|five-hour → :five-hour. ?window=7d|7day|seven-day → :seven-day.
@@ -997,17 +1014,29 @@
     ("5h" "5hour" "5-hour" "five-hour" "fivehour") :five-hour
     :seven-day))
 
+(defn- parse-agent
+  "?agent=codex|claude|claude-code → canonical agent string. Default 'claude-code'.
+   Unrecognized values fall back to 'claude-code' rather than 404ing the page."
+  [q]
+  (case (some-> (:agent q) str/lower-case)
+    ("codex")                       "codex"
+    ("claude" "claude-code" "cc")   "claude-code"
+    "claude-code"))
+
 (defn- usage-html
-  "Render the /usage page (server-side, hiccup → string)."
-  [window-key]
-  (let [data (usage/build-data window-key)
-        fc   (forecast/statusline-stats)
+  "Render the /usage page (server-side, hiccup → string).
+   `agent` selects the data source; the statusline tiles only show for
+   Claude because Codex doesn't feed the bg forecast cache."
+  [window-key agent]
+  (let [data     (usage/build-data agent window-key)
+        ;; statusline tile data is bg-refreshed for claude-code only;
+        ;; for other agents we fall back to deriving from `data` (no
+        ;; band/burn-rate display until codex tab has its own refresh path).
+        fc       (when (= agent "claude-code") (forecast/statusline-stats))
         subtitle (case window-key
                    :five-hour "5-hour rate-limit window — projection with 90% credible interval"
                    "7-day rate-limit window — projection with 90% credible interval")
-        href (case window-key
-               :five-hour "/usage?window=5h"
-               "/usage?window=7d")]
+        href     (usage-href {:window window-key :agent agent})]
     (str (hic/html
            [:html {:lang "en"}
             (page-head {:title "usage" :css-regime :custom})
@@ -1020,19 +1049,21 @@
                 [:p.subtitle subtitle]]
                [:div.header-actions
                 [:a.btn {:href href} "↻ refresh"]]]
-              (filter-strip window-key)
+              (filter-strip window-key agent)
               ;; TODO: usage-alert-bar — revisit with actionable guidance
               (usage-stat-tiles fc data window-key)
               (usage/page-body data)]]]))))
 
 (defn- handle-usage
-  "GET /usage[?window=5h|7d] — server-rendered rate-limit window plot."
+  "GET /usage[?window=5h|7d][&agent=claude-code|codex] — server-rendered
+  rate-limit window plot."
   [req]
-  (let [q (parse-query (:query-string req))
-        window-key (parse-window q)]
+  (let [q          (parse-query (:query-string req))
+        window-key (parse-window q)
+        agent      (parse-agent q)]
     {:status  200
      :headers {"Content-Type" "text/html; charset=utf-8"}
-     :body    (usage-html window-key)}))
+     :body    (usage-html window-key agent)}))
 
 (defn- handle-forecast
   "GET /forecast — current pct + Bayesian projection + time-to-reset for

@@ -36,22 +36,38 @@
 (def ^:private scale-5h->7d 0.133)
 (def ^:private weight-5h    7.5)
 
+(def ^:const default-agent "claude-code")
+
+(defn- escape-sql-literal
+  "Single-quote escape for SQL string literals. Defensive — agent strings
+   come from HTTP headers and registry constants, never user prompts, but
+   we treat them as untrusted regardless."
+  [s]
+  (clojure.string/replace (str s) "'" "''"))
+
+(defn- agent-clause
+  "AND fragment that scopes a query to the given agent."
+  [agent]
+  (format " AND agent = '%s' " (escape-sql-literal agent)))
+
 (defn- latest-resets-at
-  "The most recent resets_at for a given window."
-  [window-key]
+  "The most recent resets_at for a given window, scoped to `agent`."
+  [agent window-key]
   (let [wpath (window-sql-path window-key)
         sql   (format
                 (str "SELECT json_extract(payload, '$.rate_limits.%s.resets_at') AS resets_at "
                      "FROM context_snapshots "
                      "WHERE json_extract(payload, '$.rate_limits.%s.resets_at') IS NOT NULL "
+                     "%s"
                      "ORDER BY id DESC LIMIT 1")
-                wpath wpath)]
+                wpath wpath (agent-clause agent))]
     (some-> (db/query sql) first :resets_at long)))
 
 (defn- filtered-samples
-  "Fetch rate-limit samples for `window-key` since `since-iso`, with
-   drop-stale and time-bucket thinning done in SQL via window functions."
-  [since-iso window-key]
+  "Fetch rate-limit samples for `window-key` since `since-iso`, scoped to
+   `agent`, with drop-stale and time-bucket thinning done in SQL via
+   window functions."
+  [agent since-iso window-key]
   (let [wpath  (window-sql-path window-key)
         bucket (bucket-secs window-key)
         sql    (format
@@ -65,6 +81,7 @@
                    "  WHERE timestamp >= '%s'"
                    "    AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
                    "    AND session_id NOT LIKE 'test%%'"
+                   "    %s"
                    "  ORDER BY timestamp ASC"
                    "), "
                    "fresh AS ("
@@ -91,7 +108,7 @@
                    "SELECT ts, pct, resets_at FROM bucketed"
                    " WHERE bucket_rn = 1"
                    " ORDER BY ts")
-                 wpath wpath since-iso wpath bucket)]
+                 wpath wpath since-iso wpath (agent-clause agent) bucket)]
     (some->> (db/query sql)
              (mapv (fn [{:keys [ts pct resets_at]}]
                      {:ts        (long ts)
@@ -99,26 +116,28 @@
                       :resets-at (long resets_at)})))))
 
 (defn- raw-sample-count
-  "Total row count before filtering — for the /usage page's sample display."
-  [since-iso window-key]
+  "Total row count before filtering for `agent` — for the /usage page's
+   sample display."
+  [agent since-iso window-key]
   (let [wpath (window-sql-path window-key)
         sql   (format
                 (str "SELECT COUNT(*) AS n FROM context_snapshots"
                      " WHERE timestamp >= '%s'"
                      " AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
-                     " AND session_id NOT LIKE 'test%%'")
-                since-iso wpath)]
+                     " AND session_id NOT LIKE 'test%%'"
+                     " %s")
+                since-iso wpath (agent-clause agent))]
     (some-> (db/query sql) first :n long)))
 
 (defn- epoch->iso [secs]
   (str (java.time.Instant/ofEpochSecond secs)))
 
 (defn- rate-5h-samples
-  "60s-bucketed five-hour window samples for the full 7d span.
+  "60s-bucketed five-hour window samples for the full 7d span, scoped to `agent`.
    Monotone filter is partitioned per resets_at so each 5h window is
    treated independently. Returns :resets-at so the chart can avoid
    spanning a reset boundary when computing a lookback-window rate."
-  [since-iso]
+  [agent since-iso]
   (let [sql (format
               (str "WITH samples AS ("
                    "  SELECT CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
@@ -128,6 +147,7 @@
                    "  WHERE timestamp >= '%s'"
                    "    AND json_extract(payload, '$.rate_limits.five_hour.used_percentage') IS NOT NULL"
                    "    AND session_id NOT LIKE 'test%%'"
+                   "    %s"
                    "  ORDER BY timestamp ASC"
                    "), fresh AS ("
                    "  SELECT *,"
@@ -140,7 +160,7 @@
                    "  SELECT *, ROW_NUMBER() OVER (PARTITION BY resets_at, ts / 60 ORDER BY ts) AS rn"
                    "  FROM monotone"
                    ") SELECT ts, pct, resets_at FROM bucketed WHERE rn = 1 ORDER BY ts")
-              since-iso)]
+              since-iso (agent-clause agent))]
     (some->> (db/query sql)
              (mapv (fn [{:keys [ts pct resets_at]}]
                      {:ts (long ts) :pct (double pct) :resets-at (long resets_at)})))))
@@ -166,37 +186,41 @@
           sigma (max prior-sigma-floor (Math/sqrt var))]
       {:mu mu :sigma sigma})))
 
-(def ^:private historical-finals-sql
-  (str "SELECT final_pct FROM ("
-       "  SELECT MAX(CAST(json_extract(payload,'$.rate_limits.seven_day.used_percentage') AS REAL))"
-       "    AS final_pct"
-       "  FROM context_snapshots"
-       "  WHERE json_extract(payload,'$.rate_limits.seven_day.resets_at') < strftime('%s','now')"
-       "    AND json_extract(payload,'$.rate_limits.seven_day.used_percentage') IS NOT NULL"
-       "    AND session_id NOT LIKE 'test%'"
-       "  GROUP BY json_extract(payload,'$.rate_limits.seven_day.resets_at')"
-       "  ORDER BY json_extract(payload,'$.rate_limits.seven_day.resets_at') DESC"
-       "  LIMIT 12"
-       ") WHERE final_pct >= 10"))
+(defn- historical-finals-sql [agent]
+  (format
+    (str "SELECT final_pct FROM ("
+         "  SELECT MAX(CAST(json_extract(payload,'$.rate_limits.seven_day.used_percentage') AS REAL))"
+         "    AS final_pct"
+         "  FROM context_snapshots"
+         "  WHERE json_extract(payload,'$.rate_limits.seven_day.resets_at') < strftime('%%s','now')"
+         "    AND json_extract(payload,'$.rate_limits.seven_day.used_percentage') IS NOT NULL"
+         "    AND session_id NOT LIKE 'test%%'"
+         "    %s"
+         "  GROUP BY json_extract(payload,'$.rate_limits.seven_day.resets_at')"
+         "  ORDER BY json_extract(payload,'$.rate_limits.seven_day.resets_at') DESC"
+         "  LIMIT 12"
+         ") WHERE final_pct >= 10")
+    (agent-clause agent)))
 
 (defn- historical-final-pcts
   "Final used_percentage for each completed 7-day window, newest-first, up to 12."
-  []
-  (some->> (db/query historical-finals-sql)
+  [agent]
+  (some->> (db/query (historical-finals-sql agent))
            (mapv #(double (:final_pct %)))))
 
 (defn- learned-prior
-  "Derive an empirical Bayes prior (μ/σ in %/hr) from completed windows.
-   Returns nil during the first week when there is no history."
-  []
-  (some->> (db/query historical-finals-sql)
+  "Derive an empirical Bayes prior (μ/σ in %/hr) from completed windows
+   for `agent`. Returns nil during the first week when there is no history."
+  [agent]
+  (some->> (db/query (historical-finals-sql agent))
            (weighted-prior-params)))
 
 (defn- build-current-window
-  "Rich data bundle for the /usage page, for either :seven-day or :five-hour.
-   Returns nil when no rate-limit data exists for the window."
-  [window-key]
-  (when-let [raw-resets-at (latest-resets-at window-key)]
+  "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
+   scoped to `agent`. Returns nil when no rate-limit data exists for the
+   window."
+  [agent window-key]
+  (when-let [raw-resets-at (latest-resets-at agent window-key)]
     (let [now          (-> (Instant/now) .getEpochSecond)
           span         (span-secs window-key)
           ;; After a reset the DB still has the old resets_at until the CLI
@@ -205,7 +229,7 @@
                          (+ raw-resets-at span)
                          raw-resets-at)
           window-start (- resets-at span)
-          raw-samples  (filtered-samples (epoch->iso window-start) window-key)
+          raw-samples  (filtered-samples agent (epoch->iso window-start) window-key)
           ;; Stale sessions cache old rate-limit state and keep reporting
           ;; the expired resets_at with high pct values for hours after a
           ;; reset. Only keep samples tagged with the current resets_at.
@@ -214,7 +238,7 @@
           ;; Historical priors only derived for 7d today — 5h relies on the
           ;; hardcoded window-config prior. Plenty of 5h windows exist to
           ;; learn from later; that's deferred work.
-          hist-finals  (when (= window-key :seven-day) (historical-final-pcts))
+          hist-finals  (when (= window-key :seven-day) (historical-final-pcts agent))
           window-info  {:now now :resets-at resets-at
                         :window-start window-start :last-pct last-pct
                         :historical-finals hist-finals}
@@ -230,10 +254,11 @@
           ;; and scale into 7d-%/hr units. For 5h-native we just reuse the
           ;; observed samples (already 60s-bucketed) at unit scale.
           rate-samples (if (= window-key :seven-day)
-                         (rate-5h-samples (epoch->iso window-start))
+                         (rate-5h-samples agent (epoch->iso window-start))
                          in-window)
           rate-scale   (if (= window-key :seven-day) scale-5h->7d 1.0)]
-      {:window-key      window-key
+      {:agent           agent
+       :window-key      window-key
        :span-secs       span
        :observed        obs-pairs
        :rate-samples    rate-samples
@@ -242,26 +267,29 @@
        :window-start    window-start
        :now             now
        :last-pct        last-pct
-       :samples         (or (raw-sample-count (epoch->iso window-start) window-key) 0)
+       :samples         (or (raw-sample-count agent (epoch->iso window-start) window-key) 0)
        :projection      projection
        :rate-phr        recent-rate})))
 
-;; Cache current-window per window-key for 30s — data arrives at most once
-;; per minute via the statusLine hook, so re-running 4 queries + LOESS +
-;; projections on every browser hit is pure waste.
+;; Cache current-window per [agent window-key] for 30s — data arrives at
+;; most once per minute via the statusLine hook (or per turn for codex),
+;; so re-running 4 queries + LOESS + projections on every browser hit is
+;; pure waste.
 (def ^:private window-cache (atom {}))
 
 (defn current-window
-  "Data bundle for the /usage page. Cached for 30 s, per window-key.
-   `window-key` defaults to :seven-day."
-  ([] (current-window :seven-day))
-  ([window-key]
-   (let [{:keys [ts data]} (get @window-cache window-key {:ts 0 :data nil})
-         now (-> (Instant/now) .getEpochSecond)]
+  "Data bundle for the /usage page. Cached for 30 s, per [agent window-key].
+   Default agent is 'claude-code'; default window-key is :seven-day."
+  ([] (current-window default-agent :seven-day))
+  ([window-key] (current-window default-agent window-key))
+  ([agent window-key]
+   (let [k                  [agent window-key]
+         {:keys [ts data]}  (get @window-cache k {:ts 0 :data nil})
+         now                (-> (Instant/now) .getEpochSecond)]
      (if (< (- now ts) 30)
        data
-       (let [fresh (build-current-window window-key)]
-         (swap! window-cache assoc window-key {:ts now :data fresh})
+       (let [fresh (build-current-window agent window-key)]
+         (swap! window-cache assoc k {:ts now :data fresh})
          fresh)))))
 
 (def ^:private window-config
@@ -275,10 +303,11 @@
 (def ^:private burn-lookback-secs 1200)
 
 (defn- recent-burn-rate-phr
-  "Observed burn rate in %/hr over the past ~20 min of raw samples.
-   Compares newest vs oldest pct within the window across all concurrent
-   sessions. Returns 0.0 when idle, nil when fewer than 2 samples."
-  [wpath resets-at now]
+  "Observed burn rate in %/hr over the past ~20 min of raw samples,
+   scoped to `agent`. Compares newest vs oldest pct within the window
+   across all concurrent sessions. Returns 0.0 when idle, nil when fewer
+   than 2 samples."
+  [agent wpath resets-at now]
   (let [cutoff-iso (epoch->iso (- now burn-lookback-secs))
         sql        (format
                      (str "SELECT CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
@@ -288,8 +317,9 @@
                           "   AND json_extract(payload, '$.rate_limits.%s.resets_at') = %d"
                           "   AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
                           "   AND session_id NOT LIKE 'test%%'"
+                          "   %s"
                           " ORDER BY ts ASC")
-                     wpath cutoff-iso wpath resets-at wpath)
+                     wpath cutoff-iso wpath resets-at wpath (agent-clause agent))
         rows       (db/query sql)]
     (when (>= (count rows) 2)
       (let [oldest    (first rows)
@@ -305,12 +335,13 @@
 ;; weight 1, each older week is multiplied by this factor.
 (defn- fused-burn-rate-7d
   "Inverse-variance weighted fusion of 7d-direct and 5h-scaled burn rates,
-   both in 7d-percent/hr. 5h weight = 7.5 (proportional to its tick frequency)."
-  [resets-at-7d now]
-  (let [r7d  (some-> (recent-burn-rate-phr "seven_day" resets-at-7d now) (max 0.0))
-        r5at (latest-resets-at :five-hour)
+   both in 7d-percent/hr, scoped to `agent`. 5h weight = 7.5
+   (proportional to its tick frequency)."
+  [agent resets-at-7d now]
+  (let [r7d  (some-> (recent-burn-rate-phr agent "seven_day" resets-at-7d now) (max 0.0))
+        r5at (latest-resets-at agent :five-hour)
         r5h  (when r5at
-               (some-> (recent-burn-rate-phr "five_hour" r5at now)
+               (some-> (recent-burn-rate-phr agent "five_hour" r5at now)
                        (* scale-5h->7d)
                        (max 0.0)))]
     (cond
@@ -319,25 +350,25 @@
       r7d           r7d)))
 
 (defn- compute-window-stats
-  "Assemble observations for `window-key`, run `proj-fn` to get the
-   forward projection, and return the statusLine stats map.
+  "Assemble observations for `window-key` scoped to `agent`, run `proj-fn`
+   to get the forward projection, and return the statusLine stats map.
    `proj-fn` must satisfy `[observed window-info] → {:proj ...} | nil`."
-  [window-key proj-fn]
-  (when-let [raw-resets-at (latest-resets-at window-key)]
+  [agent window-key proj-fn]
+  (when-let [raw-resets-at (latest-resets-at agent window-key)]
     (let [now          (-> (Instant/now) .getEpochSecond)
           span         (span-secs window-key)
           resets-at    (if (<= raw-resets-at now)
                          (+ raw-resets-at span)
                          raw-resets-at)
           base-cfg     (window-config window-key)
-          learned      (when (= window-key :seven-day) (learned-prior))
+          learned      (when (= window-key :seven-day) (learned-prior agent))
           {:keys [prior-mu prior-sigma]} (merge base-cfg learned)
           wpath        (window-sql-path window-key)
           window-start (- resets-at span)
-          raw-samples  (filtered-samples (epoch->iso window-start) window-key)
+          raw-samples  (filtered-samples agent (epoch->iso window-start) window-key)
           in-window    (filterv #(= (:resets-at %) resets-at) raw-samples)
           last-pct     (:pct (last in-window))
-          hist-finals  (when (= window-key :seven-day) (historical-final-pcts))
+          hist-finals  (when (= window-key :seven-day) (historical-final-pcts agent))
           window-info  {:now now :resets-at resets-at
                         :window-start window-start :last-pct last-pct
                         :prior-mu prior-mu :prior-sigma prior-sigma
@@ -345,8 +376,8 @@
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
           proj-result  (when last-pct (proj-fn obs-pairs window-info))
           local-rate   (if (= window-key :seven-day)
-                         (fused-burn-rate-7d resets-at now)
-                         (recent-burn-rate-phr wpath resets-at now))]
+                         (fused-burn-rate-7d agent resets-at now)
+                         (recent-burn-rate-phr agent wpath resets-at now))]
       (when last-pct
         (let [raw-proj (or (:proj proj-result) last-pct)
               band     (:band proj-result)]
@@ -369,10 +400,15 @@
   (when-let [ch @signal-ch-ref]
     (async/put! ch :signal)))
 
-(defn- do-refresh! []
+(defn- do-refresh!
+  "Refresh the statusline forecast cache. Claude-only — the statusLine
+  command is Claude Code's; Codex uses its own built-in status_line
+  config. The /usage page's Codex tab pulls live data via current-window
+  (its own per-[agent window-key] cache), not via this atom."
+  []
   (reset! forecast-cache
-          {:five_hour    (compute-window-stats :five-hour  proj/rate-bayes-projection)
-           :seven_day    (compute-window-stats :seven-day  proj/rate-bayes-projection)
+          {:five_hour    (compute-window-stats default-agent :five-hour  proj/rate-bayes-projection)
+           :seven_day    (compute-window-stats default-agent :seven-day  proj/rate-bayes-projection)
            :computed_at  (-> (Instant/now) .getEpochSecond)}))
 
 (defn- safe-refresh! []

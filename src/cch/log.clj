@@ -21,39 +21,23 @@
   (:require [babashka.process :as p]
             [babashka.fs :as fs]
             [cch.db :as db]
+            [cch.migrate :as migrate]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [honey.sql :as sql]))
 
-
-(defn- column-exists?
-  "True if the named column exists on the given table in this DB."
-  [path table col]
-  (let [res (p/sh ["sqlite3" path
-                   (format "SELECT 1 FROM pragma_table_info('%s') WHERE name='%s';"
-                           table col)])]
-    (str/includes? (or (:out res) "") "1")))
-
-(defn- apply-column-migrations!
-  "Add columns introduced after the original schema. SQLite's ALTER TABLE
-  has no IF NOT EXISTS, so we PRAGMA-probe first. Idempotent."
-  [path]
-  (when-not (column-exists? path "events" "agent")
-    (p/sh ["sqlite3" path
-           "ALTER TABLE events ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude-code';"])))
-
 (defn ensure-db!
-  "Create the database directory if needed and apply the schema.
-  All CREATE statements use IF NOT EXISTS so this is idempotent —
-  safe to run on every startup even when the DB already exists.
-  Also applies any post-original column migrations."
+  "Create the database directory if needed, apply the baseline schema,
+  then run any pending migrations from cch.migrate. Idempotent —
+  CREATE TABLE IF NOT EXISTS handles re-runs; cch.migrate/apply-all!
+  skips already-applied deltas."
   [path]
   (let [dir (fs/parent path)]
     (when-not (fs/exists? dir)
       (fs/create-dirs dir))
     (let [schema (slurp (io/resource "schema.sql"))]
       (p/sh ["sqlite3" path schema]))
-    (apply-column-migrations! path)))
+    (migrate/apply-all! path)))
 
 (def ^:private ensured-paths
   "Set of DB paths we've already run ensure-db! against in this process.
@@ -253,11 +237,13 @@
 ;; --- Context snapshots ---
 
 (defn log-context-snapshot!
-  "Insert a context window snapshot. Non-blocking, same write-path as log-event!."
-  [{:keys [session-id used-pct current-tokens window-size model-id payload]}]
+  "Insert a context window snapshot. Non-blocking, same write-path as log-event!.
+  :agent defaults to 'claude-code'; pass 'codex' (etc.) for cross-CLI snapshots."
+  [{:keys [session-id used-pct current-tokens window-size model-id payload agent]}]
   (let [path   (db/db-path)
         insert (format
-                 "INSERT INTO context_snapshots (session_id, used_pct, current_tokens, window_size, model_id, payload) VALUES (%s,%s,%s,%s,%s,%s);"
+                 "INSERT INTO context_snapshots (agent, session_id, used_pct, current_tokens, window_size, model_id, payload) VALUES (%s,%s,%s,%s,%s,%s,%s);"
+                 (sql-value (or agent "claude-code"))
                  (sql-value session-id)
                  (if used-pct (str used-pct) "NULL")
                  (if current-tokens (str (long current-tokens)) "NULL")

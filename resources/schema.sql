@@ -43,6 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_hook_config_scope ON hook_config(scope);
 CREATE TABLE IF NOT EXISTS context_snapshots (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+  agent          TEXT NOT NULL DEFAULT 'claude-code',
   session_id     TEXT NOT NULL,
   used_pct       REAL,
   current_tokens INTEGER,
@@ -53,3 +54,4 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_ctx_session   ON context_snapshots(session_id);
 CREATE INDEX IF NOT EXISTS idx_ctx_timestamp ON context_snapshots(timestamp);
+CREATE INDEX IF NOT EXISTS idx_ctx_agent     ON context_snapshots(agent);
