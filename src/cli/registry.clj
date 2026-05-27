@@ -67,6 +67,11 @@
                     :events      [{:event "PreCompact"        :matcher nil}
                                   {:event "UserPromptSubmit"  :matcher nil}]
                     :description "Budget-aware compaction governor with repo-specific preservation"}
+   "doubled-token" {:type        :code
+                    :ns          "hooks.doubled-token"
+                    :event       "PostToolUse"
+                    :matcher     "Edit"
+                    :description "Detects doubled tokens (rename artifacts) in edited files"}
    "codex-usage-capture"
                    {:type        :code
                     :ns          "hooks.codex-usage-capture"
