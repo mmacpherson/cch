@@ -28,6 +28,33 @@
   (let [out (codex/registry->entries [{:event "PreToolUse" :matcher "Bash|Edit"}])]
     (is (= "Bash|Edit" (:matcher (first out))))))
 
+(deftest registry->entries-drops-events-codex-does-not-support
+  (testing "Claude-only events (e.g. WorktreeRemove, TaskCreated) are filtered out"
+    (let [events [{:event "PreToolUse"     :matcher ".*"}
+                  {:event "WorktreeRemove" :matcher ".*"}
+                  {:event "TaskCreated"    :matcher ".*"}
+                  {:event "SessionStart"   :matcher nil}]
+          out (codex/registry->entries events)]
+      (is (= 2 (count out)) "only PreToolUse and SessionStart survive")
+      (is (= #{"PreToolUse" "SessionStart"} (set (map :event out)))))))
+
+(deftest unsupported-events-reports-dropped-event-names
+  (let [events [{:event "PreToolUse"     :matcher ".*"}
+                {:event "WorktreeRemove" :matcher ".*"}
+                {:event "TaskCreated"    :matcher ".*"}]]
+    (is (= ["TaskCreated" "WorktreeRemove"] (codex/unsupported-events events)))))
+
+(deftest install-returns-result-map-with-counts-and-skipped
+  (with-tmp
+    (fn [tmp]
+      (spit tmp "")
+      (let [result (codex/install! :config-path tmp)]
+        (is (= tmp (:path result)))
+        (is (pos? (:written result)))
+        (is (every? string? (:skipped result)))
+        (is (not-any? codex/supported-events (:skipped result))
+            "skipped list must not contain any Codex-supported event")))))
+
 (deftest install-writes-block-with-all-dispatcher-events
   (with-tmp
     (fn [tmp]

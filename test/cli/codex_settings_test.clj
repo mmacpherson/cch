@@ -122,6 +122,41 @@
 (deftest read-nonexistent-returns-empty-string
   (is (= "" (cs/read-config "/nonexistent/path/config.toml"))))
 
+(deftest strip-handles-block-with-no-trailing-newline
+  (testing "user hand-edited a block to remove the final newline — uninstall still works"
+    (let [block (str "# cch:begin x\n"
+                     "[[hooks.PreToolUse]]\n"
+                     "matcher = \".*\"\n"
+                     "# cch:end x")] ; no trailing \n
+      (is (= "" (cs/strip-block block "x"))))))
+
+(deftest strip-all-blocks-requires-matching-begin-end-names
+  (testing "malformed mismatched sentinels do not collapse unrelated content"
+    (let [malformed (str "# cch:begin a\n"
+                         "foo = 1\n"
+                         "# cch:end b\n"      ; mismatched!
+                         "[user.section]\n"
+                         "bar = 2\n")
+          result (cs/strip-all-blocks malformed)]
+      (is (= malformed result)
+          "no well-formed pair → no change; user section preserved"))))
+
+(deftest strip-all-blocks-handles-multiple-well-formed-blocks
+  (let [text (str "user = 1\n"
+                  "\n"
+                  "# cch:begin a\n"
+                  "aaa = 1\n"
+                  "# cch:end a\n"
+                  "\n"
+                  "middle = 2\n"
+                  "\n"
+                  "# cch:begin b\n"
+                  "bbb = 1\n"
+                  "# cch:end b\n")]
+    (is (not (str/includes? (cs/strip-all-blocks text) "cch:")))
+    (is (str/includes? (cs/strip-all-blocks text) "user = 1"))
+    (is (str/includes? (cs/strip-all-blocks text) "middle = 2"))))
+
 (deftest write-creates-parent-dirs
   (let [dir (str (fs/create-temp-dir {:prefix "codex-test-"}))
         path (str dir "/nested/config.toml")]

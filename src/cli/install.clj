@@ -117,11 +117,13 @@
     (print-server-warning-if-down)))
 
 (defn- run-codex-install! []
-  (let [path (codex/install!)]
+  (let [{:keys [path written skipped]} (codex/install!)]
     (enable-code-hooks-globally!)
     (println (format "Installed cch to %s" path))
-    (println (format "  %d codex hook entries written"
-                     (count (registry/dispatcher-events))))
+    (println (format "  %d codex hook entries written" written))
+    (when (seq skipped)
+      (println (format "  skipped %d event(s) Codex doesn't support: %s"
+                       (count skipped) (str/join ", " skipped))))
     (println "  (Codex events route to the same /dispatch/<event> endpoints")
     (println "   used by Claude Code)")
     (print-server-warning-if-down)))
@@ -132,30 +134,50 @@
   Default: writes Claude Code dispatcher entries to the current repo's
   settings.local.json. With --global, writes the global Claude
   settings.json. With --codex, writes Codex entries to the user's
-  ~/.codex/config.toml instead (Codex has no project-vs-global split).
+  ~/.codex/config.toml instead (Codex has no project-vs-global split, so
+  --codex and --global are mutually exclusive).
 
   All paths enable :code hooks at global scope."
   [& args]
-  (let [[flags _kvs _pos] (parse-flags args)]
-    (if (contains? flags "--codex")
+  (let [[flags _kvs _pos] (parse-flags args)
+        codex?  (contains? flags "--codex")
+        global? (contains? flags "--global")]
+    (cond
+      (and codex? global?)
+      (do (println "Error: --codex and --global are mutually exclusive")
+          (println "       (Codex config is always at ~/.codex/config.toml)")
+          (System/exit 2))
+
+      codex?
       (run-codex-install!)
-      (run-claude-install! (contains? flags "--global")))))
+
+      :else
+      (run-claude-install! global?))))
 
 (defn run-uninstall
   "cch uninstall [--global] [--codex] — remove cch-owned entries.
 
   Default removes them from the repo's Claude settings.local.json;
   --global removes from the global Claude settings.json; --codex removes
-  the cch sentinel block from ~/.codex/config.toml. Always clears the
-  hook_config table."
+  the cch sentinel block from ~/.codex/config.toml. --codex and --global
+  are mutually exclusive. Always clears the hook_config table."
   [& args]
-  (let [[flags _kvs _pos] (parse-flags args)]
-    (if (contains? flags "--codex")
+  (let [[flags _kvs _pos] (parse-flags args)
+        codex?  (contains? flags "--codex")
+        global? (contains? flags "--global")]
+    (cond
+      (and codex? global?)
+      (do (println "Error: --codex and --global are mutually exclusive")
+          (System/exit 2))
+
+      codex?
       (let [path (codex/uninstall!)]
         (clear-hook-config!)
         (println (format "Uninstalled cch from %s" path))
         (println "  hook_config table cleared"))
-      (let [path (if (contains? flags "--global")
+
+      :else
+      (let [path (if global?
                    (settings/global-settings-path)
                    (settings/project-settings-path "."))]
         (settings/remove-all-cch! path)

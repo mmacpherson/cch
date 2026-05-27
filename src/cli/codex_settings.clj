@@ -76,13 +76,16 @@
 (defn- block-pattern
   "Regex matching one named cch block. Consumes one leading newline (the
   separator inserted by `upsert-block`) and the block's own trailing
-  newline — but never the user's file-terminating newline."
+  newline (or EOF) — but never the user's file-terminating newline."
   [name]
   (let [q (java.util.regex.Pattern/quote name)]
-    (re-pattern (str "(?m)(?:\\A|\\n)# cch:begin " q "\\n[\\s\\S]*?# cch:end " q "\\n"))))
+    (re-pattern (str "(?m)(?:\\A|\\n)# cch:begin " q "\\n[\\s\\S]*?# cch:end " q "(?:\\n|\\z)"))))
 
 (def ^:private any-block-pattern
-  #"(?m)(?:\A|\n)# cch:begin [^\n]+\n[\s\S]*?# cch:end [^\n]+\n")
+  ;; Named-capture + back-reference forces begin/end names to match, so a
+  ;; malformed file with mismatched sentinels won't have unrelated content
+  ;; collapsed into one giant block.
+  #"(?m)(?:\A|\n)# cch:begin (?<cchname>[^\n]+)\n[\s\S]*?# cch:end \k<cchname>(?:\n|\z)")
 
 (defn strip-block
   "Remove the named cch block from `contents`. No-op if absent."
