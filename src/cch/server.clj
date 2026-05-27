@@ -274,6 +274,10 @@
       [:span.dot-online]
       (str "dispatcher · :8888")]]))
 
+;; Cache-bust static assets across deploys: JVM startup time as ?v=...
+;; New deploy → restarted service → new version → browsers refetch.
+(def ^:private asset-version (str (System/currentTimeMillis)))
+
 (defn- page-head
   "Shared <head> block."
   [{:keys [title]}]
@@ -286,7 +290,7 @@
    [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
    [:link {:rel "stylesheet"
            :href "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=block"}]
-   [:link {:rel "stylesheet" :href "/cch.css"}]
+   [:link {:rel "stylesheet" :href (str "/cch.css?v=" asset-version)}]
    [:script {:type "module"
              :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}]])
 
