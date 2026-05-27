@@ -500,3 +500,46 @@
       (is (= 200 (:status resp)))
       (is (str/includes? (:body resp) "selected=\"selected\""))
       (is (str/includes? (:body resp) "event-log")))))
+
+;; ---------------------------------------------------------------------------
+;; bundle->fc-shape — falls back to data-bundle stats for non-Claude tiles.
+;; The statusLine cache is Claude-only; without this helper, /usage tiles for
+;; other agents render `—` even when their chart has data.
+;; ---------------------------------------------------------------------------
+
+(deftest bundle->fc-shape-returns-nil-on-empty-bundle
+  (let [f @#'cch.server/bundle->fc-shape]
+    (is (nil? (f nil)))
+    (is (nil? (f {})) "no :last-pct means nothing to render")))
+
+(deftest bundle->fc-shape-fills-tiles-from-data
+  (let [f       @#'cch.server/bundle->fc-shape
+        result  (f {:last-pct   42.3
+                    :projection {:proj 57.45 :band {:lo 50.2 :hi 64.8}}
+                    :resets-at  2000
+                    :now        500
+                    :rate-phr   11.93})]
+    (is (= 42 (:current_pct result))      "current_pct rounds last-pct")
+    (is (= 57.5 (:projected_pct result))  "projected_pct rounds to 1 decimal")
+    (is (= {:lo 50 :hi 65} (:band result)) "band lo/hi round to ints")
+    (is (= 11.9 (:local_rate_phr result)) "rate-phr rounds to 1 decimal")
+    (is (= 1500 (:secs_left result))      "secs_left = resets-at − now")))
+
+(deftest bundle->fc-shape-omits-fields-without-source
+  (let [f      @#'cch.server/bundle->fc-shape
+        result (f {:last-pct  21.0
+                   :resets-at 1000
+                   :now       400})]
+    (is (= 21 (:current_pct result)))
+    (is (= 600 (:secs_left result)))
+    (is (not (contains? result :projected_pct)))
+    (is (not (contains? result :band)))
+    (is (not (contains? result :local_rate_phr)))))
+
+(deftest bundle->fc-shape-secs-left-floors-at-zero
+  (let [f      @#'cch.server/bundle->fc-shape
+        result (f {:last-pct  10.0
+                   :resets-at 100
+                   :now       500})]
+    (is (= 0 (:secs_left result))
+        "negative seconds (window already reset) clamps to 0, not exposed as negative")))

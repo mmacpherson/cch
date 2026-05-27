@@ -939,6 +939,24 @@
   {:seven-day :seven_day
    :five-hour :five_hour})
 
+(defn- bundle->fc-shape
+  "Synthesize a statusline-stats-shaped map for one window from a /usage
+  data bundle. Lets the tile row work for agents that don't feed the
+  bg-refreshed statusline cache (currently anything other than claude-code,
+  since the statusLine command is Claude Code's). Returns nil when the
+  bundle has no data."
+  [data]
+  (when (and data (:last-pct data))
+    (let [{:keys [last-pct projection resets-at now rate-phr]} data
+          proj (:proj projection)
+          band (:band projection)]
+      (cond-> {:current_pct (Math/round (double last-pct))
+               :secs_left   (max 0 (- (long resets-at) (long now)))}
+        proj     (assoc :projected_pct (Double/parseDouble (format "%.1f" (double proj))))
+        band     (assoc :band {:lo (Math/round (double (:lo band)))
+                               :hi (Math/round (double (:hi band)))})
+        rate-phr (assoc :local_rate_phr (Double/parseDouble (format "%.1f" (double rate-phr))))))))
+
 (defn- usage-stat-tiles
   "Status tiles for the usage page, scoped to `window-key`. Five tiles —
    the selected window itself is shown by the filter strip above, not as
@@ -1029,10 +1047,13 @@
    Claude because Codex doesn't feed the bg forecast cache."
   [window-key agent]
   (let [data     (usage/build-data agent window-key)
-        ;; statusline tile data is bg-refreshed for claude-code only;
-        ;; for other agents we fall back to deriving from `data` (no
-        ;; band/burn-rate display until codex tab has its own refresh path).
-        fc       (when (= agent "claude-code") (forecast/statusline-stats))
+        ;; statusline tiles: prefer the bg-refreshed cache (Claude — has
+        ;; fused 5h/7d burn rate, learned priors etc.); for other agents
+        ;; synthesize the same shape from the data bundle so the tiles
+        ;; aren't blank.
+        fc       (or (when (= agent "claude-code") (forecast/statusline-stats))
+                     (when-let [fc-shape (bundle->fc-shape data)]
+                       {(window-key->fc-key window-key) fc-shape}))
         subtitle (case window-key
                    :five-hour "5-hour rate-limit window — projection with 90% credible interval"
                    "7-day rate-limit window — projection with 90% credible interval")
