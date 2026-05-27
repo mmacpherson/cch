@@ -26,16 +26,34 @@
             [honey.sql :as sql]))
 
 
+(defn- column-exists?
+  "True if the named column exists on the given table in this DB."
+  [path table col]
+  (let [res (p/sh ["sqlite3" path
+                   (format "SELECT 1 FROM pragma_table_info('%s') WHERE name='%s';"
+                           table col)])]
+    (str/includes? (or (:out res) "") "1")))
+
+(defn- apply-column-migrations!
+  "Add columns introduced after the original schema. SQLite's ALTER TABLE
+  has no IF NOT EXISTS, so we PRAGMA-probe first. Idempotent."
+  [path]
+  (when-not (column-exists? path "events" "agent")
+    (p/sh ["sqlite3" path
+           "ALTER TABLE events ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude-code';"])))
+
 (defn ensure-db!
   "Create the database directory if needed and apply the schema.
   All CREATE statements use IF NOT EXISTS so this is idempotent —
-  safe to run on every startup even when the DB already exists."
+  safe to run on every startup even when the DB already exists.
+  Also applies any post-original column migrations."
   [path]
   (let [dir (fs/parent path)]
     (when-not (fs/exists? dir)
       (fs/create-dirs dir))
     (let [schema (slurp (io/resource "schema.sql"))]
-      (p/sh ["sqlite3" path schema]))))
+      (p/sh ["sqlite3" path schema]))
+    (apply-column-migrations! path)))
 
 (def ^:private ensured-paths
   "Set of DB paths we've already run ensure-db! against in this process.
@@ -125,21 +143,25 @@
 
   event is a map with keys:
     :hook-name, :event-type, :tool-name, :file-path, :cwd,
-    :session-id, :decision, :reason, :elapsed-ms, :extra
+    :session-id, :decision, :reason, :elapsed-ms, :extra, :agent
+
+  :agent defaults to 'claude-code' for callers that don't supply one
+  (legacy code paths, tests). The dispatcher derives it from the
+  X-CCH-Agent header on incoming requests.
 
   Path selection:
     - CCH_LOG_SYNC=1     → synchronous p/sh (test backdoor)
     - writer running     → enqueue SQL onto the background writer (~µs)
     - otherwise          → fire-and-forget per-call sqlite3 subprocess"
   [{:keys [hook-name event-type tool-name file-path cwd
-           session-id decision reason elapsed-ms extra]}]
+           session-id decision reason elapsed-ms extra agent]}]
   (let [path  (db/db-path)
         sync? (= "1" (System/getenv "CCH_LOG_SYNC"))
         ;; Insert SQL. PRAGMA busy_timeout matters only on the per-call
         ;; fallback path (concurrent sqlite3 procs); the writer thread
         ;; sets WAL once at startup and is the sole writer.
         insert (format
-                 "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                 "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra, agent) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
                  (sql-value session-id)
                  (sql-value hook-name)
                  (sql-value event-type)
@@ -149,7 +171,8 @@
                  (sql-value (when decision (name decision)))
                  (sql-value reason)
                  (sql-value elapsed-ms)
-                 (sql-value extra))
+                 (sql-value extra)
+                 (sql-value (or agent "claude-code")))
         fallback-sql (str "PRAGMA busy_timeout=5000; " insert)]
     (try
       (ensure-db-once! path)
@@ -200,9 +223,10 @@
 
 (defn query-events
   "Query recent events. Returns a seq of maps.
-  opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix, :q (text search)"
-  [& {:keys [limit hook event session decision since cwd-prefix q]}]
-  (let [cols [:id :timestamp :session-id :hook-name :event-type
+  opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix,
+        :agent, :q (text search)"
+  [& {:keys [limit hook event session decision since cwd-prefix agent q]}]
+  (let [cols [:id :timestamp :agent :session-id :hook-name :event-type
               :tool-name :file-path :cwd :decision :reason :elapsed-ms :extra]
         qry  (cond-> {:select   cols
                       :from     [:events]
@@ -211,6 +235,7 @@
                hook       (update :where (fnil conj [:and]) [:= :hook-name hook])
                event      (update :where (fnil conj [:and]) [:= :event-type event])
                session    (update :where (fnil conj [:and]) [:= :session-id session])
+               agent      (update :where (fnil conj [:and]) [:= :agent agent])
                (= decision "observe")
                           (update :where (fnil conj [:and]) [:is :decision nil])
                (and decision (not= decision "observe"))

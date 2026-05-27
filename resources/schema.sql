@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS events (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
+  agent       TEXT NOT NULL DEFAULT 'claude-code',
   session_id  TEXT,
   hook_name   TEXT NOT NULL,
   event_type  TEXT NOT NULL,
@@ -19,6 +20,7 @@ CREATE INDEX IF NOT EXISTS idx_events_hook      ON events(hook_name);
 CREATE INDEX IF NOT EXISTS idx_events_decision  ON events(decision);
 CREATE INDEX IF NOT EXISTS idx_events_cwd       ON events(cwd);
 CREATE INDEX IF NOT EXISTS idx_events_event     ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_agent     ON events(agent);
 
 -- Per-hook configuration: which hooks are enabled at which scope, plus
 -- a free-form JSON options blob. scope is either the literal 'global'

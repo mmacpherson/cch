@@ -52,6 +52,7 @@
           ;; freshly-logged row or a historical one without divergence.
           pub-event {:id          nil
                      :timestamp   (str (java.time.Instant/now))
+                     :agent       (or (:cch/agent input) "claude-code")
                      :session_id  (:session_id input)
                      :hook_name   (or (:cch/hook-name input)
                                       (:hook_event_name input))
@@ -74,7 +75,8 @@
          :decision   (:decision result)
          :reason     (:reason pub-event)
          :elapsed-ms (:elapsed_ms pub-event)
-         :extra      extra})
+         :extra      extra
+         :agent      (:cch/agent input)})
       (events/publish! pub-event)
       (when (:decision result) result))))
 

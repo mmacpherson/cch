@@ -68,13 +68,14 @@
   (format "http://127.0.0.1:%d%s" *port* path))
 
 (defn- dispatch!
-  "POST a JSON body to /dispatch/<event>. Returns the parsed response map
-  {:status n :body string :parsed-json or-nil}."
-  [event payload]
+  "POST a JSON body to /dispatch/<event>. Optional :headers override the
+  default Content-Type. Returns {:status :body :parsed}."
+  [event payload & {:keys [headers]}]
   (let [body  (json/generate-string payload)
         resp  (http/post (url (str "/dispatch/" event))
                          {:body     body
-                          :headers  {"Content-Type" "application/json"}
+                          :headers  (merge {"Content-Type" "application/json"}
+                                           headers)
                           :throw-exceptions?    false})
         parsed (when-not (str/blank? (:body resp))
                  (try (json/parse-string (:body resp) true)
@@ -222,6 +223,42 @@
                       :source          "startup"})]
       (is (= 200 status))
       (is (str/blank? body)))))
+
+;; --- Agent attribution via X-CCH-Agent header ---
+
+(deftest dispatch-tags-event-with-x-cch-agent-header
+  (testing "events posted with X-CCH-Agent: codex land in the DB with agent=codex"
+    (let [repo-root (str/trim (:out (p/sh ["git" "rev-parse" "--show-toplevel"])))]
+      (dispatch! "PreToolUse"
+                 {:hook_event_name "PreToolUse"
+                  :cwd             repo-root
+                  :session_id      "agent-tag-codex"
+                  :tool_name       "Edit"
+                  :tool_input      {:file_path (str repo-root "/src/cch/core.clj")}}
+                 :headers {"X-CCH-Agent" "codex"})
+      ;; event-log logs synchronously via CCH_LOG_SYNC? No — but the fixture's
+      ;; ensure-db! created the writer-less path; log-event! spawns a sqlite3
+      ;; per call. Give it a brief beat to land.
+      (Thread/sleep 200)
+      (let [out (p/sh ["sqlite3" "-json" *tmp-db*
+                       "SELECT agent FROM events WHERE session_id='agent-tag-codex' LIMIT 1;"])
+            rows (json/parse-string (:out out) true)]
+        (is (= "codex" (:agent (first rows))))))))
+
+(deftest dispatch-defaults-to-claude-code-when-no-header
+  (testing "events posted with no X-CCH-Agent header default to agent=claude-code"
+    (let [repo-root (str/trim (:out (p/sh ["git" "rev-parse" "--show-toplevel"])))]
+      (dispatch! "PreToolUse"
+                 {:hook_event_name "PreToolUse"
+                  :cwd             repo-root
+                  :session_id      "agent-tag-default"
+                  :tool_name       "Edit"
+                  :tool_input      {:file_path (str repo-root "/src/cch/core.clj")}})
+      (Thread/sleep 200)
+      (let [out (p/sh ["sqlite3" "-json" *tmp-db*
+                       "SELECT agent FROM events WHERE session_id='agent-tag-default' LIMIT 1;"])
+            rows (json/parse-string (:out out) true)]
+        (is (= "claude-code" (:agent (first rows))))))))
 
 ;; --- Reconciliation unit-ish test via pure fn ---
 

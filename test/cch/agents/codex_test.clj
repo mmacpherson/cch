@@ -10,12 +10,16 @@
     (try (f tmp) (finally (fs/delete tmp)))))
 
 (deftest dispatch-command-uses-cch-dispatcher-url
-  (is (= "curl -s -X POST --data-binary @- http://127.0.0.1:8888/dispatch/PreToolUse"
+  (is (= "curl -s -X POST -H 'X-CCH-Agent: codex' --data-binary @- http://127.0.0.1:8888/dispatch/PreToolUse"
          (codex/dispatch-command "PreToolUse"))))
 
 (deftest dispatch-command-respects-host-port
-  (is (= "curl -s -X POST --data-binary @- http://10.0.0.1:9999/dispatch/SessionStart"
+  (is (= "curl -s -X POST -H 'X-CCH-Agent: codex' --data-binary @- http://10.0.0.1:9999/dispatch/SessionStart"
          (codex/dispatch-command "SessionStart" :host "10.0.0.1" :port 9999))))
+
+(deftest dispatch-command-sets-x-cch-agent-header
+  (testing "every dispatch curl carries an X-CCH-Agent: codex header so the dispatcher can tag events"
+    (is (re-find #"-H 'X-CCH-Agent: codex'" (codex/dispatch-command "PreToolUse")))))
 
 (deftest registry->entries-defaults-matcher-to-wildcard
   (let [out (codex/registry->entries [{:event "PreCompact" :matcher nil}])]
@@ -65,7 +69,7 @@
         (is (str/includes? contents (str "# cch:end " codex/block-name)))
         (is (str/includes? contents "[[hooks.PreToolUse]]"))
         (is (str/includes? contents "[[hooks.PostToolUse]]"))
-        (is (str/includes? contents "curl -s -X POST --data-binary @- http://127.0.0.1:8888/dispatch/PreToolUse"))))))
+        (is (str/includes? contents "http://127.0.0.1:8888/dispatch/PreToolUse"))))))
 
 (deftest install-preserves-user-content
   (with-tmp

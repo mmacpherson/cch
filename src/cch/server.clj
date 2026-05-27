@@ -651,11 +651,18 @@
 
 (defn- handle-dispatch
   "POST /dispatch/<event> — fan out to matching enabled :code hooks,
-  reconcile, serialize."
+  reconcile, serialize.
+
+  The X-CCH-Agent header tags incoming events with their source CLI
+  (defaults to 'claude-code'). The dispatcher threads :cch/agent into
+  the hook input so the log middleware can attribute rows to the
+  originating agent."
   [event-idx event req]
   (try
     (let [body-str  (slurp (:body req))
-          input     (json/parse-string body-str true)
+          parsed    (json/parse-string body-str true)
+          agent     (or (get-in req [:headers "x-cch-agent"]) "claude-code")
+          input     (assoc parsed :cch/agent agent)
           cwd       (:cwd input)
           effective (config/load-effective-config cwd)
           candidates (get event-idx event [])

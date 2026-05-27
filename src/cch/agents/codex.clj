@@ -32,9 +32,11 @@
 
 (defn dispatch-command
   "Render the curl command Codex will run for `event`. Sends Codex's
-  stdin payload (Claude-compatible JSON) to the cch dispatcher."
+  stdin payload (Claude-compatible JSON) to the cch dispatcher, with an
+  X-CCH-Agent header so the dispatcher can tag rows in the events table
+  as originating from Codex."
   [event & {:keys [host port] :or {host default-host port default-port}}]
-  (format "curl -s -X POST --data-binary @- http://%s:%d/dispatch/%s"
+  (format "curl -s -X POST -H 'X-CCH-Agent: codex' --data-binary @- http://%s:%d/dispatch/%s"
           host port event))
 
 (defn registry->entries

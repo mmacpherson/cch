@@ -66,6 +66,76 @@
       (finally
         (fs/delete-tree tmp-dir)))))
 
+(deftest agent-column-exists-after-ensure-db
+  (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-agent-test-"}))
+        db-path (str tmp-dir "/test.db")]
+    (try
+      (log/ensure-db! db-path)
+      (let [out (p/sh ["sqlite3" db-path "PRAGMA table_info(events);"])]
+        (is (re-find #"agent" (:out out)) "events table has agent column"))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
+(deftest migration-adds-agent-to-pre-existing-events-table
+  (testing "DBs created before the agent column was introduced get migrated"
+    (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-migrate-test-"}))
+          db-path (str tmp-dir "/test.db")]
+      (try
+        ;; Build the pre-migration events table by hand, with one row.
+        (p/sh ["sqlite3" db-path
+               (str "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now')), "
+                    "session_id TEXT, hook_name TEXT NOT NULL, event_type TEXT NOT NULL, "
+                    "tool_name TEXT, file_path TEXT, cwd TEXT, decision TEXT, reason TEXT, "
+                    "elapsed_ms REAL, extra TEXT); "
+                    "INSERT INTO events (hook_name, event_type) VALUES ('legacy', 'PreToolUse');")])
+        ;; Now run ensure-db! — should migrate the column in, keeping legacy row intact.
+        (log/ensure-db! db-path)
+        (let [out (p/sh ["sqlite3" "-json" db-path
+                         "SELECT agent FROM events WHERE hook_name='legacy';"])
+              rows (json/parse-string (:out out) true)]
+          (is (= 1 (count rows)))
+          (is (= "claude-code" (:agent (first rows)))
+              "pre-existing row defaults to claude-code"))
+        (finally
+          (fs/delete-tree tmp-dir))))))
+
+(deftest agent-column-accepts-distinct-values
+  (testing "agent column round-trips claude-code, codex, gemini values"
+    (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-agent-roundtrip-"}))
+          db-path (str tmp-dir "/test.db")]
+      (try
+        (log/ensure-db! db-path)
+        (p/sh ["sqlite3" db-path
+               (str "INSERT INTO events (hook_name, event_type) VALUES ('default-agent', 'X');"
+                    "INSERT INTO events (hook_name, event_type, agent) VALUES ('explicit-codex', 'X', 'codex');"
+                    "INSERT INTO events (hook_name, event_type, agent) VALUES ('explicit-gemini', 'X', 'gemini');")])
+        (let [out (p/sh ["sqlite3" "-json" db-path
+                         "SELECT hook_name, agent FROM events ORDER BY id;"])
+              rows (json/parse-string (:out out) true)]
+          (is (= ["claude-code" "codex" "gemini"] (mapv :agent rows))
+              "rows without explicit agent default to claude-code; explicit agents preserved"))
+        (finally
+          (fs/delete-tree tmp-dir))))))
+
+(deftest query-events-filters-by-agent
+  (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-agent-query-"}))
+        db-path (str tmp-dir "/test.db")]
+    (try
+      (with-redefs [db/db-path (constantly db-path)]
+        (log/ensure-db! db-path)
+        (p/sh ["sqlite3" db-path
+               (str "INSERT INTO events (hook_name, event_type) VALUES ('h1', 'X');"
+                    "INSERT INTO events (hook_name, event_type, agent) VALUES ('h2', 'X', 'codex');"
+                    "INSERT INTO events (hook_name, event_type, agent) VALUES ('h3', 'X', 'codex');")])
+        (let [claude (log/query-events :agent "claude-code")
+              codex  (log/query-events :agent "codex")]
+          (is (= 1 (count claude)))
+          (is (= 2 (count codex)))
+          (is (every? #(= "codex" (:agent %)) codex))))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
 (deftest test-escape-sql
   (testing "escapes single quotes"
     (is (= "it''s a test" (#'log/escape-sql "it's a test"))))
