@@ -12,6 +12,7 @@
   Per-hook enable/disable (at global or per-repo scope) is handled via
   the web UI's config CRUD, not via install/uninstall."
   (:require [babashka.process :as p]
+            [cch.agents.codex :as codex]
             [cch.config-db :as cdb]
             [cch.db :as db]
             [cch.log :as log]
@@ -84,52 +85,80 @@
                   :scope     cdb/global-scope
                   :enabled   true})))
 
-(defn run
-  "cch install [--global] — bootstrap cch in the current repo (default)
-  or globally. Writes dispatcher entries, prompt/agent entries, and
-  enables all :code hooks at global scope."
-  [& args]
-  (let [[flags _kvs _pos] (parse-flags args)
-        global? (contains? flags "--global")
-        path    (if global?
-                  (settings/global-settings-path)
-                  (settings/project-settings-path "."))]
+(defn- print-server-warning-if-down []
+  (when-not (server-reachable? "127.0.0.1" 8888)
+    (println)
+    (println "⚠  cch serve is not reachable at http://127.0.0.1:8888.")
+    (println "   Code-hook dispatch will fail with ECONNREFUSED until the server is running.")
+    (println "   For persistent setup:")
+    (println "       cch install-service")
+    (println "   Or start a one-off session with:")
+    (println "       cch serve &")))
+
+(defn- run-claude-install! [global?]
+  (let [path (if global?
+               (settings/global-settings-path)
+               (settings/project-settings-path "."))]
     (install-dispatch-entries! path)
     (install-prompt-and-agent-entries! path)
     (enable-code-hooks-globally!)
     (println (format "Installed cch to %s" path))
     (println (format "  %d dispatcher entries written"
                      (count (registry/dispatcher-events))))
-    (let [n-code   (count (filter #(= :code   (registry/hook-type (second %)))
-                                  (registry/list-hooks)))
-          n-prompt (count (filter #(= :prompt (registry/hook-type (second %)))
-                                  (registry/list-hooks)))
-          n-agent  (count (filter #(= :agent  (registry/hook-type (second %)))
-                                  (registry/list-hooks)))]
+    (let [by-type   (group-by #(registry/hook-type (second %)) (registry/list-hooks))
+          n-code    (count (:code   by-type))
+          n-prompt  (count (:prompt by-type))
+          n-agent   (count (:agent  by-type))]
       (println (format "  %d code hook(s) enabled globally (via dispatcher)" n-code))
       (when (pos? n-prompt)
         (println (format "  %d native prompt entries written" n-prompt)))
       (when (pos? n-agent)
         (println (format "  %d native agent entries written" n-agent))))
-    (when-not (server-reachable? "127.0.0.1" 8888)
-      (println)
-      (println "⚠  cch serve is not reachable at http://127.0.0.1:8888.")
-      (println "   Code-hook dispatch will fail with ECONNREFUSED until the server is running.")
-      (println "   For persistent setup:")
-      (println "       cch install-service")
-      (println "   Or start a one-off session with:")
-      (println "       cch serve &"))))
+    (print-server-warning-if-down)))
+
+(defn- run-codex-install! []
+  (let [path (codex/install!)]
+    (enable-code-hooks-globally!)
+    (println (format "Installed cch to %s" path))
+    (println (format "  %d codex hook entries written"
+                     (count (registry/dispatcher-events))))
+    (println "  (Codex events route to the same /dispatch/<event> endpoints")
+    (println "   used by Claude Code)")
+    (print-server-warning-if-down)))
+
+(defn run
+  "cch install [--global] [--codex] — bootstrap cch.
+
+  Default: writes Claude Code dispatcher entries to the current repo's
+  settings.local.json. With --global, writes the global Claude
+  settings.json. With --codex, writes Codex entries to the user's
+  ~/.codex/config.toml instead (Codex has no project-vs-global split).
+
+  All paths enable :code hooks at global scope."
+  [& args]
+  (let [[flags _kvs _pos] (parse-flags args)]
+    (if (contains? flags "--codex")
+      (run-codex-install!)
+      (run-claude-install! (contains? flags "--global")))))
 
 (defn run-uninstall
-  "cch uninstall [--global] — remove every cch-owned settings.json entry
-  and clear the hook_config table."
+  "cch uninstall [--global] [--codex] — remove cch-owned entries.
+
+  Default removes them from the repo's Claude settings.local.json;
+  --global removes from the global Claude settings.json; --codex removes
+  the cch sentinel block from ~/.codex/config.toml. Always clears the
+  hook_config table."
   [& args]
-  (let [[flags _kvs _pos] (parse-flags args)
-        global? (contains? flags "--global")
-        path    (if global?
-                  (settings/global-settings-path)
-                  (settings/project-settings-path "."))]
-    (settings/remove-all-cch! path)
-    (clear-hook-config!)
-    (println (format "Uninstalled cch from %s" path))
-    (println "  hook_config table cleared")))
+  (let [[flags _kvs _pos] (parse-flags args)]
+    (if (contains? flags "--codex")
+      (let [path (codex/uninstall!)]
+        (clear-hook-config!)
+        (println (format "Uninstalled cch from %s" path))
+        (println "  hook_config table cleared"))
+      (let [path (if (contains? flags "--global")
+                   (settings/global-settings-path)
+                   (settings/project-settings-path "."))]
+        (settings/remove-all-cch! path)
+        (clear-hook-config!)
+        (println (format "Uninstalled cch from %s" path))
+        (println "  hook_config table cleared")))))
