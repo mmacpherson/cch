@@ -921,10 +921,19 @@
       [:div.alert-bar.alert-warn
        [:span.alert-dot] (format "projected %.0f%% — approaching limit" projected_pct)])))
 
+(def ^:private window-key->fc-key
+  {:seven-day :seven_day
+   :five-hour :five_hour})
+
+(def ^:private window-key->label
+  {:seven-day "7 day"
+   :five-hour "5 hour"})
+
 (defn- usage-stat-tiles
-  "Six-tile status strip for the usage page."
-  [fc data]
-  (let [{:keys [current_pct projected_pct secs_left local_rate_phr band]} (:seven_day fc)
+  "Six-tile status strip for the usage page, scoped to `window-key`."
+  [fc data window-key]
+  (let [{:keys [current_pct projected_pct secs_left local_rate_phr band]}
+        (get fc (window-key->fc-key window-key))
         fmt-time (fn [s]
                    (when (and s (pos? s))
                      (let [h (quot s 3600) m (quot (mod s 3600) 60)]
@@ -949,13 +958,37 @@
      [:div.stat-tile
       [:div.stat-label "samples"] [:div.stat-value (str samples)]]
      [:div.stat-tile
-      [:div.stat-label "window"] [:div.stat-value "7 day"]]]))
+      [:div.stat-label "window"] [:div.stat-value (window-key->label window-key)]]]))
+
+(defn- window-toggle
+  "Two-button toggle between 5h and 7d views. Pure anchors — no JS."
+  [active-window]
+  [:div.window-toggle
+   (for [[k label] [[:five-hour "5h"] [:seven-day "7d"]]]
+     [:a.window-btn {:href  (str "/usage?window=" (if (= k :five-hour) "5h" "7d"))
+                     :class (when (= k active-window) "active")
+                     :aria-current (when (= k active-window) "page")}
+      label])])
+
+(defn- parse-window
+  "?window=5h|5hour|five-hour → :five-hour. ?window=7d|7day|seven-day → :seven-day.
+   Anything else (or missing) → :seven-day."
+  [q]
+  (case (some-> (:window q) str/lower-case)
+    ("5h" "5hour" "5-hour" "five-hour" "fivehour") :five-hour
+    :seven-day))
 
 (defn- usage-html
   "Render the /usage page (server-side, hiccup → string)."
-  []
-  (let [data (usage/build-data)
-        fc   (forecast/statusline-stats)]
+  [window-key]
+  (let [data (usage/build-data window-key)
+        fc   (forecast/statusline-stats)
+        subtitle (case window-key
+                   :five-hour "5-hour rate-limit window — projection with 90% credible interval"
+                   "7-day rate-limit window — projection with 90% credible interval")
+        href (case window-key
+               :five-hour "/usage?window=5h"
+               "/usage?window=7d")]
     (str (hic/html
            [:html {:lang "en"}
             (page-head {:title "usage" :css-regime :custom})
@@ -965,20 +998,22 @@
               [:div.page-header
                [:div
                 [:h1 "usage"]
-                [:p.subtitle
-                 "7-day rate-limit window — projection with 90% credible interval"]]
+                [:p.subtitle subtitle]]
                [:div.header-actions
-                [:a.btn {:href "/usage"} "↻ refresh"]]]
+                (window-toggle window-key)
+                [:a.btn {:href href} "↻ refresh"]]]
               ;; TODO: usage-alert-bar — revisit with actionable guidance
-              (usage-stat-tiles fc data)
+              (usage-stat-tiles fc data window-key)
               (usage/page-body data)]]]))))
 
 (defn- handle-usage
-  "GET /usage — server-rendered weekly window plot."
-  [_req]
-  {:status  200
-   :headers {"Content-Type" "text/html; charset=utf-8"}
-   :body    (usage-html)})
+  "GET /usage[?window=5h|7d] — server-rendered rate-limit window plot."
+  [req]
+  (let [q (parse-query (:query-string req))
+        window-key (parse-window q)]
+    {:status  200
+     :headers {"Content-Type" "text/html; charset=utf-8"}
+     :body    (usage-html window-key)}))
 
 (defn- handle-forecast
   "GET /forecast — current pct + Bayesian projection + time-to-reset for

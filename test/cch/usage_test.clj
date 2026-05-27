@@ -94,3 +94,40 @@
     (let [out (str (u/page-body (make-data)))]
       (is (re-find #"usage-chart-block" out))
       (is (re-find #"svg" out)))))
+
+(defn- make-5h-data []
+  ;; Halfway through a 5h window, four observed samples at 30-min cadence.
+  (let [now (* 2 3600)]
+    {:window-key   :five-hour
+     :span-secs    (* 5 3600)
+     :observed     [{:ts 0    :pct 0.0}
+                    {:ts 1800 :pct 12.0}
+                    {:ts 3600 :pct 25.0}
+                    {:ts 5400 :pct 38.0}]
+     :rate-samples [{:ts 0    :pct 0.0  :resets-at (* 5 3600)}
+                    {:ts 1800 :pct 12.0 :resets-at (* 5 3600)}
+                    {:ts 3600 :pct 25.0 :resets-at (* 5 3600)}
+                    {:ts 5400 :pct 38.0 :resets-at (* 5 3600)}]
+     :rate-scale   1.0
+     :resets-at    (* 5 3600)
+     :window-start 0
+     :now          now
+     :last-pct     38.0
+     :samples      4
+     :projection   {:method :rate-bayes :name "Rate, Bayesian"
+                    :proj 75.0 :band {:lo 60 :hi 90}}}))
+
+(deftest chart-svg-5h-uses-hour-ticks
+  (testing "5h-window chart renders HH:mm tick labels, not 'MMM d'"
+    (let [s (str (u/chart-svg (make-5h-data)))]
+      ;; chart-svg returns hiccup; tick labels appear as quoted strings.
+      (is (re-find #"\"\d\d:\d\d\"" s)
+          "expected at least one HH:mm tick label")
+      ;; The 7d view emits 'MMM d' strings; 5h should not.
+      (is (not (re-find #"\"[A-Z][a-z]{2} \d" s))
+          "month-name tick should be absent in 5h view"))))
+
+(deftest chart-svg-5h-skips-reset-cycle-ticks
+  (testing "5h view omits the per-24h reset-cycle marker lines"
+    (let [s (str (u/chart-svg (make-5h-data)))]
+      (is (not (re-find #"reset-cycle-tick" s))))))

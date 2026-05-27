@@ -30,6 +30,12 @@
   {:seven-day (* 7 86400)
    :five-hour (* 5 3600)})
 
+;; Empirical Δ7d/Δ5h co-movement ratio (490k sample pairs). The 5h window
+;; ticks ~7.5x more often (proportional to its smaller token budget), so we
+;; weight it 7.5x more heavily in the fused estimate.
+(def ^:private scale-5h->7d 0.133)
+(def ^:private weight-5h    7.5)
+
 (defn- latest-resets-at
   "The most recent resets_at for a given window."
   [window-key]
@@ -186,22 +192,29 @@
   (some->> (db/query historical-finals-sql)
            (weighted-prior-params)))
 
-(defn- build-current-window []
-  (when-let [raw-resets-at (latest-resets-at :seven-day)]
+(defn- build-current-window
+  "Rich data bundle for the /usage page, for either :seven-day or :five-hour.
+   Returns nil when no rate-limit data exists for the window."
+  [window-key]
+  (when-let [raw-resets-at (latest-resets-at window-key)]
     (let [now          (-> (Instant/now) .getEpochSecond)
-          ;; After a weekly reset the DB still has the old resets_at until
-          ;; Claude Code posts a fresh snapshot. Shift to the new window.
+          span         (span-secs window-key)
+          ;; After a reset the DB still has the old resets_at until the CLI
+          ;; posts a fresh snapshot. Shift to the new window.
           resets-at    (if (<= raw-resets-at now)
-                         (+ raw-resets-at (* 7 86400))
+                         (+ raw-resets-at span)
                          raw-resets-at)
-          window-start (- resets-at (* 7 86400))
-          raw-samples  (filtered-samples (epoch->iso window-start) :seven-day)
+          window-start (- resets-at span)
+          raw-samples  (filtered-samples (epoch->iso window-start) window-key)
           ;; Stale sessions cache old rate-limit state and keep reporting
           ;; the expired resets_at with high pct values for hours after a
           ;; reset. Only keep samples tagged with the current resets_at.
           in-window    (filterv #(= (:resets-at %) resets-at) raw-samples)
           last-pct     (or (:pct (last in-window)) 0.0)
-          hist-finals  (historical-final-pcts)
+          ;; Historical priors only derived for 7d today — 5h relies on the
+          ;; hardcoded window-config prior. Plenty of 5h windows exist to
+          ;; learn from later; that's deferred work.
+          hist-finals  (when (= window-key :seven-day) (historical-final-pcts))
           window-info  {:now now :resets-at resets-at
                         :window-start window-start :last-pct last-pct
                         :historical-finals hist-finals}
@@ -211,32 +224,45 @@
           recent-rate  (when (>= (count rs) 2)
                          (let [recent (take-last 3 rs)]
                            (/ (reduce + 0.0 (map :rate recent))
-                              (count recent))))]
-      {:observed        obs-pairs
-       :rate-5h-samples (rate-5h-samples (epoch->iso window-start))
+                              (count recent))))
+          ;; Rate chart data source: for 7d we enrich with the 60s-bucketed
+          ;; 5h-window stream (much denser than the 6m-bucketed 7d samples)
+          ;; and scale into 7d-%/hr units. For 5h-native we just reuse the
+          ;; observed samples (already 60s-bucketed) at unit scale.
+          rate-samples (if (= window-key :seven-day)
+                         (rate-5h-samples (epoch->iso window-start))
+                         in-window)
+          rate-scale   (if (= window-key :seven-day) scale-5h->7d 1.0)]
+      {:window-key      window-key
+       :span-secs       span
+       :observed        obs-pairs
+       :rate-samples    rate-samples
+       :rate-scale      rate-scale
        :resets-at       resets-at
        :window-start    window-start
        :now             now
        :last-pct        last-pct
-       :samples         (or (raw-sample-count (epoch->iso window-start) :seven-day) 0)
+       :samples         (or (raw-sample-count (epoch->iso window-start) window-key) 0)
        :projection      projection
        :rate-phr        recent-rate})))
 
-;; Cache current-window for 30s — data arrives at most once per minute
-;; via the statusLine hook, so re-running 4 queries + LOESS + projections
-;; on every browser hit is pure waste.
-(def ^:private window-cache (atom {:ts 0 :data nil}))
+;; Cache current-window per window-key for 30s — data arrives at most once
+;; per minute via the statusLine hook, so re-running 4 queries + LOESS +
+;; projections on every browser hit is pure waste.
+(def ^:private window-cache (atom {}))
 
 (defn current-window
-  "Data bundle for the /usage page. Cached for 30 s."
-  []
-  (let [{:keys [ts data]} @window-cache
-        now (-> (Instant/now) .getEpochSecond)]
-    (if (< (- now ts) 30)
-      data
-      (let [fresh (build-current-window)]
-        (reset! window-cache {:ts now :data fresh})
-        fresh))))
+  "Data bundle for the /usage page. Cached for 30 s, per window-key.
+   `window-key` defaults to :seven-day."
+  ([] (current-window :seven-day))
+  ([window-key]
+   (let [{:keys [ts data]} (get @window-cache window-key {:ts 0 :data nil})
+         now (-> (Instant/now) .getEpochSecond)]
+     (if (< (- now ts) 30)
+       data
+       (let [fresh (build-current-window window-key)]
+         (swap! window-cache assoc window-key {:ts now :data fresh})
+         fresh)))))
 
 (def ^:private window-config
   {:seven-day {:prior-mu 0.55 :prior-sigma 0.045}
@@ -247,12 +273,6 @@
 ;; movement at normal rates while staying reactive to bursts. Compare newest
 ;; vs oldest raw sample across all concurrent sessions.
 (def ^:private burn-lookback-secs 1200)
-
-;; Empirical Δ7d/Δ5h co-movement ratio (490k sample pairs). The 5h window
-;; ticks ~7.5x more often (proportional to its smaller token budget), so we
-;; weight it 7.5x more heavily in the fused estimate.
-(def ^:private scale-5h->7d 0.133)
-(def ^:private weight-5h    7.5)
 
 (defn- recent-burn-rate-phr
   "Observed burn rate in %/hr over the past ~20 min of raw samples.

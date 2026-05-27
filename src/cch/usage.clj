@@ -43,8 +43,28 @@
 (def ^:private day-fmt
   (.withZone (DateTimeFormatter/ofPattern "MMM d") (ZoneId/systemDefault)))
 
+(def ^:private hour-fmt
+  (.withZone (DateTimeFormatter/ofPattern "HH:mm") (ZoneId/systemDefault)))
+
 (defn- fmt-day [epoch]
   (.format day-fmt (Instant/ofEpochSecond epoch)))
+
+(defn- fmt-hour [epoch]
+  (.format hour-fmt (Instant/ofEpochSecond epoch)))
+
+(defn- x-axis-ticks
+  "Time-axis ticks for the given window. Returns {:ts seq, :fmt fn, :step}.
+   7d: one tick per day. 5h: one tick per hour. Range covers the whole window."
+  [{:keys [window-key window-start resets-at]}]
+  (if (= window-key :five-hour)
+    {:ts   (->> (iterate #(+ % 3600) window-start)
+                (take-while #(<= % resets-at)))
+     :fmt  fmt-hour
+     :step 3600}
+    {:ts   (->> (iterate #(+ % 86400) window-start)
+                (take-while #(<= % resets-at)))
+     :fmt  fmt-day
+     :step 86400}))
 
 (defn- points-attr [pts]
   (->> pts (map (fn [[x y]] (str x "," y))) (interpose " ") (apply str)))
@@ -76,7 +96,7 @@
     [:p {:style "color: var(--fg-muted);"}
      "Not enough rate-limit data yet to plot. The page populates as the "
      "statusLine reports usage."]
-    (let [{:keys [observed resets-at window-start now last-pct projection]} data
+    (let [{:keys [observed resets-at window-start now last-pct projection window-key]} data
           rect (plot-area)
           y-top (y-max data)
           sx   (scale-x data rect)
@@ -89,8 +109,7 @@
           proj-x0 (sx now)
           proj-x1 (sx resets-at)
           y-ticks (range 0 (inc y-top) 25)
-          day-ticks (->> (iterate #(+ % 86400) window-start)
-                         (take-while #(<= % resets-at)))
+          x-ticks (x-axis-ticks data)
           line-for (fn [proj-pct] [[proj-x0 (sy last-pct)] [proj-x1 (sy proj-pct)]])
           rgba (fn [hex a]
                  (let [r (Integer/parseInt (subs hex 1 3) 16)
@@ -110,15 +129,18 @@
          [:rect {:x x0 :y y0 :width (- x1 x0) :height (- y1 y0)}]]]
        ;; --- reset-cycle vertical lines (resets-at, resets-at-24h, ...) ---
        ;; Marks the same hour-of-day as the weekly reset, every 24h back to
-       ;; window-start. Subtle — drawn before gridlines so they sit furthest back.
-       (for [t (->> (iterate #(- % 86400) resets-at)
-                    (take-while #(>= % window-start)))
-             :let [x (sx t)]]
-         [:line {:x1 x :x2 x :y1 (sy 100) :y2 y1
-                 :stroke "var(--fg-muted)"
-                 :stroke-width 1
-                 :opacity 0.25
-                 :class "reset-cycle-tick"}])
+       ;; window-start. Drawn before gridlines so they sit furthest back.
+       ;; 5h-native view skips these — the only relevant reset is at the
+       ;; right edge of the chart, already implied by the axis.
+       (when-not (= window-key :five-hour)
+         (for [t (->> (iterate #(- % 86400) resets-at)
+                      (take-while #(>= % window-start)))
+               :let [x (sx t)]]
+           [:line {:x1 x :x2 x :y1 (sy 100) :y2 y1
+                   :stroke "var(--fg-muted)"
+                   :stroke-width 1
+                   :opacity 0.25
+                   :class "reset-cycle-tick"}]))
        ;; --- linear-pace reference line (0% at window-start → 100% at resets-at) ---
        ;; If observed usage is above this line you're ahead of pace; below means behind.
        [:line {:x1 (sx window-start) :x2 (sx resets-at)
@@ -141,8 +163,8 @@
                   :text-anchor "end" :font-size 10
                   :fill "var(--fg-muted)"}
            (str pct "%")]])
-       ;; --- date ticks on x-axis ---
-       (for [t day-ticks
+       ;; --- date/hour ticks on x-axis ---
+       (for [t (:ts x-ticks)
              :let [x (sx t)]]
          [:g
           [:line {:x1 x :x2 x :y1 y1 :y2 (+ y1 4)
@@ -150,7 +172,7 @@
           [:text {:x x :y (+ y1 18)
                   :text-anchor "middle" :font-size 10
                   :fill "var(--fg-muted)"}
-           (fmt-day t)]])
+           ((:fmt x-ticks) t)]])
        ;; --- "now" vertical guide ---
        (let [x (sx now)]
          [:g
@@ -215,14 +237,15 @@
    Same math as the statusline burn indicator, applied historically."
   [data]
   (when (and data (> (count (:observed data)) 4))
-    (let [{:keys [rate-5h-samples window-start resets-at now]} data
-          ;; Use 5h-window samples (60s buckets, ~33 windows in the 7d span).
-          ;; Ticks ~7.5x more often than the 7d window, giving a continuous
-          ;; signal even when the 7d curve is on a long plateau.
-          ;; Scale factor 0.133 converts 5h-%/hr to 7d-%/hr units (empirical
-          ;; from observed co-movement: 1% of 5h window ~ 0.133% of 7d window).
-          scale       0.133
-          in-5h       (vec (filter #(<= (:ts %) now) (or rate-5h-samples [])))
+    (let [{:keys [rate-samples rate-scale window-start resets-at now]} data
+          ;; rate-samples is window-appropriate dense data: for 7d it's the
+          ;; 60s-bucketed 5h-window stream (which ticks ~7.5x more often
+          ;; than the 6m-bucketed 7d samples, giving a continuous signal
+          ;; even when the 7d curve is on a long plateau), scaled into
+          ;; 7d-%/hr units. For 5h it's the in-window observed samples at
+          ;; unit scale.
+          scale       (double (or rate-scale 1.0))
+          in-5h       (vec (filter #(<= (:ts %) now) (or rate-samples [])))
           n-5h        (count in-5h)
           grid-step-s (* 10 60)
           lookback-s  (* 30 60)
@@ -296,25 +319,27 @@
           [:text {:x (- x0 8) :y (+ y 4) :text-anchor "end" :font-size 10
                   :fill "var(--fg-muted)"}
            (str r "%/h")]])
-       ;; x-axis date ticks (aligned with main chart)
-       (for [t (->> (iterate #(+ % 86400) window-start) (take-while #(<= % resets-at)))
-             :let [x (sx t)]]
-         [:g
-          [:line {:x1 x :x2 x :y1 y1 :y2 (+ y1 4)
-                  :stroke "var(--border)" :stroke-width 1}]
-          [:text {:x x :y (+ y1 16) :text-anchor "middle" :font-size 10
-                  :fill "var(--fg-muted)"}
-           (fmt-day t)]])
+       ;; x-axis ticks (aligned with main chart)
+       (let [x-ticks (x-axis-ticks data)]
+         (for [t (:ts x-ticks)
+               :let [x (sx t)]]
+           [:g
+            [:line {:x1 x :x2 x :y1 y1 :y2 (+ y1 4)
+                    :stroke "var(--border)" :stroke-width 1}]
+            [:text {:x x :y (+ y1 16) :text-anchor "middle" :font-size 10
+                    :fill "var(--fg-muted)"}
+             ((:fmt x-ticks) t)]]))
        ;; "now" guide
        (let [x (sx now)]
          [:line {:x1 x :x2 x :y1 y0 :y2 y1
                  :stroke "var(--fg-muted)" :stroke-width 1
                  :stroke-dasharray "3 3"}])
-       ;; reset-cycle vertical ticks (same as main chart)
-       (for [t (->> (iterate #(- % 86400) resets-at) (take-while #(>= % window-start)))
-             :let [x (sx t)]]
-         [:line {:x1 x :x2 x :y1 (sy (min y-top 100)) :y2 y1
-                 :stroke "var(--fg-muted)" :stroke-width 1 :opacity 0.25}])
+       ;; reset-cycle vertical ticks — 7d-only; 5h reset is at chart edge.
+       (when-not (= (:window-key data) :five-hour)
+         (for [t (->> (iterate #(- % 86400) resets-at) (take-while #(>= % window-start)))
+               :let [x (sx t)]]
+           [:line {:x1 x :x2 x :y1 (sy (min y-top 100)) :y2 y1
+                   :stroke "var(--fg-muted)" :stroke-width 1 :opacity 0.25}]))
        ;; area fill + line, clipped
        [:g {:clip-path "url(#rate-clip)"}
         (when area-d
@@ -335,6 +360,7 @@
 
 (defn build-data
   "Public entry point — fetches the bundle from forecast. Indirection
-   kept so tests can pass synthetic bundles to chart-svg directly."
-  []
-  (forecast/current-window))
+   kept so tests can pass synthetic bundles to chart-svg directly.
+   `window-key` defaults to :seven-day."
+  ([] (build-data :seven-day))
+  ([window-key] (forecast/current-window window-key)))

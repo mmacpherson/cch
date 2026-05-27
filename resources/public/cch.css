@@ -443,6 +443,21 @@ table.matrix .row-action { font-size: var(--font-xs); color: var(--fg-muted); wh
 }
 .btn:hover { background: var(--accent-soft); border-color: var(--accent); text-decoration: none; }
 
+/* --- Window toggle (segmented control) --- */
+.window-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.window-btn {
+  padding: 4px 12px;
+  font-size: var(--font-sm);
+  font-family: var(--family-ui);
+  color: var(--fg-muted);
+  background: var(--surface);
+  text-decoration: none;
+  border-right: 1px solid var(--border);
+}
+.window-btn:last-child { border-right: none; }
+.window-btn:hover { background: var(--accent-soft); color: var(--fg); text-decoration: none; }
+.window-btn.active { background: var(--accent-soft); color: var(--fg); font-weight: 500; }
+
 /* --- Grid helpers --- */
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8em; }
 .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.8em; }
