@@ -443,20 +443,43 @@ table.matrix .row-action { font-size: var(--font-xs); color: var(--fg-muted); wh
 }
 .btn:hover { background: var(--accent-soft); border-color: var(--accent); text-decoration: none; }
 
-/* --- Window toggle (segmented control) --- */
-.window-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
-.window-btn {
-  padding: 4px 12px;
-  font-size: var(--font-sm);
-  font-family: var(--family-ui);
-  color: var(--fg-muted);
-  background: var(--surface);
-  text-decoration: none;
-  border-right: 1px solid var(--border);
+/* --- Filter strip (window / source toggles) ---
+   Same tab vocabulary as .nav-tab: uppercase, accent-underline when active.
+   Lives between the page header and stat tiles. */
+.filter-strip {
+  display: flex;
+  gap: 1.6em;
+  align-items: center;
+  margin: -0.4em 0 0.8em;
+  border-bottom: 1px solid var(--border);
 }
-.window-btn:last-child { border-right: none; }
-.window-btn:hover { background: var(--accent-soft); color: var(--fg); text-decoration: none; }
-.window-btn.active { background: var(--accent-soft); color: var(--fg); font-weight: 500; }
+.filter-group { display: flex; align-items: stretch; gap: 0.6em; }
+.filter-label {
+  font-size: var(--font-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  align-self: center;
+}
+.filter-tabs { display: flex; gap: 0; }
+.filter-tab {
+  padding: 0.45em 0.9em;
+  font-size: var(--font-sm);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+.filter-tab:hover { color: var(--fg); text-decoration: none; }
+.filter-tab.active { color: var(--fg); border-bottom-color: var(--accent); }
+.filter-tab.disabled {
+  color: var(--fg-muted);
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 /* --- Grid helpers --- */
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8em; }

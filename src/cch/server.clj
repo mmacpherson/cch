@@ -925,12 +925,10 @@
   {:seven-day :seven_day
    :five-hour :five_hour})
 
-(def ^:private window-key->label
-  {:seven-day "7 day"
-   :five-hour "5 hour"})
-
 (defn- usage-stat-tiles
-  "Six-tile status strip for the usage page, scoped to `window-key`."
+  "Status tiles for the usage page, scoped to `window-key`. Five tiles —
+   the selected window itself is shown by the filter strip above, not as
+   a tile."
   [fc data window-key]
   (let [{:keys [current_pct projected_pct secs_left local_rate_phr band]}
         (get fc (window-key->fc-key window-key))
@@ -956,19 +954,29 @@
       [:div.stat-label "burn rate"]
       [:div.stat-value (if local_rate_phr (format "%.1f%%/h" (double local_rate_phr)) "—")]]
      [:div.stat-tile
-      [:div.stat-label "samples"] [:div.stat-value (str samples)]]
-     [:div.stat-tile
-      [:div.stat-label "window"] [:div.stat-value (window-key->label window-key)]]]))
+      [:div.stat-label "samples"] [:div.stat-value (str samples)]]]))
 
-(defn- window-toggle
-  "Two-button toggle between 5h and 7d views. Pure anchors — no JS."
+(defn- filter-strip
+  "Page-level filters: which window, which source CLI. Tab vocabulary
+   matches the top nav (.nav-tab). The source toggle is a stub until
+   the :agent column lands (claude-code-hooks-9a2); codex appears
+   disabled with a 'soon' hint."
   [active-window]
-  [:div.window-toggle
-   (for [[k label] [[:five-hour "5h"] [:seven-day "7d"]]]
-     [:a.window-btn {:href  (str "/usage?window=" (if (= k :five-hour) "5h" "7d"))
-                     :class (when (= k active-window) "active")
-                     :aria-current (when (= k active-window) "page")}
-      label])])
+  [:div.filter-strip
+   [:div.filter-group
+    [:span.filter-label "Window"]
+    [:div.filter-tabs
+     (for [[k label] [[:five-hour "5h"] [:seven-day "7d"]]]
+       [:a.filter-tab {:href  (str "/usage?window=" (if (= k :five-hour) "5h" "7d"))
+                       :class (when (= k active-window) "active")
+                       :aria-current (when (= k active-window) "page")}
+        label])]]
+   [:div.filter-group
+    [:span.filter-label "Source"]
+    [:div.filter-tabs
+     [:a.filter-tab.active {:href "/usage"} "Claude"]
+     [:a.filter-tab.disabled {:title "Codex support pending (claude-code-hooks-ql4)"
+                              :aria-disabled "true"} "Codex"]]]])
 
 (defn- parse-window
   "?window=5h|5hour|five-hour → :five-hour. ?window=7d|7day|seven-day → :seven-day.
@@ -1000,8 +1008,8 @@
                 [:h1 "usage"]
                 [:p.subtitle subtitle]]
                [:div.header-actions
-                (window-toggle window-key)
                 [:a.btn {:href href} "↻ refresh"]]]
+              (filter-strip window-key)
               ;; TODO: usage-alert-bar — revisit with actionable guidance
               (usage-stat-tiles fc data window-key)
               (usage/page-body data)]]]))))
