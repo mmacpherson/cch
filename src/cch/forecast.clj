@@ -215,6 +215,25 @@
   (some->> (db/query (historical-finals-sql agent))
            (weighted-prior-params)))
 
+(def ^:private window-config
+  "Per-window Bayesian prior defaults (μ, σ in %/hr). The 5h prior is
+  much larger than the 7d one because a 5h window's burn rate is on a
+  ~7.5× higher scale (a 30% pct → 7d takes a week; 5h takes 5h).
+  `window-priors` overlays the 7d learned prior when available."
+  {:seven-day {:prior-mu 0.55 :prior-sigma 0.045}
+   :five-hour {:prior-mu 15.0 :prior-sigma 8.0}})
+
+(defn- window-priors
+  "Best-available prior for [agent window-key]: window-config baseline
+  merged with the empirical-Bayes learned prior (7d only — 5h relies on
+  the hardcoded baseline until enough completed 5h windows exist to
+  learn from). Both /usage and statusline projections MUST go through
+  this so they agree."
+  [agent window-key]
+  (let [base    (window-config window-key)
+        learned (when (= window-key :seven-day) (learned-prior agent))]
+    (merge base learned)))
+
 (defn- build-current-window
   "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
    scoped to `agent`. Returns nil when no rate-limit data exists for the
@@ -239,8 +258,10 @@
           ;; hardcoded window-config prior. Plenty of 5h windows exist to
           ;; learn from later; that's deferred work.
           hist-finals  (when (= window-key :seven-day) (historical-final-pcts agent))
+          {:keys [prior-mu prior-sigma]} (window-priors agent window-key)
           window-info  {:now now :resets-at resets-at
                         :window-start window-start :last-pct last-pct
+                        :prior-mu prior-mu :prior-sigma prior-sigma
                         :historical-finals hist-finals}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
           projection   (proj/rate-bayes-projection obs-pairs window-info)
@@ -291,10 +312,6 @@
        (let [fresh (build-current-window agent window-key)]
          (swap! window-cache assoc k {:ts now :data fresh})
          fresh)))))
-
-(def ^:private window-config
-  {:seven-day {:prior-mu 0.55 :prior-sigma 0.045}
-   :five-hour {:prior-mu 15.0 :prior-sigma 8.0}})
 
 ;; pct is integer-quantized (1% resolution). At ~0.6%/hr aggregate, a 10-min
 ;; window almost never captures a tick. 20 min gives enough span to see
@@ -360,9 +377,7 @@
           resets-at    (if (<= raw-resets-at now)
                          (+ raw-resets-at span)
                          raw-resets-at)
-          base-cfg     (window-config window-key)
-          learned      (when (= window-key :seven-day) (learned-prior agent))
-          {:keys [prior-mu prior-sigma]} (merge base-cfg learned)
+          {:keys [prior-mu prior-sigma]} (window-priors agent window-key)
           wpath        (window-sql-path window-key)
           window-start (- resets-at span)
           raw-samples  (filtered-samples agent (epoch->iso window-start) window-key)

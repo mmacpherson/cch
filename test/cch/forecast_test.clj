@@ -5,6 +5,7 @@
                                    start-bg-refresh! stop-bg-refresh!
                                    statusline-stats]]
             [cch.log :as log]
+            [cch.projections]
             [clojure.test :refer [deftest testing is]]))
 
 ;; ---------------------------------------------------------------------------
@@ -167,3 +168,57 @@
               "8 rapid signals within one debounce window should coalesce to ≤2 computes")
           (finally
             (remove-watch cache ::burst-test)))))))
+
+;; ---------------------------------------------------------------------------
+;; window-priors — both /usage and /forecast (statusline) MUST share this so
+;; their projections agree. Regression: /usage used to call rate-bayes-
+;; projection without window-info priors, falling back to its hardcoded 7d
+;; defaults (μ=0.55) for the 5h window. Net effect: a 5h chart projection
+;; that barely moved, even when /forecast's 5h projected ~22 pts above
+;; current. (claude-code-hooks-z3w)
+;; ---------------------------------------------------------------------------
+
+(deftest window-priors-distinct-per-window
+  (testing "5h prior is much larger than 7d (μ in %/hr units)"
+    (with-redefs [cch.forecast/learned-prior (fn [_] nil)]
+      (let [seven-day (#'cch.forecast/window-priors "claude-code" :seven-day)
+            five-hour (#'cch.forecast/window-priors "claude-code" :five-hour)]
+        (is (= 0.55 (:prior-mu seven-day)))
+        (is (= 15.0 (:prior-mu five-hour))
+            "5h prior must NOT silently default to the 7d rate — that was z3w")
+        (is (< (:prior-mu seven-day) (:prior-mu five-hour)))))))
+
+(deftest window-priors-learned-overlays-only-on-7d
+  (with-redefs [cch.forecast/learned-prior (fn [_] {:mu 0.99 :sigma 0.01})]
+    ;; learned-prior returns {:mu :sigma}, NOT {:prior-mu :prior-sigma}. The
+    ;; current merge passes them through under their existing keys, so the
+    ;; baseline :prior-mu/:prior-sigma still win for downstream consumers.
+    ;; This test pins that behaviour: 5h gets baseline only, 7d gets both.
+    (let [seven-day (#'cch.forecast/window-priors "claude-code" :seven-day)
+          five-hour (#'cch.forecast/window-priors "claude-code" :five-hour)]
+      (is (= 0.99 (:mu seven-day)) "learned overlay survives merge on 7d")
+      (is (nil? (:mu five-hour))   "learned overlay is NOT consulted for 5h")
+      (is (= 15.0 (:prior-mu five-hour))
+          "5h baseline prior unaffected by learned-prior"))))
+
+(deftest build-current-window-projection-uses-window-specific-prior
+  ;; Reproduce z3w. Build-current-window's projection bundle must carry the
+  ;; same prior-mu/prior-sigma that compute-window-stats would pass — so the
+  ;; /usage chart and the /forecast statusline agree.
+  (let [captured (atom [])]
+    (with-redefs [cch.forecast/learned-prior          (fn [_] nil)
+                  cch.forecast/latest-resets-at       (fn [_ _] 1000000000)
+                  cch.forecast/filtered-samples       (fn [_ _ _] [])
+                  cch.forecast/rate-5h-samples        (fn [_ _] [])
+                  cch.forecast/raw-sample-count       (fn [_ _ _] 0)
+                  cch.forecast/historical-final-pcts  (fn [_] nil)
+                  cch.projections/rate-bayes-projection
+                  (fn [_observed window-info]
+                    (swap! captured conj (select-keys window-info
+                                                     [:prior-mu :prior-sigma]))
+                    {:proj 0.0})]
+      (#'cch.forecast/build-current-window "claude-code" :five-hour)
+      (let [pi (last @captured)]
+        (is (= 15.0 (:prior-mu pi))
+            "/usage's 5h projection must use the 5h prior, not the 7d default")
+        (is (= 8.0 (:prior-sigma pi)))))))
