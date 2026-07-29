@@ -136,6 +136,34 @@
       (finally
         (fs/delete-tree tmp-dir)))))
 
+(deftest recent-sessions-uses-newest-distinct-event
+  (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-recent-sessions-"}))
+        db-path (str tmp-dir "/test.db")]
+    (try
+      (with-redefs [db/db-path (constantly db-path)]
+        (log/ensure-db! db-path)
+        (p/sh ["sqlite3" db-path
+               (str "INSERT INTO events (timestamp, session_id, hook_name, event_type, cwd)"
+                    " VALUES ('2026-01-01T00:00:01', 's1', 'h', 'X', '/repo-a');"
+                    "INSERT INTO events (timestamp, session_id, hook_name, event_type, cwd)"
+                    " VALUES ('2026-01-01T00:00:02', 's2', 'h', 'X', '/repo-b');"
+                    "INSERT INTO events (timestamp, session_id, hook_name, event_type, cwd)"
+                    " VALUES ('2026-01-01T00:00:03', 's1', 'h', 'X', '/repo-a/subdir');"
+                    "INSERT INTO events (timestamp, session_id, hook_name, event_type, cwd)"
+                    " VALUES ('2026-01-01T00:00:04', NULL, 'h', 'X', '/repo-a');"
+                    "INSERT INTO events (timestamp, session_id, hook_name, event_type, cwd)"
+                    " VALUES ('2026-01-01T00:00:05', 's3', 'h', 'X', '/repo-a');")])
+        (testing "unfiltered results are distinct and newest-first"
+          (is (= ["s3" "s1" "s2"]
+                 (mapv :session_id (log/recent-sessions :limit 30)))))
+        (testing "cwd-filtered results remain exact"
+          (is (= ["s3" "s1"]
+                 (mapv :session_id
+                       (log/recent-sessions :limit 30
+                                            :cwd-prefix "/repo-a"))))))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
 (deftest test-escape-sql
   (testing "escapes single quotes"
     (is (= "it''s a test" (#'log/escape-sql "it's a test"))))

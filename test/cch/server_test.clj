@@ -67,6 +67,18 @@
 (defn- url [path]
   (format "http://127.0.0.1:%d%s" *port* path))
 
+(deftest git-root-on-disk-finds-nearest-worktree
+  (let [tmp-dir (str (fs/create-temp-dir {:prefix "server-git-root-"}))
+        repo     (str tmp-dir "/repo")
+        nested   (str repo "/src/deep")]
+    (try
+      (fs/create-dirs nested)
+      (fs/create-file (str repo "/.git"))
+      (is (= repo (#'server/git-root-on-disk nested)))
+      (is (nil? (#'server/git-root-on-disk (str tmp-dir "/missing"))))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
 (defn- dispatch!
   "POST a JSON body to /dispatch/<event>. Optional :headers override the
   default Content-Type. Returns {:status :body :parsed}."

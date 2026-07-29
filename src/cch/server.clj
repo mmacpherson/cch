@@ -146,12 +146,6 @@
         (swap! git-meta-cache assoc cwd {:at now :meta meta})
         meta))))
 
-(defn- worktree-root-of
-  "Back-compat shim — just the :root from git-meta. Used by distinct-repos
-  and the hook matrix's scope-to-cwd resolver."
-  [cwd]
-  (:root (git-meta cwd)))
-
 (defn- repo-label
   "Short human-readable label for a worktree root path. Usually the
   basename; for paths whose parent directory name contains \"worktrees\",
@@ -183,6 +177,28 @@
   []
   (log/distinct-cwds))
 
+(defn- git-root-on-disk
+  "Find cwd's nearest ancestor containing a .git file or directory.
+
+  Repository discovery only needs the worktree root. Walking the filesystem
+  is substantially cheaper than running three git subprocesses for every
+  distinct historical cwd, especially when many cwds are nested within the
+  same repository. Missing/deleted paths return nil."
+  [cwd]
+  (when-not (str/blank? cwd)
+    (try
+      (when (fs/exists? cwd)
+        (loop [dir (fs/canonicalize cwd {:nofollow-links false})]
+          (cond
+            (fs/exists? (fs/path dir ".git"))
+            (str dir)
+
+            :else
+            (when-let [parent (fs/parent dir)]
+              (when (not= dir parent)
+                (recur parent))))))
+      (catch Exception _ nil))))
+
 (defn- repo-dropdown-label
   "Dropdown label for a cwd: prefer origin-derived repo name. When this
   is a linked worktree (worktree basename differs from repo-name), suffix
@@ -197,35 +213,22 @@
       :else                       (str repo-name " · " wt-name))))
 
 (defn- distinct-repos
-  "Distinct cwds from events → worktree roots → filtered → [value label] pairs.
+  "Distinct cwds from events → worktree roots → [value label] pairs.
   Value is the worktree root (used by the cwd-prefix filter). Drops
-  ephemeral tmp paths AND paths that aren't inside any git repo so the
-  Repo dropdown only lists actual repos.
-  Parallelizes git-meta lookups to avoid serial subprocess cost on cold cache."
-  []
-  (let [cwds    (distinct-cwds)
-        metas   (->> cwds
-                     (remove ephemeral-path?)
-                     (pmap (fn [c] [c (git-meta c)]))
-                     (doall))
-        roots   (->> metas
-                     (filter (fn [[_ m]] (:in-repo? m)))
-                     (map (fn [[_ m]] (:root m)))
-                     (remove nil?)
-                     (remove ephemeral-path?)
-                     (into (sorted-set)))]
-    (map (fn [r] [r (repo-dropdown-label r)]) roots)))
+  ephemeral, deleted, and non-repository paths.
 
-(defn- select-with-options
-  "Render a <select> from [[value label] ...] pairs, marking `current`
-  selected. Auto-submits its parent form on change so filter changes
-  apply immediately — no Apply button needed."
-  [name current options]
-  [:select {:name name :onchange "this.form.submit()"}
-   (for [[v label] options]
-     [:option (cond-> {:value v}
-                (= v current) (assoc :selected "selected"))
-      label])])
+  Root discovery is filesystem-only and deduplicates nested cwds before
+  git-meta resolves labels. A large event history may contain thousands of
+  cwd values but only tens of worktrees, so this avoids thousands of cold
+  git subprocesses."
+  []
+  (let [roots   (->> (distinct-cwds)
+                     (remove ephemeral-path?)
+                     (keep git-root-on-disk)
+                     (into (sorted-set)))]
+    (->> roots
+         (pmap (fn [r] [r (repo-dropdown-label r)]))
+         (doall))))
 
 (def hook-metadata
   "Per-hook display metadata. :color is the badge background; :tooltip is
@@ -272,7 +275,7 @@
       (tab :usage    "usage"    "/usage")]
      [:div.nav-status
       [:span.dot-online]
-      (str "dispatcher · :8888")]]))
+      "dispatcher · :8888"]]))
 
 ;; Cache-bust static assets across deploys: JVM startup time as ?v=...
 ;; New deploy → restarted service → new version → browsers refetch.
@@ -420,53 +423,6 @@
                (format "%s · %s…"
                        (apply str (take 16 (or timestamp "")))
                        (apply str (take 8 session_id)))]))))
-
-(defn- select-field
-  "One Bulma .field column wrapping a labeled <select>."
-  [label name current options]
-  [:div.column
-   [:div.field
-    [:label.label.is-small label]
-    [:div.control
-     [:div.select.is-small.is-fullwidth
-      (select-with-options name current options)]]]])
-
-(defn- input-field
-  "One Bulma .field column wrapping a labeled <input>."
-  [label input-map]
-  [:div.column
-   [:div.field
-    [:label.label.is-small label]
-    [:div.control
-     [:input.input.is-small input-map]]]])
-
-(defn- filter-form
-  [q repos]
-  [:form.filters {:method "get"}
-   [:div.columns
-    (select-field "Repo"     "cwd-prefix" (:cwd-prefix q "")
-                  (cons ["" "all"] repos))
-    (select-field "Hook"     "hook"       (:hook q "")
-                  [["" "all"]
-                   ["event-log" "event-log"]
-                   ["scope-lock" "scope-lock"]
-                   ["command-audit" "command-audit"]])
-    (select-field "Event"    "event"      (:event q "")
-                  (cons ["" "all"]
-                        (for [e (hook-scoped-events (:hook q))] [e e])))
-    (select-field "Decision" "decision"   (:decision q "")
-                  [["" "all"] ["allow" "allow"] ["ask" "ask"]
-                   ["deny" "deny"] ["block" "block"]])]
-   [:div.columns
-    (select-field "Session" "session" (:session q "")
-                  (cons ["" "all"] (distinct-sessions (:cwd-prefix q))))
-    ;; Text/number inputs still need an explicit trigger — submit on Enter.
-    (input-field  "Since (SQLite ts)"
-                  {:type "text" :name "since" :value (:since q "")
-                   :placeholder "2026-04-13"})
-    (input-field  "Limit"
-                  {:type "number" :name "limit" :value (:limit q "50")
-                   :min "1" :max "500"})]])
 
 (defn- filter-bar
   "New-style filter bar for the custom CSS events page."
@@ -923,18 +879,6 @@
     (finally
       (forecast/signal-new-data!))))
 
-(defn- usage-alert-bar
-  "Amber/red alert if projected > 85%."
-  [fc]
-  (when-let [{:keys [projected_pct]} (:seven_day fc)]
-    (cond
-      (> projected_pct 95)
-      [:div.alert-bar.alert-danger
-       [:span.alert-dot] (format "projected %.0f%% — reduce burn rate" projected_pct)]
-      (> projected_pct 85)
-      [:div.alert-bar.alert-warn
-       [:span.alert-dot] (format "projected %.0f%% — approaching limit" projected_pct)])))
-
 (def ^:private window-key->fc-key
   {:seven-day :seven_day
    :five-hour :five_hour})
@@ -1071,7 +1015,6 @@
                [:div.header-actions
                 [:a.btn {:href href} "↻ refresh"]]]
               (filter-strip window-key agent)
-              ;; TODO: usage-alert-bar — revisit with actionable guidance
               (usage-stat-tiles fc data window-key)
               (usage/page-body data)]]]))))
 
@@ -1372,7 +1315,7 @@
       (and (= request-method :get) (= uri "/"))
       (handle-overview req)
 
-      (and (= request-method :get))
+      (= request-method :get)
       (or (serve-static uri)
           {:status 404 :body "not found"})
 

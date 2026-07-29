@@ -190,20 +190,40 @@
        (keep :cwd)))
 
 (defn recent-sessions
-  "Return up to `limit` most-recently-active session IDs as
+  "Return up to `limit` most-recently-logged session IDs as
   [{:session_id :timestamp} ...] pairs, optionally filtered to
-  sessions whose events landed under `cwd-prefix`. Server-side
-  grouping + sort, no post-filtering in Clojure."
+  sessions whose events landed under `cwd-prefix`.
+
+  The unfiltered dashboard hot path walks events newest-first and uses
+  idx_events_session to reject rows that have a newer sibling. It stops
+  as soon as it finds `limit` distinct sessions. This avoids grouping
+  and sorting the full events table on every /events request.
+
+  A cwd filter can match fewer than `limit` sessions anywhere in history,
+  so that case retains the exhaustive grouped query for exact results."
   [& {:keys [limit cwd-prefix] :or {limit 30}}]
-  (let [q (cond-> {:select [:session-id [[:max :timestamp] :timestamp]]
-                   :from   [:events]
-                   :group-by [:session-id]
-                   :order-by [[:timestamp :desc]]
-                   :limit (int limit)}
-            (not (str/blank? cwd-prefix))
-            (assoc :where [:like :cwd (str cwd-prefix "%")]))]
-    (->> (db/query (first (sql/format q {:inline true})))
-         (filter :session_id))))
+  (if (str/blank? cwd-prefix)
+    (db/query
+      (format
+        (str "SELECT e.session_id, e.timestamp"
+             " FROM events AS e"
+             " WHERE e.session_id IS NOT NULL"
+             "   AND NOT EXISTS ("
+             "     SELECT 1 FROM events AS newer"
+             "     WHERE newer.session_id = e.session_id"
+             "       AND newer.id > e.id)"
+             " ORDER BY e.id DESC"
+             " LIMIT %d")
+        (int limit)))
+    (let [q {:select   [:session-id [[:max :timestamp] :timestamp]]
+             :from     [:events]
+             :where    [:and
+                        [:is-not :session-id nil]
+                        [:like :cwd (str cwd-prefix "%")]]
+             :group-by [:session-id]
+             :order-by [[:timestamp :desc]]
+             :limit    (int limit)}]
+      (db/query (first (sql/format q {:inline true}))))))
 
 (defn query-events
   "Query recent events. Returns a seq of maps.

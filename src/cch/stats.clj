@@ -47,7 +47,12 @@
 (defn top-hooks
   "Top hooks by fire count within a time range. Returns [{:hook_name :fires :denies} ...]."
   [& {:keys [since limit] :or {since "datetime('now', '-7 days')" limit 8}}]
-  (db/query (format "SELECT hook_name, COUNT(*) AS fires, SUM(CASE WHEN decision = 'deny' THEN 1 ELSE 0 END) AS denies FROM events WHERE timestamp >= %s GROUP BY hook_name ORDER BY fires DESC LIMIT %d"
+  ;; SQLite otherwise prefers idx_events_hook to avoid the GROUP BY temp
+  ;; table, which scans the full multi-GB events table and performs random
+  ;; row lookups just to reject old timestamps. The timestamp range is far
+  ;; more selective for dashboard windows; force that index and group the
+  ;; recent slice in memory.
+  (db/query (format "SELECT hook_name, COUNT(*) AS fires, SUM(CASE WHEN decision = 'deny' THEN 1 ELSE 0 END) AS denies FROM events INDEXED BY idx_events_timestamp WHERE timestamp >= %s GROUP BY hook_name ORDER BY fires DESC LIMIT %d"
                     since limit)))
 
 (defn hook-fire-counts
