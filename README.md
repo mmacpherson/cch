@@ -62,6 +62,19 @@ That's it. The `defhook` macro generates a `-main` entry point with middleware f
 | `cch install-service` | Install OS-native auto-start (systemd/launchd) for `cch serve` |
 | `cch uninstall-service` | Remove the auto-start unit/plist |
 
+### AGY (Antigravity CLI) usage
+
+AGY exposes quota data through its documented status-line JSON feed. Install
+the cch adapter once, then open the **AGY** source on `/usage`:
+
+```bash
+cch install --agy
+```
+
+The adapter posts snapshots to the local dispatcher without blocking AGY's
+TUI. `cch uninstall --agy` restores the status-line configuration that was
+present before installation.
+
 ### Log Queries
 
 ```bash

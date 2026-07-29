@@ -21,6 +21,7 @@
   (:require [babashka.fs :as fs]
             [nrepl.server :as nrepl]
             [cch.config :as config]
+            [cch.agents.agy :as agy]
             [cch.config-db :as cdb]
             [cch.db :as db]
             [cch.events :as events]
@@ -859,10 +860,16 @@
   to 'claude-code') tags the row so per-agent /usage views can filter."
   [req]
   (try
-    (let [body-str (slurp (:body req))
-          body     (json/parse-string body-str true)
-          ctx      (:context_window body)
-          agent    (or (get-in req [:headers "x-cch-agent"]) "claude-code")]
+    (let [raw-body (slurp (:body req))
+          parsed   (json/parse-string raw-body true)
+          agent    (or (get-in req [:headers "x-cch-agent"]) "claude-code")
+          body     (if (= agent "agy")
+                     (agy/normalize-status-payload parsed)
+                     parsed)
+          body-str (if (= body parsed)
+                     raw-body
+                     (json/generate-string body))
+          ctx      (:context_window body)]
       (log/log-context-snapshot!
         {:session-id     (:session_id body)
          :used-pct       (:used_percentage ctx)
@@ -962,7 +969,9 @@
    [:div.filter-group
     [:span.filter-label "Source"]
     [:div.filter-tabs
-     (for [[agent label] [["claude-code" "Claude"] ["codex" "Codex"]]]
+     (for [[agent label] [["claude-code" "Claude"]
+                          ["codex" "Codex"]
+                          ["agy" "AGY"]]]
        [:a.filter-tab {:href  (usage-href {:window active-window :agent agent})
                        :class (when (= agent active-agent) "active")
                        :aria-current (when (= agent active-agent) "page")}
@@ -977,11 +986,12 @@
     :seven-day))
 
 (defn- parse-agent
-  "?agent=codex|claude|claude-code → canonical agent string. Default 'claude-code'.
+  "?agent=codex|agy|antigravity|claude|claude-code → canonical agent string. Default 'claude-code'.
    Unrecognized values fall back to 'claude-code' rather than 404ing the page."
   [q]
   (case (some-> (:agent q) str/lower-case)
     ("codex")                       "codex"
+    ("agy" "antigravity")           "agy"
     ("claude" "claude-code" "cc")   "claude-code"
     "claude-code"))
 
@@ -1019,7 +1029,7 @@
               (usage/page-body data)]]]))))
 
 (defn- handle-usage
-  "GET /usage[?window=5h|7d][&agent=claude-code|codex] — server-rendered
+  "GET /usage[?window=5h|7d][&agent=claude-code|codex|agy] — server-rendered
   rate-limit window plot."
   [req]
   (let [q          (parse-query (:query-string req))

@@ -12,6 +12,7 @@
   Per-hook enable/disable (at global or per-repo scope) is handled via
   the web UI's config CRUD, not via install/uninstall."
   (:require [babashka.process :as p]
+            [cch.agents.agy :as agy]
             [cch.agents.codex :as codex]
             [cch.config-db :as cdb]
             [cch.db :as db]
@@ -128,34 +129,45 @@
     (println "   used by Claude Code)")
     (print-server-warning-if-down)))
 
+(defn- run-agy-install! []
+  (let [{:keys [path script]} (agy/install!)]
+    (println (format "Installed cch AGY usage capture to %s" path))
+    (println (format "  status-line adapter: %s" script))
+    (println "  AGY quota snapshots will appear under Source → AGY on /usage")
+    (print-server-warning-if-down)))
+
 (defn run
-  "cch install [--global] [--codex] — bootstrap cch.
+  "cch install [--global] [--codex|--agy] — bootstrap cch.
 
   Default: writes Claude Code dispatcher entries to the current repo's
   settings.local.json. With --global, writes the global Claude
   settings.json. With --codex, writes Codex entries to the user's
   ~/.codex/config.toml instead (Codex has no project-vs-global split, so
-  --codex and --global are mutually exclusive).
+  --codex and --global are mutually exclusive). With --agy, configures the
+  documented AGY statusLine feed for quota capture.
 
   All paths enable :code hooks at global scope."
   [& args]
   (let [[flags _kvs _pos] (parse-flags args)
         codex?  (contains? flags "--codex")
+        agy?    (contains? flags "--agy")
         global? (contains? flags "--global")]
     (cond
-      (and codex? global?)
-      (do (println "Error: --codex and --global are mutually exclusive")
-          (println "       (Codex config is always at ~/.codex/config.toml)")
+      (> (count (filter true? [codex? agy? global?])) 1)
+      (do (println "Error: --global, --codex, and --agy are mutually exclusive")
           (System/exit 2))
 
       codex?
       (run-codex-install!)
 
+      agy?
+      (run-agy-install!)
+
       :else
       (run-claude-install! global?))))
 
 (defn run-uninstall
-  "cch uninstall [--global] [--codex] — remove cch-owned entries.
+  "cch uninstall [--global] [--codex|--agy] — remove cch-owned entries.
 
   Default removes them from the repo's Claude settings.local.json;
   --global removes from the global Claude settings.json; --codex removes
@@ -164,10 +176,11 @@
   [& args]
   (let [[flags _kvs _pos] (parse-flags args)
         codex?  (contains? flags "--codex")
+        agy?    (contains? flags "--agy")
         global? (contains? flags "--global")]
     (cond
-      (and codex? global?)
-      (do (println "Error: --codex and --global are mutually exclusive")
+      (> (count (filter true? [codex? agy? global?])) 1)
+      (do (println "Error: --global, --codex, and --agy are mutually exclusive")
           (System/exit 2))
 
       codex?
@@ -175,6 +188,13 @@
         (clear-hook-config!)
         (println (format "Uninstalled cch from %s" path))
         (println "  hook_config table cleared"))
+
+      agy?
+      (let [{:keys [path restored]} (agy/uninstall!)]
+        (println (format "Uninstalled cch AGY usage capture from %s" path))
+        (println (if restored
+                   "  previous AGY status line restored"
+                   "  current AGY status line left unchanged")))
 
       :else
       (let [path (if global?

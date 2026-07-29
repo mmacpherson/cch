@@ -410,6 +410,40 @@
           (is (= 19.0 (:used_pct r)))
           (is (= (+ 1 122 800 191721) (:current_tokens r))))))))
 
+(deftest test-context-snapshot-normalizes-agy-quota
+  (testing "AGY's documented weekly quota shape becomes canonical 7d data"
+    (let [body {:session_id "agy-ctx-snap-test"
+                :model {:id "Gemini 3.1 Pro (High)"}
+                :context_window {:context_window_size 1048576
+                                 :used_percentage 14.24}
+                :quota {:gemini-weekly
+                        {:remaining_fraction 0.9378
+                         :reset_time "2026-08-02T07:50:32Z"
+                         :reset_in_seconds 560580}}}
+          resp (http/post (url "/context-snapshot")
+                          {:body (json/generate-string body)
+                           :headers {"Content-Type" "application/json"
+                                     "X-CCH-Agent" "agy"}
+                           :throw-exceptions? false})]
+      (is (= 204 (:status resp)))
+      (Thread/sleep 200)
+      (let [r (-> (p/sh ["sqlite3" "-json" *tmp-db*
+                         (str "SELECT agent, "
+                              "json_extract(payload, '$.rate_limits.seven_day.used_percentage') AS used, "
+                              "json_extract(payload, '$.rate_limits.seven_day.resets_at') AS resets_at "
+                              "FROM context_snapshots "
+                              "WHERE session_id='agy-ctx-snap-test' "
+                              "ORDER BY id DESC LIMIT 1;")])
+                  :out
+                  str/trim
+                  (json/parse-string true)
+                  first)]
+        (is (= "agy" (:agent r)))
+        (is (< (Math/abs (- 6.22 (:used r))) 0.000001))
+        (is (= (.getEpochSecond
+                 (java.time.Instant/parse "2026-08-02T07:50:32Z"))
+               (:resets_at r)))))))
+
 ;; --- /forecast ---
 
 (deftest test-forecast-endpoint
@@ -555,3 +589,12 @@
                    :now       500})]
     (is (= 0 (:secs_left result))
         "negative seconds (window already reset) clamps to 0, not exposed as negative")))
+
+(deftest usage-page-offers-agy-source
+  (let [resp (http/get (url "/usage?agent=agy"))]
+    (is (= 200 (:status resp)))
+    (is (str/includes? (:body resp) ">AGY</a>"))
+    (is (str/includes? (:body resp)
+                       "class=\"filter-tab active\" href=\"/usage?agent=agy\"")))
+  (testing "the product name is accepted as an alias"
+    (is (= "agy" (#'server/parse-agent {:agent "antigravity"})))))
