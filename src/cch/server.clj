@@ -869,22 +869,26 @@
           body-str (if (= body parsed)
                      raw-body
                      (json/generate-string body))
-          ctx      (:context_window body)]
-      (log/log-context-snapshot!
-        {:session-id     (:session_id body)
-         :used-pct       (:used_percentage ctx)
-         :current-tokens (coerce-current-tokens (:current_usage ctx))
-         :window-size    (:context_window_size ctx)
-         :model-id       (get-in body [:model :id])
-         :payload        body-str
-         :agent          agent})
-      {:status 204 :headers {} :body ""})
+          ctx      (:context_window body)
+          capture? (or (not= agent "agy")
+                       (agy/should-capture? body))]
+      (when capture?
+        (log/log-context-snapshot!
+          {:session-id     (:session_id body)
+           :used-pct       (:used_percentage ctx)
+           :current-tokens (coerce-current-tokens (:current_usage ctx))
+           :window-size    (:context_window_size ctx)
+           :model-id       (get-in body [:model :id])
+           :payload        body-str
+           :agent          agent})
+        (forecast/signal-new-data!))
+      {:status 204
+       :headers {"X-CCH-Captured" (str capture?)}
+       :body ""})
     (catch Exception e
       {:status 500
        :headers {"Content-Type" "application/json"}
-       :body (json/generate-string {:error (.getMessage e)})})
-    (finally
-      (forecast/signal-new-data!))))
+       :body (json/generate-string {:error (.getMessage e)})})))
 
 (def ^:private window-key->fc-key
   {:seven-day :seven_day

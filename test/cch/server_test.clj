@@ -444,6 +444,40 @@
                  (java.time.Instant/parse "2026-08-02T07:50:32Z"))
                (:resets_at r)))))))
 
+(deftest test-context-snapshot-coalesces-identical-agy-payloads
+  (testing "repeated status-line emissions are acknowledged but stored once"
+    (let [session-id "agy-coalesce-http-test"
+          body {:session_id session-id
+                :agent_state "working"
+                :model {:id "Gemini 3.1 Pro (High)"}
+                :context_window {:used_percentage 3.0}
+                :quota {:gemini-weekly
+                        {:remaining_fraction 0.98
+                         :reset_time "2026-08-04T00:00:00Z"}}}
+          post! #(http/post (url "/context-snapshot")
+                            {:body (json/generate-string body)
+                             :headers {"Content-Type" "application/json"
+                                       "X-CCH-Agent" "agy"}
+                             :throw-exceptions? false})
+          responses (repeatedly 5 post!)]
+      (is (every? #(= 204 (:status %)) responses))
+      (is (= "true" (get-in (first responses)
+                             [:headers "x-cch-captured"])))
+      (is (every? #(= "false"
+                       (get-in % [:headers "x-cch-captured"]))
+                  (rest responses)))
+      (Thread/sleep 200)
+      (let [count-row (-> (p/sh ["sqlite3" "-json" *tmp-db*
+                                 (str "SELECT COUNT(*) AS n "
+                                      "FROM context_snapshots "
+                                      "WHERE agent='agy' AND session_id='"
+                                      session-id "';")])
+                          :out
+                          str/trim
+                          (json/parse-string true)
+                          first)]
+        (is (= 1 (:n count-row)))))))
+
 ;; --- /forecast ---
 
 (deftest test-forecast-endpoint

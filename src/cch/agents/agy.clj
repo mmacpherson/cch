@@ -93,6 +93,91 @@
               (merge (:rate_limits payload) normalized))
        payload))))
 
+(def ^:const capture-heartbeat-ms
+  "Maximum interval between stored snapshots while AGY is emitting an
+  unchanged status line."
+  30000)
+
+(def ^:private capture-state-ttl-ms
+  (* 24 60 60 1000))
+
+(def ^:private max-capture-sessions 256)
+
+(defonce ^:private capture-state
+  (atom {}))
+
+(defn reset-capture-state!
+  "Clear in-memory AGY coalescing state. Primarily useful for tests and
+  live-reload sessions."
+  []
+  (reset! capture-state {}))
+
+(defn- capture-session-key
+  [payload]
+  (or (:session_id payload)
+      (:conversation_id payload)))
+
+(defn- trim-capture-state
+  [state now-ms]
+  (let [fresh (into {}
+                    (filter (fn [[_ {:keys [last-seen-at]}]]
+                              (< (- now-ms last-seen-at)
+                                 capture-state-ttl-ms)))
+                    state)]
+    (if (> (count fresh) max-capture-sessions)
+      (->> fresh
+           (sort-by (comp :last-seen-at val) >)
+           (take max-capture-sessions)
+           (into {}))
+      fresh)))
+
+(defn should-capture?
+  "Atomically decide whether an AGY status payload should create a DB row.
+
+  Capture the first payload, every quota change, transitions into `idle`
+  (which carry the final context totals), and a 30-second heartbeat. Repeated
+  working-state emissions between those boundaries are acknowledged but
+  coalesced. Payloads without a session ID are always retained because they
+  cannot be safely correlated."
+  ([payload] (should-capture? payload (System/currentTimeMillis)))
+  ([payload now-ms]
+   (if-let [session-key (capture-session-key payload)]
+     (let [[before after]
+           (swap-vals!
+             capture-state
+             (fn [state]
+               (let [state          (trim-capture-state state now-ms)
+                     previous       (get state session-key)
+                     agent-state    (:agent_state payload)
+                     quota-signature (:rate_limits payload)
+                     first?         (nil? previous)
+                     quota-change?  (and previous
+                                         (not= quota-signature
+                                               (:quota-signature previous)))
+                     became-idle?   (and previous
+                                         (= "idle" agent-state)
+                                         (not= "idle" (:last-agent-state previous)))
+                     heartbeat?     (and previous
+                                         (>= (- now-ms (:captured-at previous))
+                                             capture-heartbeat-ms))
+                     capture?       (or first?
+                                        quota-change?
+                                        became-idle?
+                                        heartbeat?)
+                     next-state     (cond-> (assoc previous
+                                                   :last-seen-at now-ms
+                                                   :last-agent-state agent-state)
+                                      capture?
+                                      (assoc :captured-at now-ms
+                                             :quota-signature quota-signature
+                                             :capture-count
+                                             (inc (or (:capture-count previous) 0))))]
+                 (assoc state session-key next-state))))
+           before-count (get-in before [session-key :capture-count] 0)
+           after-count  (get-in after [session-key :capture-count] 0)]
+       (> after-count before-count))
+     true)))
+
 (defn- adapter-script []
   (if-let [resource (io/resource "agy-statusline-command.sh")]
     (slurp resource)

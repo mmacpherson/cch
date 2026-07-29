@@ -48,6 +48,38 @@
                            :reset_time "2026-07-30T00:00:00Z"}}
            0))))
 
+(deftest coalesces-repeated-status-line-payloads
+  (agy/reset-capture-state!)
+  (let [working {:session_id "coalesce-session"
+                 :agent_state "working"
+                 :context_window {:used_percentage 3.0}
+                 :rate_limits {:seven_day {:used_percentage 1.7
+                                           :resets_at 200000}}}
+        idle    (assoc working
+                       :agent_state "idle"
+                       :context_window {:used_percentage 3.3})
+        changed (assoc-in working
+                          [:rate_limits :seven_day :used_percentage]
+                          2.1)]
+    (is (true? (agy/should-capture? working 1000))
+        "first payload is retained")
+    (is (false? (agy/should-capture? working 1300))
+        "exact 300ms repeat is coalesced")
+    (is (true? (agy/should-capture? idle 1600))
+        "transition to idle retains final context")
+    (is (false? (agy/should-capture? idle 1900))
+        "repeated idle payload is coalesced")
+    (is (true? (agy/should-capture? changed 2200))
+        "quota changes are retained immediately")
+    (is (false? (agy/should-capture? changed 31999)))
+    (is (true? (agy/should-capture? changed 32200))
+        "unchanged activity gets a 30-second heartbeat")))
+
+(deftest payload-without-session-is-not-coalesced
+  (agy/reset-capture-state!)
+  (is (true? (agy/should-capture? {:agent_state "working"} 1000)))
+  (is (true? (agy/should-capture? {:agent_state "working"} 1001))))
+
 (deftest install-and-uninstall-round-trip-status-line
   (let [dir          (str (fs/create-temp-dir {:prefix "agy-agent-"}))
         config-path  (str dir "/settings.json")
