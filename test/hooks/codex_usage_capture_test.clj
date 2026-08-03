@@ -62,6 +62,17 @@
                  :secondary {:used_percent 21.0 :window_minutes 10080 :resets_at 67890}})]
       (is (= #{"seven_day"} (set (keys out)))))))
 
+(deftest codex->claude-rate-limits-drops-zero-pct
+  (testing "0% windows are dropped — they carry no info and their rolling resets_at poisons forecasts"
+    (let [out (h/codex->claude-rate-limits
+                {:primary   {:used_percent 0.0 :window_minutes 300   :resets_at 99999}
+                 :secondary {:used_percent 21.0 :window_minutes 10080 :resets_at 67890}})]
+      (is (= #{"seven_day"} (set (keys out)))))
+    (let [out (h/codex->claude-rate-limits
+                {:primary   {:used_percent 0.0 :window_minutes 300   :resets_at 99999}
+                 :secondary {:used_percent 0.0 :window_minutes 10080 :resets_at 99998}})]
+      (is (empty? out)))))
+
 (deftest build-snapshot-emits-claude-shaped-payload
   (let [input  {:session_id "sess-abc"
                 :model      "gpt-5.5"}
@@ -86,6 +97,16 @@
                         :rate_limits {:primary {:used_percent 5.0
                                                 :window_minutes 999
                                                 :resets_at 1}}}}]
+      (is (nil? (h/build-snapshot {:session_id "s"} [tc])))))
+  (testing "all-zero windows are dropped → nil snapshot"
+    (let [tc {:type "event_msg"
+              :payload {:type "token_count"
+                        :rate_limits {:primary   {:used_percent 0.0
+                                                  :window_minutes 300
+                                                  :resets_at 99999}
+                                      :secondary {:used_percent 0.0
+                                                  :window_minutes 10080
+                                                  :resets_at 99998}}}}]
       (is (nil? (h/build-snapshot {:session_id "s"} [tc]))))))
 
 (deftest hook-noop-for-non-codex-agent

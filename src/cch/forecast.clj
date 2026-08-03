@@ -58,9 +58,10 @@
                 (str "SELECT json_extract(payload, '$.rate_limits.%s.resets_at') AS resets_at "
                      "FROM context_snapshots "
                      "WHERE json_extract(payload, '$.rate_limits.%s.resets_at') IS NOT NULL "
+                     "  AND json_extract(payload, '$.rate_limits.%s.used_percentage') > 0 "
                      "%s"
                      "ORDER BY id DESC LIMIT 1")
-                wpath wpath (agent-clause agent))]
+                wpath wpath wpath (agent-clause agent))]
     (some-> (db/query sql) first :resets_at long)))
 
 (defn- filtered-samples

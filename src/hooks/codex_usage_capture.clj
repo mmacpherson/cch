@@ -55,13 +55,16 @@
 
 (defn codex->claude-rate-limits
   "Convert codex's `rate_limits` map (primary/secondary keyed by
-  window_minutes) into Claude's (five_hour/seven_day). Pure."
+  window_minutes) into Claude's (five_hour/seven_day). Drops windows
+  at 0% — they carry no information and their rolling resets_at
+  poisons window selection in forecast queries. Pure."
   [codex-rl]
   (->> [(:primary codex-rl) (:secondary codex-rl)]
        (keep (fn [w]
                (when-let [k (claude-window-by-minutes (:window_minutes w))]
-                 [k {:used_percentage (:used_percent w)
-                     :resets_at       (:resets_at w)}])))
+                 (when (and (:used_percent w) (pos? (:used_percent w)))
+                   [k {:used_percentage (:used_percent w)
+                       :resets_at       (:resets_at w)}]))))
        (into {})))
 
 (defn build-snapshot
