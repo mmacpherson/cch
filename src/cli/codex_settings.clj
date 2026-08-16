@@ -1,5 +1,8 @@
 (ns cli.codex-settings
-  "Sentinel-block read/modify/write of ~/.codex/config.toml.
+  "Sentinel-block read/modify/write of Codex's config.toml.
+
+  The file lives at `$CODEX_HOME/config.toml`, falling back to
+  `~/.codex/config.toml` — see `codex-home`.
 
   Codex config is TOML and users edit it by hand, so we cannot round-trip
   through a Clojure TOML library (none preserve comments and key order).
@@ -20,10 +23,30 @@
   (:require [babashka.fs :as fs]
             [clojure.string :as str]))
 
+(defn resolve-codex-home
+  "Pick the Codex config root from a `CODEX_HOME` value and a home dir.
+  Blank or missing env falls back to the upstream default. Pure."
+  [codex-home-env home]
+  (if (str/blank? codex-home-env)
+    (str home "/.codex")
+    codex-home-env))
+
+(defn codex-home
+  "Root of the user's Codex configuration.
+
+  Codex honours `CODEX_HOME`, and users relocate it — an XDG override to
+  `~/.config/codex` is common. Resolving it here rather than at call sites
+  keeps every read and write on the file Codex actually loads; writing to a
+  stale `~/.codex` fails silently, reporting success while installing
+  nothing."
+  []
+  (resolve-codex-home (System/getenv "CODEX_HOME")
+                      (System/getProperty "user.home")))
+
 (defn codex-config-path
   "Path to the user's Codex config.toml."
   []
-  (str (System/getProperty "user.home") "/.codex/config.toml"))
+  (str (codex-home) "/config.toml"))
 
 (defn read-config
   "Read config file as a string. Returns \"\" if missing."
