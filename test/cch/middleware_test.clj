@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [cch.middleware :as mw]
             [cch.core :as core]
-            [cch.log]))
+            [cch.log]
+            [clojure.string]))
 
 (deftest test-wrap-timing
   (let [handler  (fn [_] {:decision :allow :reason "ok"})
@@ -90,3 +91,42 @@
                     p95 (vec (map #(format "%.2f" %) (take 10 sorted))))))
       (finally
         (cch.log/stop-writer!)))))
+
+;; --- payload pruning ---
+
+(deftest truncate-long-strings-respects-limit
+  (testing "short strings pass through untouched"
+    (is (= {:a "short"} (mw/truncate-long-strings {:a "short"} 10))))
+  (testing "long strings keep their head and say what was dropped"
+    (let [out (:a (mw/truncate-long-strings {:a (apply str (repeat 30 "x"))} 10))]
+      (is (clojure.string/starts-with? out "xxxxxxxxxx"))
+      (is (clojure.string/includes? out "truncated 20 chars"))))
+  (testing "walks nested maps and vectors, since tool responses vary in shape"
+    (let [long-s (apply str (repeat 30 "y"))
+          out    (mw/truncate-long-strings
+                   {:file {:content long-s} :items [{:base64 long-s}]} 10)]
+      (is (clojure.string/includes? (get-in out [:file :content]) "truncated"))
+      (is (clojure.string/includes? (get-in out [:items 0 :base64]) "truncated"))))
+  (testing "non-strings are left alone"
+    (is (= {:n 42 :b true :nil nil}
+           (mw/truncate-long-strings {:n 42 :b true :nil nil} 1)))))
+
+(deftest prune-payload-scope
+  (let [big  (apply str (repeat (* 2 mw/max-response-chars) "z"))
+        base {:tool_input {:file_path "/tmp/x"} :session_id "s"}]
+    (testing "tool_response is pruned"
+      (is (clojure.string/includes?
+            (:tool_response (mw/prune-payload (assoc base :tool_name "Edit"
+                                                          :tool_response big)))
+            "truncated")))
+    (testing "Bash is exempt — command output is the only record of it"
+      (is (= big (:tool_response (mw/prune-payload (assoc base :tool_name "Bash"
+                                                               :tool_response big))))))
+    (testing "everything outside tool_response is untouched"
+      (let [out (mw/prune-payload (assoc base :tool_name "Edit"
+                                              :tool_response big
+                                              :prompt big))]
+        (is (= big (:prompt out)))
+        (is (= {:file_path "/tmp/x"} (:tool_input out)))))
+    (testing "a payload with no tool_response is returned unchanged"
+      (is (= base (mw/prune-payload base))))))

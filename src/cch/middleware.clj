@@ -5,7 +5,57 @@
   The chain is pre-composed at load time via comp for zero runtime cost."
   (:require [cch.events :as events]
             [cch.log :as log]
-            [cheshire.core :as json]))
+            [cheshire.core :as json]
+            [clojure.walk :as walk]))
+
+(def ^:const max-response-chars
+  "Longest string kept inside a `tool_response` before truncation.
+
+  Measured 2026-08-16: tool_response was 2459MB of a 5.7GB events.db,
+  and the only reader anywhere is the /events detail pane. Roughly two
+  thirds of it is content that already exists elsewhere — whole
+  pre-edit files under Edit's :originalFile, file bodies under Read's
+  :file/:content, and base64 image payloads — or is unreadable as text.
+
+  4096 keeps the median response (881 chars) untouched and preserves
+  Edit's :oldString, :newString and :structuredPatch, which average
+  around 2KB and describe the change itself."
+  4096)
+
+(def ^:const verbatim-response-tools
+  "Tools whose response is the only surviving record of what happened.
+
+  Command output cannot be reconstructed from the filesystem the way a
+  file body can, so it is kept whole regardless of length. Bash also
+  happens to be the cheapest per row — 2.2KB average across 311k rows."
+  #{"Bash"})
+
+(defn truncate-long-strings
+  "Truncate every string in `x` longer than `limit`, noting what was
+  dropped. Walks nested maps and vectors, since tool responses vary in
+  shape: Edit returns a flat map, Read nests under :file, image tools
+  return a vector. Stating the rule rather than listing keys means new
+  tool shapes are covered without an update here. Pure."
+  [x limit]
+  (walk/postwalk
+    (fn [v]
+      (if (and (string? v) (> (count v) limit))
+        (str (subs v 0 limit)
+             "…[cch truncated " (- (count v) limit) " chars]")
+        v))
+    x))
+
+(defn prune-payload
+  "Shrink a hook payload before it is persisted.
+
+  Only `tool_response` is touched — inputs, decisions and metadata are
+  small and are what queries actually read. Tools in
+  `verbatim-response-tools` are exempt. Pure."
+  [input]
+  (if (or (contains? verbatim-response-tools (:tool_name input))
+          (not (contains? input :tool_response)))
+    input
+    (update input :tool_response truncate-long-strings max-response-chars)))
 
 (defn wrap-timing
   "Adds :cch/elapsed-ms to result metadata. When the handler returns nil
@@ -46,7 +96,8 @@
   [handler]
   (fn [input]
     (let [result    (handler input)
-          extra     (json/generate-string (dissoc input :cch/hook-name))
+          extra     (json/generate-string
+                      (prune-payload (dissoc input :cch/hook-name)))
           ;; SQLite-column shape — matches cch.log/query-events output
           ;; so the server's event-card renderer can consume either a
           ;; freshly-logged row or a historical one without divergence.
