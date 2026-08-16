@@ -6,12 +6,27 @@
   (:require [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]))
 
+(def ^:const path-property
+  "System property overriding the database location.
+
+  A property rather than an environment variable because the JVM cannot
+  set its own env, so a test run has no way to redirect itself — and
+  relying on the caller to export XDG_DATA_HOME first means any
+  invocation that skips the wrapper writes to the real database. The
+  test alias sets this in :jvm-opts, so isolation holds however tests
+  are started."
+  "cch.db.path")
+
 (defn db-path
-  "Returns the SQLite database path, respecting XDG_DATA_HOME."
+  "Returns the SQLite database path.
+
+  Precedence: the cch.db.path system property, then XDG_DATA_HOME, then
+  ~/.local/share."
   []
-  (str (or (System/getenv "XDG_DATA_HOME")
-           (str (System/getProperty "user.home") "/.local/share"))
-       "/cch/events.db"))
+  (or (System/getProperty path-property)
+      (str (or (System/getenv "XDG_DATA_HOME")
+               (str (System/getProperty "user.home") "/.local/share"))
+           "/cch/events.db")))
 
 (defn- jdbc-spec
   "Build a fresh spec on each call so tests that redef db-path see the

@@ -16,9 +16,15 @@
        repeated consecutive parts at any subsequence length
     2. Regex: concatenated doubles without separator (getget, foofoo)
 
+  Only identifiers the edit INTRODUCES are reported — new-string is
+  compared against old-string. Scanning the whole file instead means one
+  pre-existing match blocks every later edit to that file forever; see
+  check-edit for what that cost in practice.
+
   PostToolUse cannot undo the edit — a block-decision surfaces the finding
   as conversation context so Claude can fix the identifier immediately."
   (:require [cch.core :refer [defhook]]
+            [clojure.set]
             [clojure.string :as str]))
 
 ;; Catches concatenated doubles without separator: getget, foofoo
@@ -89,25 +95,43 @@
                             (find-concat-hits line-num line))))
                 (map-indexed vector lines))))))
 
-(defn check-file
-  "Read file and check for doubled tokens. Returns nil or decision map."
-  [file-path]
-  (try
-    (let [f (java.io.File. (str file-path))]
-      (when (.isFile f)
-        (when-let [hits (find-doubled-tokens (slurp f))]
-          (let [summary (->> hits
-                             (take 5)
-                             (map #(str "  L" (:line %) ":" (:col %) " " (:match %)))
-                             (str/join "\n"))]
-            {:decision :block
-             :reason   (str "doubled-token: " (count hits) " suspect identifier(s) in "
-                            file-path ":\n" summary)}))))
-    (catch java.io.FileNotFoundException _ nil)))
+(defn- matches
+  "Set of suspect identifiers in `s`, ignoring position. Position is
+  deliberately dropped: the same identifier moves line and column as an
+  edit shifts text around it, and comparing positions would report every
+  survivor as new."
+  [s]
+  (into #{} (map :match) (or (find-doubled-tokens (or s "")) [])))
+
+(defn check-edit
+  "Flag only identifiers the edit INTRODUCES. Returns nil or a decision.
+
+  Scanning the whole file — which this hook did until 2026-08-16 — means
+  one pre-existing match blocks every later edit to that file, forever,
+  whatever the edit changes. Measured over 741 real blocks across 103
+  files: every one was followed by a byte-identical retry that
+  succeeded, so nothing was being prevented and each block cost a turn.
+  The worst example was a date, `sample-project`, blocking 42 edits to a
+  document it had nothing to do with.
+
+  Comparing new against old restores the original intent — catching a
+  rename artifact at the moment it is written — while making anything
+  already in the file irrelevant. Pure."
+  [file-path old-string new-string]
+  (let [introduced (clojure.set/difference (matches new-string)
+                                           (matches old-string))]
+    (when (seq introduced)
+      {:decision :block
+       :reason   (str "doubled-token: " (count introduced)
+                      " suspect identifier(s) introduced in " file-path ":\n"
+                      (->> introduced sort (take 5)
+                           (map #(str "  " %))
+                           (str/join "\n")))})))
 
 (defhook doubled-token
-  "Detect doubled tokens after Edit — catches rename artifacts."
+  "Detect doubled tokens introduced by an Edit — catches rename artifacts."
   {}
   [input]
-  (when-let [file-path (get-in input [:tool_input :file_path])]
-    (check-file file-path)))
+  (let [{:keys [file_path old_string new_string]} (:tool_input input)]
+    (when file_path
+      (check-edit file_path old_string new_string))))

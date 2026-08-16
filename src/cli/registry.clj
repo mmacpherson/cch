@@ -45,11 +45,6 @@
                     :event       "PreToolUse"
                     :matcher     "Edit|Write"
                     :description "Hard-denies edits to secrets/keys/.env/.git/.ssh"}
-   "command-audit" {:type        :code
-                    :ns          "hooks.command-audit"
-                    :event       "PostToolUse"
-                    :matcher     "Bash"
-                    :description "Logs Bash commands; flags configured regex patterns"}
    "command-guard" {:type        :code
                     :ns          "hooks.command-guard"
                     :event       "PreToolUse"

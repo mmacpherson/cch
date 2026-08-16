@@ -69,30 +69,6 @@
   (testing "normal camelCase"
     (is (nil? (dt/find-doubled-tokens "getB2Client = createSession()")))))
 
-;; --- Unit tests: check-file ---
-
-(deftest test-check-file-nonexistent-returns-nil
-  (is (nil? (dt/check-file "/tmp/does-not-exist-ever-12345.py"))))
-
-(deftest test-check-file-clean-returns-nil
-  (let [tmp (str (fs/create-temp-file {:prefix "dt-clean-" :suffix ".py"}))]
-    (try
-      (spit tmp "def foo_bar():\n    return 1\n")
-      (is (nil? (dt/check-file tmp)))
-      (finally
-        (fs/delete tmp)))))
-
-(deftest test-check-file-doubled-returns-decision
-  (let [tmp (str (fs/create-temp-file {:prefix "dt-bad-" :suffix ".py"}))]
-    (try
-      (spit tmp "x = latest_latest\ny = foo_bar\n")
-      (let [result (dt/check-file tmp)]
-        (is (= :block (:decision result)))
-        (is (str/includes? (:reason result) "doubled-token"))
-        (is (str/includes? (:reason result) "latest_latest")))
-      (finally
-        (fs/delete tmp)))))
-
 ;; --- Integration: subprocess the hook, verify PostToolUse response shape ---
 
 (deftest test-cli-integration-clean-file-no-output
@@ -113,10 +89,14 @@
       (finally
         (fs/delete tmp)))))
 
-(deftest test-cli-integration-doubled-file-emits-block
+(deftest test-cli-integration-untouched-artifact-stays-silent
   (let [tmp (str (fs/create-temp-file {:prefix "dt-int-bad-" :suffix ".py"}))]
     (try
       (spit tmp "self.observations_observations_latest = compute()\n")
+      ;; The file already contains a doubled token, but this edit does not
+      ;; touch it — it swaps compute() for fetch(). Blocking here is what
+      ;; the hook used to do and is exactly the defect: a pre-existing
+      ;; match made every later edit to the file unlandable.
       (let [input  (json/generate-string
                      {:hook_event_name "PostToolUse"
                       :cwd             "/tmp"
@@ -124,6 +104,25 @@
                       :tool_input      {:file_path   tmp
                                         :old_string  "compute()"
                                         :new_string  "fetch()"
+                                        :replace_all false}})
+            result (ts/run-hook "hooks.doubled-token" input {:dir repo-root})]
+        (is (zero? (:exit result)))
+        (is (str/blank? (:out result))
+            "an edit that introduces nothing must stay silent"))
+      (finally
+        (fs/delete tmp)))))
+
+(deftest test-cli-integration-introduced-artifact-emits-block
+  (let [tmp (str (fs/create-temp-file {:prefix "doubled-" :suffix ".py"}))]
+    (try
+      (spit tmp "x = 1\n")
+      (let [input  (json/generate-string
+                     {:hook_event_name "PostToolUse"
+                      :cwd             "/tmp"
+                      :tool_name       "Edit"
+                      :tool_input      {:file_path   tmp
+                                        :old_string  "get_b2_client()"
+                                        :new_string  "get_b2_b2_client()"
                                         :replace_all false}})
             result (ts/run-hook "hooks.doubled-token" input {:dir repo-root})
             parsed (json/parse-string (:out result) true)]
@@ -134,3 +133,29 @@
             "must NOT use PreToolUse-shaped response"))
       (finally
         (fs/delete tmp)))))
+
+;; --- Unit tests: check-edit (only what the edit introduces) ---
+
+(deftest check-edit-ignores-pre-existing-matches
+  (testing "a match already in the file is not the edit's fault"
+    (is (nil? (dt/check-edit "/tmp/x.md"
+                             "see sample-project here"
+                             "see sample-project there")))))
+
+(deftest check-edit-flags-introduced-artifact
+  (let [r (dt/check-edit "/tmp/x.py" "get_b2_client()" "get_b2_b2_client()")]
+    (is (= :block (:decision r)))
+    (is (str/includes? (:reason r) "get_b2_b2_client"))
+    (is (str/includes? (:reason r) "introduced"))))
+
+(deftest check-edit-allows-removing-an-artifact
+  (testing "cleaning one up must not be mistaken for adding one"
+    (is (nil? (dt/check-edit "/tmp/x.py" "get_b2_b2_client()" "get_b2_client()")))))
+
+(deftest check-edit-handles-absent-old-string
+  (testing "with no prior text every match is introduced"
+    (let [r (dt/check-edit "/tmp/x.py" nil "observations_observations_latest = 1")]
+      (is (= :block (:decision r))))))
+
+(deftest check-edit-clean-edit-is-silent
+  (is (nil? (dt/check-edit "/tmp/x.py" "a = 1" "b = 2"))))

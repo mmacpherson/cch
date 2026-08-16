@@ -78,6 +78,9 @@
 (defn- hook-row [{:keys [hook_name fires denies]}]
   [:tr
    [:td [:span.hook-badge {:style (str "border-color: var(--c-"
+                                       ;; command-audit was retired 2026-08-16 but
+                                       ;; 157k historical rows remain and must
+                                       ;; still render.
                                        (case hook_name
                                          "command-audit" "ask"
                                          "command-guard" "deny"

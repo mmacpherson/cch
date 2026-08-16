@@ -9,3 +9,4 @@ target/
 .dolt/
 *.db
 .beads-credential-key
+target/test-events.db*

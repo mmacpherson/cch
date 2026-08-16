@@ -2,7 +2,7 @@
   "Two-tier configuration loading plus effective-config resolution for
   the HTTP dispatcher.
 
-  Legacy per-hook loader (scope-lock, command-audit use this directly):
+  Legacy per-hook loader (scope-lock uses this directly):
     Global:   ~/.config/cch/config.yaml       (per-user, optional)
     Project:  .cch-config.yaml                (walks up from cwd to worktree root)
 

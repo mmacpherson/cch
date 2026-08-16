@@ -53,7 +53,7 @@
       (log/ensure-db! db)
       ;; Enable all code hooks at global scope so dispatch fan-out works.
       ;; Individual tests can disable specific hooks as needed.
-      (doseq [hook-name ["scope-lock" "protect-files" "command-audit" "event-log"]]
+      (doseq [hook-name ["scope-lock" "protect-files" "command-guard" "event-log"]]
         (cdb/upsert! {:hook-name hook-name :scope cdb/global-scope :enabled true}))
       (let [{:keys [stop]} (server/start! {:port p :host "127.0.0.1"})]
         (binding [*port* p
@@ -106,7 +106,6 @@
     (let [names (set (map :name (:hooks body)))]
       (is (contains? names "scope-lock"))
       (is (contains? names "protect-files"))
-      (is (contains? names "command-audit"))
       (is (contains? names "event-log")))))
 
 (deftest test-legacy-hooks-route-gone

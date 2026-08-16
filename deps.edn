@@ -29,6 +29,13 @@
    :extra-deps  {io.github.cognitect-labs/test-runner
                  {:git/tag "v0.5.1" :git/sha "dfb30dd"}
                  hato/hato {:mvn/version "1.0.0"}}
+   ;; Redirect the event DB away from ~/.local/share/cch. Without this the
+   ;; suite logs through the same path as live hooks and its fixtures are
+   ;; indistinguishable from real events — 656 fake command-audit blocks
+   ;; and `rm -rf /` x328 accumulated before anyone noticed. A property
+   ;; rather than an env var because the JVM cannot set its own env, so
+   ;; this holds however the tests are started.
+   :jvm-opts    ["-Dcch.db.path=target/test-events.db"]
    :exec-fn     cognitect.test-runner.api/test
    :exec-args   {:dirs ["test"]}}
 
