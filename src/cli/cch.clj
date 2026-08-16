@@ -9,10 +9,12 @@
     uninstall <hook>    Disable a hook
     list                Show available and installed hooks
     log                 Query event history
+    attention           Time agents spent blocked on you
     serve               Run the HTTP dispatcher + web dashboard
     install-service     Install OS-native auto-start for `cch serve`
     uninstall-service   Remove the auto-start unit/plist"
-  (:require [cch.server :as server]
+  (:require [cch.attention :as attention]
+            [cch.server :as server]
             [cli.init :as init]
             [cli.install :as install]
             [cli.list-cmd :as list-cmd]
@@ -31,11 +33,20 @@
   (println "  uninstall <hook>    Disable a hook")
   (println "  list                Show available and installed hooks")
   (println "  log                 Query event history")
+  (println "  attention           Time agents spent blocked on you")
   (println "  serve               Run the HTTP dispatcher + web dashboard")
   (println "  install-service     Install OS-native auto-start for `cch serve`")
   (println "  uninstall-service   Remove the auto-start unit/plist")
   (println)
   (println "Run 'cch <command> --help' for details."))
+
+(defn parse-attention-args
+  "cch attention [--days N] [--limit N]. Absent --days means all history."
+  [args]
+  (let [m (apply hash-map args)]
+    (cond-> {}
+      (get m "--days")  (assoc :days  (parse-long (get m "--days")))
+      (get m "--limit") (assoc :limit (parse-long (get m "--limit"))))))
 
 (defn -main [& args]
   (let [[cmd & rest-args] args]
@@ -45,6 +56,7 @@
       "uninstall"         (apply install/run-uninstall rest-args)
       "list"              (apply list-cmd/run rest-args)
       "log"               (apply log-cmd/run rest-args)
+      "attention"         (println (attention/report (parse-attention-args rest-args)))
       "serve"             (apply server/-main rest-args)
       "install-service"   (apply service-cmd/run rest-args)
       "uninstall-service" (apply service-cmd/run-uninstall rest-args)
