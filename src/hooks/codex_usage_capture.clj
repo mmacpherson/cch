@@ -6,7 +6,7 @@
 
   Why a hook instead of a statusLine command: Codex 0.133.0 doesn't expose
   a Claude-style statusLine.command. Its rate-limit snapshot is appended
-  to ~/.codex/sessions/.../rollout-*.jsonl as `event_msg`/`token_count`
+  to $CODEX_HOME/sessions/.../rollout-*.jsonl as `event_msg`/`token_count`
   events. Every Codex hook receives `transcript_path` pointing at that
   file, so the freshest rate-limit row is one tail-read away.
 

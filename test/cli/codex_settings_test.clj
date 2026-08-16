@@ -13,6 +13,20 @@
     :command "curl -s -X POST --data-binary @- http://127.0.0.1:8888/dispatch/PreToolUse"
     :timeout 30}])
 
+(deftest resolve-codex-home-honours-env
+  (testing "CODEX_HOME wins — runner-a relocates it to ~/.config/codex, and
+            writing to ~/.codex instead fails silently"
+    (is (= "/home/u/.config/codex"
+           (cs/resolve-codex-home "/home/u/.config/codex" "/home/u"))))
+  (testing "falls back to the upstream default when unset or blank"
+    (is (= "/home/u/.codex" (cs/resolve-codex-home nil "/home/u")))
+    (is (= "/home/u/.codex" (cs/resolve-codex-home "" "/home/u")))
+    (is (= "/home/u/.codex" (cs/resolve-codex-home "   " "/home/u")))))
+
+(deftest config-path-sits-under-codex-home
+  (is (str/ends-with? (cs/codex-config-path) "/config.toml"))
+  (is (str/starts-with? (cs/codex-config-path) (cs/codex-home))))
+
 (deftest render-block-has-sentinels
   (let [text (cs/render-block "doubled-token" sample-entries)]
     (is (str/starts-with? text "# cch:begin doubled-token\n"))

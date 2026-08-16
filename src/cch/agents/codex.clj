@@ -1,6 +1,6 @@
 (ns cch.agents.codex
   "Codex adapter — translates the cch hook registry into Codex
-  `~/.codex/config.toml` entries.
+  `$CODEX_HOME/config.toml` entries.
 
   Codex hooks are command-type entries (no native HTTP support; see the
   shim discussion in claude-code-hooks-bp0). Each registered event gets a

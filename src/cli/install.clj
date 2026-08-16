@@ -142,7 +142,7 @@
   Default: writes Claude Code dispatcher entries to the current repo's
   settings.local.json. With --global, writes the global Claude
   settings.json. With --codex, writes Codex entries to the user's
-  ~/.codex/config.toml instead (Codex has no project-vs-global split, so
+  $CODEX_HOME/config.toml instead (Codex has no project-vs-global split, so
   --codex and --global are mutually exclusive). With --agy, configures the
   documented AGY statusLine feed for quota capture.
 
@@ -171,7 +171,7 @@
 
   Default removes them from the repo's Claude settings.local.json;
   --global removes from the global Claude settings.json; --codex removes
-  the cch sentinel block from ~/.codex/config.toml. --codex and --global
+  the cch sentinel block from $CODEX_HOME/config.toml. --codex and --global
   are mutually exclusive. Always clears the hook_config table."
   [& args]
   (let [[flags _kvs _pos] (parse-flags args)
