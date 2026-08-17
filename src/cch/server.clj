@@ -239,8 +239,8 @@
                     :tooltip "Universal observer — logs every event but never blocks"}
    "scope-lock"    {:color   "#d97706"
                     :tooltip "Worktree scope enforcement — prompts for edits outside allowed paths"}
-   "command-audit" {:color   "#059669"
-                    :tooltip "Bash audit log — records every command; flags configured patterns"}})
+   "protect-files" {:color   "#dc2626"
+                    :tooltip "Hard-denies edits to secrets, keys, .env, .git and .ssh"}})
 
 (declare encode-query)
 (declare parse-query)
