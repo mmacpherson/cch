@@ -629,7 +629,7 @@
           json-out  (proto/->response event reconciled)]
       {:status  200
        :headers {"Content-Type" "application/json"}
-       :body    (or json-out "")})
+       :body    (or json-out "{}")})
     (catch Exception e
       (binding [*out* *err*]
         (println (format "cch.server: /dispatch/%s error: %s" event (.getMessage e))))
