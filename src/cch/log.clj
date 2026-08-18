@@ -21,6 +21,7 @@
   (:require [babashka.process :as p]
             [babashka.fs :as fs]
             [cch.db :as db]
+            [cch.federation :as fed]
             [cch.migrate :as migrate]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -145,7 +146,7 @@
         ;; fallback path (concurrent sqlite3 procs); the writer thread
         ;; sets WAL once at startup and is the sole writer.
         insert (format
-                 "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra, agent) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                 "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra, agent, node) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
                  (sql-value session-id)
                  (sql-value hook-name)
                  (sql-value event-type)
@@ -156,7 +157,8 @@
                  (sql-value reason)
                  (sql-value elapsed-ms)
                  (sql-value extra)
-                 (sql-value (or agent "claude-code")))
+                 (sql-value (or agent "claude-code"))
+                 (sql-value (fed/node-name)))
         fallback-sql (str "PRAGMA busy_timeout=5000; " insert)]
     (try
       (ensure-db-once! path)
@@ -229,8 +231,8 @@
   "Query recent events. Returns a seq of maps.
   opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix,
         :agent, :q (text search)"
-  [& {:keys [limit hook event session decision since cwd-prefix agent q]}]
-  (let [cols [:id :timestamp :agent :session-id :hook-name :event-type
+  [& {:keys [limit hook event session decision since cwd-prefix agent node q]}]
+  (let [cols [:id :timestamp :agent :node :session-id :hook-name :event-type
               :tool-name :file-path :cwd :decision :reason :elapsed-ms :extra]
         qry  (cond-> {:select   cols
                       :from     [:events]
@@ -240,6 +242,7 @@
                event      (update :where (fnil conj [:and]) [:= :event-type event])
                session    (update :where (fnil conj [:and]) [:= :session-id session])
                agent      (update :where (fnil conj [:and]) [:= :agent agent])
+               node       (update :where (fnil conj [:and]) [:= :node node])
                (= decision "observe")
                           (update :where (fnil conj [:and]) [:is :decision nil])
                (and decision (not= decision "observe"))
@@ -262,14 +265,15 @@
   [{:keys [session-id used-pct current-tokens window-size model-id payload agent]}]
   (let [path   (db/db-path)
         insert (format
-                 "INSERT INTO context_snapshots (agent, session_id, used_pct, current_tokens, window_size, model_id, payload) VALUES (%s,%s,%s,%s,%s,%s,%s);"
+                 "INSERT INTO context_snapshots (agent, session_id, used_pct, current_tokens, window_size, model_id, payload, node) VALUES (%s,%s,%s,%s,%s,%s,%s,%s);"
                  (sql-value (or agent "claude-code"))
                  (sql-value session-id)
                  (if used-pct (str used-pct) "NULL")
                  (if current-tokens (str (long current-tokens)) "NULL")
                  (if window-size (str (long window-size)) "NULL")
                  (sql-value model-id)
-                 (sql-value payload))
+                 (sql-value payload)
+                 (sql-value (fed/node-name)))
         fallback-sql (str "PRAGMA busy_timeout=5000; " insert)]
     (try
       (ensure-db-once! path)

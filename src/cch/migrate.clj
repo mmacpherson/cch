@@ -42,7 +42,35 @@
    {:id "0002-context-snapshots-agent"
     :up (str "ALTER TABLE context_snapshots ADD COLUMN agent TEXT NOT NULL DEFAULT 'claude-code';"
              "CREATE INDEX IF NOT EXISTS idx_ctx_agent ON context_snapshots(agent);")
-    :baseline-probe (fn [path] (column-exists? path "context_snapshots" "agent"))}])
+    :baseline-probe (fn [path] (column-exists? path "context_snapshots" "agent"))}
+   ;; 0003/0004 add columns that schema.sql also creates for fresh installs,
+   ;; so a fresh DB already has them — the baseline-probe records the
+   ;; migration as applied without re-running the ALTER (which would fail
+   ;; with 'duplicate column name').
+   {:id "0003-events-federation"
+    :up (str "ALTER TABLE events ADD COLUMN node TEXT;"
+             "ALTER TABLE events ADD COLUMN origin_id INTEGER;"
+             "CREATE INDEX IF NOT EXISTS idx_events_node ON events(node);"
+             "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_node_origin ON events(node, origin_id);")
+    :baseline-probe (fn [path] (column-exists? path "events" "node"))}
+   {:id "0004-context-snapshots-federation"
+    :up (str "ALTER TABLE context_snapshots ADD COLUMN node TEXT;"
+             "ALTER TABLE context_snapshots ADD COLUMN origin_id INTEGER;"
+             "CREATE INDEX IF NOT EXISTS idx_ctx_node ON context_snapshots(node);"
+             "CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_node_origin ON context_snapshots(node, origin_id);")
+    :baseline-probe (fn [path] (column-exists? path "context_snapshots" "node"))}
+   {:id "0005-federation-offsets"
+    :up (str "CREATE TABLE IF NOT EXISTS federation_offsets ("
+             "  table_name      TEXT PRIMARY KEY,"
+             "  last_shipped_id INTEGER NOT NULL DEFAULT 0,"
+             "  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now'))"
+             ");")}])
+
+(defn migration-ids
+  "Ordered ids of every defined migration. Public so tests and
+  introspection don't hardcode the set."
+  []
+  (mapv :id migrations))
 
 (defn- ensure-tracking-table! [path]
   (p/sh ["sqlite3" path

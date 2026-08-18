@@ -25,6 +25,8 @@
             [cch.config-db :as cdb]
             [cch.db :as db]
             [cch.events :as events]
+            [cch.federation :as fed]
+            [cch.federation.ship :as fed-ship]
             [cch.forecast :as forecast]
             [cch.log :as log]
             [cch.overview :as overview]
@@ -890,6 +892,39 @@
        :headers {"Content-Type" "application/json"}
        :body (json/generate-string {:error (.getMessage e)})})))
 
+(defn- handle-ingest
+  "POST /ingest — collector endpoint for cross-machine federation (n55).
+  Accepts {\"table\": ..., \"rows\": [...]} and idempotently unions the
+  rows into the local DB. Only active when this machine is configured as a
+  collector (federation.collector); returns 404 otherwise so a plain node
+  doesn't silently accept uploads. Requires a matching bearer token when
+  one is configured. Transport is expected to be tailnet-private."
+  [req]
+  (let [{:keys [collector? token]} (fed/load-federation-config)]
+    (cond
+      (not collector?)
+      {:status 404 :body "not found"}
+
+      (not (fed/authorized? token (get-in req [:headers "authorization"])))
+      {:status 401
+       :headers {"Content-Type" "application/json"}
+       :body (json/generate-string {:error "unauthorized"})}
+
+      :else
+      (try
+        (let [{:keys [table rows]} (json/parse-string (slurp (:body req)) true)]
+          (if (fed/known-table? table)
+            {:status 200
+             :headers {"Content-Type" "application/json"}
+             :body (json/generate-string {:ingested (fed/ingest-rows! table rows)})}
+            {:status 400
+             :headers {"Content-Type" "application/json"}
+             :body (json/generate-string {:error (str "unknown table: " table)})}))
+        (catch Exception e
+          {:status 500
+           :headers {"Content-Type" "application/json"}
+           :body (json/generate-string {:error (.getMessage e)})})))))
+
 (def ^:private window-key->fc-key
   {:seven-day :seven_day
    :five-hour :five_hour})
@@ -1312,6 +1347,9 @@
       (and (= request-method :post) (= uri "/context-snapshot"))
       (handle-context-snapshot req)
 
+      (and (= request-method :post) (= uri "/ingest"))
+      (handle-ingest req)
+
       (and (= request-method :get) (= uri "/forecast"))
       (handle-forecast req)
 
@@ -1382,6 +1420,12 @@
         stop-fn   (httpkit/run-server (fn [req] (route hooks event-idx req))
                                       {:port port :ip host})]
     (forecast/start-bg-refresh!)
+    (let [fed-cfg (fed/load-federation-config)]
+      (when (:collector? fed-cfg)
+        (println (format "Federation: accepting /ingest as collector node '%s'" (:node fed-cfg))))
+      (when (= :started (fed-ship/start-shipper!))
+        (println (format "Federation: shipping events to %s every %ds"
+                         (:collector-url fed-cfg) (quot (:interval-ms fed-cfg) 1000)))))
     (println (format "cch serve listening on http://%s:%d (%d code hook(s) loaded)"
                      host port (count hooks)))
     (doseq [[n h] (sort-by first hooks)]
@@ -1394,6 +1438,7 @@
               (try (apply stop-fn args) (catch Exception _ nil))
               (stop-nrepl! nrepl)
               (forecast/stop-bg-refresh!)
+              (fed-ship/stop-shipper!)
               (db/close-db!)
               (log/stop-writer!))
      :hooks hooks

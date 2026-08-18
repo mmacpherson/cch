@@ -184,6 +184,27 @@ Indexed on: session_id, timestamp, hook_name, decision.
 
 The `extra TEXT` column holds the full hook input as JSON (minus cch's internal `:cch/hook-name` marker). `wrap-logging` populates it for every invocation, so event-specific fields that don't map to structured columns — `trigger` for PreCompact, `reason` for SessionEnd, `prompt` for UserPromptSubmit, `last_assistant_message` for Stop — are always recoverable via `json_extract(extra, '$.trigger')` etc.
 
+### Federation (multi-machine)
+
+`cch.federation` unifies the event log across several machines without sharing a SQLite file over a network (which corrupts SQLite). Each machine keeps its **local** DB as the fast write buffer — the hot path is untouched — and a background shipper periodically POSTs new append-only rows to one **collector** node, which idempotently unions them.
+
+- **Attribution.** `events` and `context_snapshots` carry a `node` column (the originating machine, stamped at write, defaults to hostname) and an `origin_id` (the source row's local id, set only on ingested rows). A `UNIQUE(node, origin_id)` index makes re-sending a batch a no-op via `INSERT OR IGNORE`. Local rows keep their autoincrement `id` and leave `origin_id` NULL — SQLite treats NULLs as distinct, so local rows never dedup against each other. `(node, id)` is globally unique by construction, so the union needs no conflict resolution.
+- **Shipper.** A daemon thread (`cch.federation.ship`) reads `WHERE id > watermark` per table, POSTs a bounded batch to `<collector>/ingest`, and advances a per-table watermark in `federation_offsets`. A slow/unreachable collector never touches local write latency.
+- **Collector.** `POST /ingest` accepts `{table, rows}` only when the node is configured as a collector, and requires a matching bearer token when one is set.
+- **Transport.** Expected to run over a private network such as Tailscale: the collector binds `cch serve` to its tailnet interface (`--host <tailnet-addr>`), so `/ingest` is reachable only by the operator's own devices over WireGuard. The bearer token is defense-in-depth, not the primary gate.
+- **Config (opt-in, never in the repo).** All deployment specifics live in `~/.config/cch/config.yaml` under `federation:` — nothing machine-specific is committed:
+
+  ```yaml
+  federation:
+    node: my-laptop                        # optional; defaults to hostname
+    collector-url: http://<collector>:8888 # a node ships here when set
+    collector: true                        # this machine accepts /ingest
+    token: <shared-secret>                 # optional; enforced iff set
+    interval-seconds: 60
+  ```
+
+  Federation is off unless configured, so single-machine installs behave exactly as before.
+
 ## HTTP dispatcher (`cch serve`)
 
 `src/cch/server.clj` runs a long-lived Babashka HTTP server (bundled `org.httpkit.server`) that collapses per-event latency from ~50ms (bb startup) to a few milliseconds (in-process dispatch).

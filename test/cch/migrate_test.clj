@@ -51,11 +51,11 @@
 
         (migrate/apply-all! db)
 
-        (is (= #{"0001-events-agent" "0002-context-snapshots-agent"}
-               (migrate/applied-ids db))
-            "both migrations recorded via baseline-probe")
+        (is (= (set (migrate/migration-ids)) (migrate/applied-ids db))
+            "agent migrations baselined; later migrations applied")
         (is (contains? (column-names db "events") "agent"))
-        (is (contains? (column-names db "context_snapshots") "agent"))))))
+        (is (contains? (column-names db "context_snapshots") "agent"))
+        (is (contains? (column-names db "events") "node"))))))
 
 (deftest runs-pending-migrations-on-pre-existing-db-without-agent-cols
   (testing "DB that pre-dates the agent column gets both migrations applied"
@@ -70,8 +70,7 @@
 
         (is (contains? (column-names db "events") "agent"))
         (is (contains? (column-names db "context_snapshots") "agent"))
-        (is (= #{"0001-events-agent" "0002-context-snapshots-agent"}
-               (migrate/applied-ids db)))))))
+        (is (= (set (migrate/migration-ids)) (migrate/applied-ids db)))))))
 
 (deftest mixed-state-handled-correctly
   (testing "DB with one column added but not the other: applied one is baselined, missing one is applied"
@@ -86,8 +85,7 @@
         (migrate/apply-all! db)
 
         (is (contains? (column-names db "context_snapshots") "agent"))
-        (is (= #{"0001-events-agent" "0002-context-snapshots-agent"}
-               (migrate/applied-ids db)))))))
+        (is (= (set (migrate/migration-ids)) (migrate/applied-ids db)))))))
 
 (deftest is-idempotent
   (testing "running apply-all! twice doesn't error and doesn't double-record"
@@ -98,7 +96,7 @@
         (migrate/apply-all! db)
         (migrate/apply-all! db)
         (let [count-out (:out (p/sh ["sqlite3" db "SELECT count(*) FROM schema_migrations;"]))]
-          (is (= "2" (str/trim count-out))))))))
+          (is (= (str (count (migrate/migration-ids))) (str/trim count-out))))))))
 
 (deftest applied-ids-on-empty-tracking-table
   (with-tmp-db
