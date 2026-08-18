@@ -35,6 +35,13 @@
   (when path
     (str (fs/canonicalize path {:nofollow-links false}))))
 
+(def ^:private tmp-prefix
+  "Canonical system temp root, trailing slash. check-scope resolves incoming
+  paths through symlinks (normalize-path), and on macOS /tmp is a symlink to
+  /private/tmp — so a literal \"/tmp/\" prefix check misses resolved paths.
+  Compare against the resolved prefix instead. Computed once (delay)."
+  (delay (str (normalize-path "/tmp") "/")))
+
 (defn- path-segments
   "Split a path into segments."
   [path]
@@ -84,8 +91,11 @@
          {:decision :deny
           :reason   (str "scope-lock: blocked edit inside .git/: " file-path)}
 
-         ;; Always allow /tmp — universal scratch space
-         (str/starts-with? file-path "/tmp/")
+         ;; Always allow the system temp root — universal scratch space.
+         ;; Match both the literal and the symlink-resolved prefix so this
+         ;; holds on macOS (/tmp -> /private/tmp) as well as Linux.
+         (or (str/starts-with? file-path "/tmp/")
+             (str/starts-with? file-path @tmp-prefix))
          nil
 
          ;; User-level global allowlist (from ~/.config/cch/config.yaml)
