@@ -96,6 +96,13 @@
      :body   (:body resp)
      :parsed parsed}))
 
+(defn- no-op-body?
+  "The dispatcher emits valid empty JSON ({}) for events where no hook
+  produced output (19d9dbf: 'return valid JSON for no-output hook events'),
+  rather than a blank body."
+  [body]
+  (= "{}" (str/trim (str body))))
+
 ;; --- Health + unknown event ---
 
 (deftest test-health-lists-registered-hooks
@@ -118,7 +125,7 @@
   (testing "dispatch on an event with no subscribers returns 200 empty"
     (let [{:keys [status body]} (dispatch! "NobodyHandlesThis" {:cwd "/tmp"})]
       (is (= 200 status))
-      (is (str/blank? body)))))
+      (is (no-op-body? body)))))
 
 ;; --- Dispatch routing + reconciliation ---
 
@@ -132,7 +139,7 @@
                       :tool_name       "Edit"
                       :tool_input      {:file_path (str repo-root "/src/cch/core.clj")}})]
       (is (= 200 status))
-      (is (str/blank? body)))))
+      (is (no-op-body? body)))))
 
 (deftest test-dispatch-protect-files-denies-env
   (testing "Edit on .env → protect-files denies; dispatcher returns the deny"
@@ -175,7 +182,7 @@
                           :tool_name       "Edit"
                           :tool_input      {:file_path (str repo-root "/.env")}})]
           (is (= 200 status))
-          (is (str/blank? body)))
+          (is (no-op-body? body)))
         (finally
           ;; Restore for other tests
           (cdb/upsert! {:hook-name "protect-files" :scope cdb/global-scope :enabled true}))))))
@@ -192,7 +199,7 @@
       ;; Read doesn't match Edit|Write; scope-lock not invoked; no other hook on
       ;; PreToolUse/Read except event-log (observer, nil response). Empty.
       (is (= 200 status))
-      (is (str/blank? body)))))
+      (is (no-op-body? body)))))
 
 ;; --- Live re-eval (nREPL-style hot-reload) ---
 
@@ -216,7 +223,7 @@
         (with-redefs [hooks.scope-lock/composed (fn [_input] nil)]
           (let [{:keys [status body]} (dispatch! "PreToolUse" payload)]
             (is (= 200 status))
-            (is (str/blank? body)
+            (is (no-op-body? body)
                 "redefined composed should be picked up on next dispatch"))))
 
       (testing "original behavior restored after with-redefs scope ends"
@@ -233,7 +240,7 @@
                       :session_id      "http-test-session"
                       :source          "startup"})]
       (is (= 200 status))
-      (is (str/blank? body)))))
+      (is (no-op-body? body)))))
 
 ;; --- Agent attribution via X-CCH-Agent header ---
 
