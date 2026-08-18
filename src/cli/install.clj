@@ -49,6 +49,47 @@
           [#{} {} []]
           args))
 
+(def ^:private known-flags
+  "Flags accepted by both `cch install` and `cch uninstall`."
+  #{"--codex" "--agy" "--global"})
+
+(defn- help? [args]
+  (boolean (some #{"--help" "-h"} args)))
+
+(defn- unknown-flags
+  "Flags in `flag-set` that are neither a known flag nor --help."
+  [flag-set]
+  (seq (remove (conj known-flags "--help") flag-set)))
+
+(defn- print-install-help []
+  (println "cch install [--global] [--codex|--agy]")
+  (println)
+  (println "Bootstrap cch. Default target is the current repo's settings.local.json.")
+  (println "  --global   Write to the global Claude settings.json instead")
+  (println "  --codex    Write Codex entries to $CODEX_HOME/config.toml")
+  (println "  --agy      Configure the AGY statusLine feed for quota capture")
+  (println)
+  (println "--global, --codex, and --agy are mutually exclusive."))
+
+(defn- print-uninstall-help []
+  (println "cch uninstall [--global] [--codex|--agy]")
+  (println)
+  (println "Remove cch-owned entries. Default target is the repo's settings.local.json.")
+  (println "  --global   Remove from the global Claude settings.json instead")
+  (println "  --codex    Remove the cch sentinel block from $CODEX_HOME/config.toml")
+  (println "  --agy      Restore the previous AGY status line")
+  (println)
+  (println "--global, --codex, and --agy are mutually exclusive.")
+  (println "Always clears the hook_config table."))
+
+(defn- reject-unknown!
+  "Print an error for unknown flags and exit non-zero. `cmd` is \"install\"
+  or \"uninstall\" (used in the follow-up hint)."
+  [unknown cmd]
+  (println (format "Error: unknown flag(s): %s" (str/join ", " unknown)))
+  (println (format "Run 'cch %s --help' for usage." cmd))
+  (System/exit 2))
+
 (defn- clear-hook-config!
   "Delete every row from hook_config. Used by uninstall."
   []
@@ -153,6 +194,12 @@
         agy?    (contains? flags "--agy")
         global? (contains? flags "--global")]
     (cond
+      (help? args)
+      (print-install-help)
+
+      (unknown-flags flags)
+      (reject-unknown! (unknown-flags flags) "install")
+
       (> (count (filter true? [codex? agy? global?])) 1)
       (do (println "Error: --global, --codex, and --agy are mutually exclusive")
           (System/exit 2))
@@ -179,6 +226,12 @@
         agy?    (contains? flags "--agy")
         global? (contains? flags "--global")]
     (cond
+      (help? args)
+      (print-uninstall-help)
+
+      (unknown-flags flags)
+      (reject-unknown! (unknown-flags flags) "uninstall")
+
       (> (count (filter true? [codex? agy? global?])) 1)
       (do (println "Error: --global, --codex, and --agy are mutually exclusive")
           (System/exit 2))
