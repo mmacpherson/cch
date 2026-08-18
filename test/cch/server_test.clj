@@ -74,7 +74,11 @@
     (try
       (fs/create-dirs nested)
       (fs/create-file (str repo "/.git"))
-      (is (= repo (#'server/git-root-on-disk nested)))
+      ;; git-root-on-disk canonicalizes (resolves symlinks), so compare
+      ;; against the canonical repo path — on macOS the temp dir lives under
+      ;; /var/folders which resolves to /private/var/folders.
+      (is (= (str (fs/canonicalize repo {:nofollow-links false}))
+             (#'server/git-root-on-disk nested)))
       (is (nil? (#'server/git-root-on-disk (str tmp-dir "/missing"))))
       (finally
         (fs/delete-tree tmp-dir)))))

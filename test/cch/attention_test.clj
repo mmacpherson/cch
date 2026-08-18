@@ -10,6 +10,12 @@
     (is (str/includes? (att/since-clause 30) "-30 days"))
     (is (str/includes? (att/since-clause 30) "timestamp >="))))
 
+;; Build the home-relative path from the actual user home so the abbreviator
+;; (which uses host $HOME) collapses it to ~ on any OS, and so no username
+;; path is hardcoded into the repo.
+(def home (System/getProperty "user.home"))
+(def home-project (str home "/projects/scratch/demo"))
+
 (def sample
   {:days 30
    :limit 2
@@ -17,8 +23,7 @@
             :episodes 2604 :hours 170.6 :avg_secs 236}
            {:agent "codex" :kind "permission_request"
             :episodes 1802 :hours 34.8 :avg_secs 69}]
-   :projects [{:cwd "/home/example/projects/example-worktrees/sample-infrastructure"
-               :episodes 173 :hours 10.3}
+   :projects [{:cwd home-project :episodes 173 :hours 10.3}
               {:cwd "/elsewhere/thing" :episodes 5 :hours 0.4}]})
 
 (deftest render-reports-figures
@@ -30,7 +35,7 @@
       (is (str/includes? out "2604"))
       (is (str/includes? out "170.6")))
     (testing "home is abbreviated, other paths left alone"
-      (is (str/includes? out "~/projects/example-worktrees/sample-infrastructure"))
+      (is (str/includes? out "~/projects/scratch/demo"))
       (is (str/includes? out "/elsewhere/thing")))
     (testing "the cap is stated, since it changes what the total means"
       (is (str/includes? out (str att/walked-away-secs))))))
