@@ -140,10 +140,14 @@
   "Collector side: idempotently insert `rows` received from another node
   into `table` in the local DB. No-op for unknown table / empty rows.
   Returns the count of rows submitted (not necessarily inserted, since
-  duplicates are ignored)."
+  duplicates are ignored).
+
+  The batch INSERT is fed to sqlite3 over stdin, not as a command-line
+  argument: a full batch easily exceeds the OS ARG_MAX and fails with
+  E2BIG (Argument list too long) when passed as argv."
   [table rows]
   (if-let [sql (ingest-sql table rows)]
-    (do (p/sh ["sqlite3" (db/db-path) sql])
+    (do (p/sh ["sqlite3" (db/db-path)] {:in sql})
         (count rows))
     0))
 

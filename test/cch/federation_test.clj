@@ -95,6 +95,23 @@
         (is (= 5 (:origin_id r)) "origin_id preserves the source row id")
         (is (= "scope-lock" (:hook_name r)))))))
 
+(deftest ingest-large-batch-fed-via-stdin
+  (testing "a batch whose INSERT exceeds the OS ARG_MAX still ingests"
+    ;; Regression: ingest-rows! must feed sqlite3 over stdin, not argv.
+    ;; 600 rows each padded so the combined INSERT is well over ~128KB.
+    (with-tmp-db
+      (fn [_]
+        (let [pad  (apply str (repeat 400 "x"))
+              rows (mapv (fn [i]
+                           {:id i :node "bulk" :timestamp "2026-01-01T00:00:00.000"
+                            :agent "claude-code" :session_id "s" :hook_name "h"
+                            :event_type "PreToolUse" :extra pad})
+                         (range 600))]
+          (is (= 600 (fed/ingest-rows! "events" rows)))
+          (is (= 600 (-> (db/query "SELECT count(*) AS c FROM events WHERE node='bulk';")
+                         first :c))
+              "all rows land — no E2BIG"))))))
+
 (deftest ingest-different-nodes-same-origin-id-coexist
   (with-tmp-db
     (fn [_]
