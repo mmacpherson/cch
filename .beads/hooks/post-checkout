@@ -22,3 +22,8 @@ if command -v bd >/dev/null 2>&1; then
   if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v1.0.0 ---
+
+# cch jsonl-only sync — reconcile local dolt to the checked-out branch's jsonl (branch checkouts only).
+if [ "$3" = "1" ] && command -v bd >/dev/null 2>&1 && [ -f .beads/issues.jsonl ]; then
+  bd import .beads/issues.jsonl >/dev/null 2>&1 || true
+fi

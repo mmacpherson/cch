@@ -22,3 +22,12 @@ if command -v bd >/dev/null 2>&1; then
   if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
 # --- END BEADS INTEGRATION v1.0.0 ---
+
+# cch jsonl-only sync (runs AFTER the beads block so it has the final say on issues.jsonl).
+# Export the COMPLETE beads state (issues + memories) and stage it, so every commit carries
+# current state. beads' own hook path cannot do this: export omits memories by default and
+# the shrink guard then refuses to overwrite a memory-bearing jsonl. Tracked here in
+# .beads/hooks (not .git/hooks) with core.hooksPath so jsonl-only travels to every clone.
+if command -v bd >/dev/null 2>&1; then
+  bd export --all -o .beads/issues.jsonl >/dev/null 2>&1 && git add .beads/issues.jsonl >/dev/null 2>&1
+fi
