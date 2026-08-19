@@ -6,6 +6,7 @@
             [babashka.process :as p]
             [cch.db :as db]
             [cch.federation :as fed]
+            [cch.federation.ship :as ship]
             [cch.log :as log]
             [cch.server]
             [cheshire.core :as json]
@@ -138,6 +139,28 @@
       (is (= 3 (count (fed/rows-after "events" 0 10))))
       (is (= 2 (count (fed/rows-after "events" 1 10))) "id > watermark")
       (is (empty? (fed/rows-after "events" 99 10))))))
+
+;; --- Shipper: byte-aware batching (guards against oversized POSTs) ---
+
+(deftest byte-batching-splits-large-payloads
+  (let [big     (apply str (repeat 500000 "x"))            ; ~0.5MB per row
+        rows    (mapv (fn [i] {:id i :extra big}) (range 20)) ; ~10MB total
+        batches (ship/into-byte-batches rows)]
+    (testing "a payload over the per-POST cap splits into multiple groups"
+      (is (> (count batches) 1)))
+    (testing "every row is preserved, in id order"
+      (is (= (map :id rows) (mapcat #(map :id %) batches))))
+    (testing "each multi-row group stays within a sane bound"
+      (doseq [b batches]
+        (is (or (= 1 (count b))
+                (<= (count (json/generate-string b)) (* 5 1024 1024))))))))
+
+(deftest byte-batching-keeps-small-rows-together
+  (let [rows    (mapv (fn [i] {:id i :extra "x"}) (range 100))
+        batches (ship/into-byte-batches rows)]
+    (testing "many tiny rows fit in a single POST"
+      (is (= 1 (count batches)))
+      (is (= 100 (count (first batches)))))))
 
 ;; --- HTTP handler: collector gating (end-to-end through handle-ingest) ---
 

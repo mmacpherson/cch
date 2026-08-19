@@ -29,11 +29,35 @@
       (= 200 (:status resp)))
     (catch Exception _ false)))
 
+(def ^:private max-post-bytes
+  "Cap on one POST body. Event `extra` blobs vary from bytes to tens of KB,
+  so a fixed row count doesn't bound the payload — a 500-row batch can blow
+  past http-kit's default 8MB :max-body and get dropped (broken pipe). Split
+  by cumulative serialized size instead, keeping each POST small enough for
+  the collector (and its modest heap) to build the INSERT."
+  (* 4 1024 1024))
+
+(defn into-byte-batches
+  "Partition `rows` (id-ascending) into contiguous groups whose JSON stays
+  under max-post-bytes. A single oversized row forms its own group so the
+  drain can't wedge on it."
+  [rows]
+  (let [{:keys [batches cur]}
+        (reduce (fn [{:keys [batches cur cur-bytes]} r]
+                  (let [rb (count (json/generate-string r))]
+                    (if (and (seq cur) (> (+ cur-bytes rb) max-post-bytes))
+                      {:batches (conj batches cur) :cur [r] :cur-bytes rb}
+                      {:batches batches :cur (conj cur r) :cur-bytes (+ cur-bytes rb)})))
+                {:batches [] :cur [] :cur-bytes 0}
+                rows)]
+    (cond-> batches (seq cur) (conj cur))))
+
 (defn ship-table-once!
-  "Ship all un-shipped rows of `table`, draining in batches and advancing
-  the watermark after each accepted POST. Stops on the first failed POST
-  (the watermark isn't advanced, so the batch is retried next cycle).
-  Returns the number of rows shipped."
+  "Ship all un-shipped rows of `table`, draining in id order and advancing
+  the watermark after each accepted POST. Rows are byte-batched so no single
+  POST exceeds the collector's body limit. Stops on the first failed POST
+  (the watermark isn't advanced past it, so it retries next cycle). Returns
+  the number of rows shipped."
   [cfg table]
   (loop [shipped 0]
     (let [wm   (fed/get-watermark table)
@@ -41,16 +65,20 @@
           ;; Guarantee a non-null node on shipped rows so the collector's
           ;; UNIQUE(node, origin_id) dedup is well-defined even for rows
           ;; written before node stamping existed.
-          rows (map #(assoc % :node (or (:node %) (:node cfg))) raw)]
+          rows (mapv #(assoc % :node (or (:node %) (:node cfg))) raw)]
       (if (empty? rows)
         shipped
-        (if (post-batch! cfg table rows)
-          (let [n (count rows)]
-            (fed/set-watermark! table (apply max (map :id rows)))
-            (if (= n fed/ship-batch)
-              (recur (+ shipped n))
-              (+ shipped n)))
-          shipped)))))
+        (let [[sent stopped?]
+              (reduce (fn [[sent _] chunk]
+                        (if (post-batch! cfg table chunk)
+                          (do (fed/set-watermark! table (apply max (map :id chunk)))
+                              [(+ sent (count chunk)) false])
+                          (reduced [sent true])))
+                      [0 false]
+                      (into-byte-batches rows))]
+          (if (or stopped? (< (count rows) fed/ship-batch))
+            (+ shipped sent)
+            (recur (+ shipped sent))))))))
 
 (defn ship-once!
   "One full ship cycle across every shippable table. Returns a

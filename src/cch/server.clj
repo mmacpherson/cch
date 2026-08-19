@@ -1418,7 +1418,11 @@
         event-idx (build-event-index hooks)
         nrepl     (start-nrepl! nrepl-port)
         stop-fn   (httpkit/run-server (fn [req] (route hooks event-idx req))
-                                      {:port port :ip host})]
+                                      {:port port :ip host
+                                       ;; Federation /ingest posts row batches;
+                                       ;; the shipper caps them well under this,
+                                       ;; but give headroom above the 8MB default.
+                                       :max-body (* 32 1024 1024)})]
     (forecast/start-bg-refresh!)
     (let [fed-cfg (fed/load-federation-config)]
       (when (:collector? fed-cfg)
