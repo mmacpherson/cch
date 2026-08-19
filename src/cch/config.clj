@@ -54,7 +54,7 @@
   ([dir filename]
    (find-config-up dir filename nil))
   ([dir filename boundary]
-   (loop [d (fs/path dir)]
+   (loop [d (some->> dir fs/path)]
      (when d
        (let [candidate (fs/path d filename)]
          (if (fs/exists? candidate)

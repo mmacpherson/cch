@@ -120,3 +120,96 @@
         (is (not (fs/exists? saved-path))))
       (finally
         (fs/delete-tree dir)))))
+
+;; --- Lifecycle hooks (event federation) ---
+
+(deftest dispatcher-hooks-has-correct-shape
+  (let [block (agy/dispatcher-hooks :host "127.0.0.1" :port 8888)
+        cch   (get block agy/hook-key)]
+    (testing "cch owns a single named hook key"
+      (is (= [agy/hook-key] (keys block))))
+    (testing "Pre/PostToolUse use the grouped matcher+hooks shape"
+      (doseq [ev ["PreToolUse" "PostToolUse"]]
+        (let [grp (first (get cch ev))]
+          (is (= "*" (get grp "matcher")))
+          (is (= "command" (get-in grp ["hooks" 0 "type"])))
+          (is (re-find #"X-CCH-Agent: agy" (get-in grp ["hooks" 0 "command"])))
+          (is (re-find (re-pattern (str "/dispatch/" ev))
+                       (get-in grp ["hooks" 0 "command"]))))))
+    (testing "Stop uses the flat handler-list shape (no matcher wrapper)"
+      (let [h (first (get cch "Stop"))]
+        (is (nil? (get h "matcher")))
+        (is (= "command" (get h "type")))
+        (is (re-find #"/dispatch/Stop" (get h "command")))))))
+
+(deftest install-hooks-preserves-user-hooks-and-round-trips
+  (let [dir  (str (fs/create-temp-dir {:prefix "agy-hooks-"}))
+        path (str dir "/hooks.json")]
+    (try
+      ;; Pre-existing user hook that must survive install + uninstall.
+      (spit path (json/generate-string {"user-lint" {"PostToolUse" []}}))
+      (agy/install-hooks! :config-path path)
+      (let [after (json/parse-string (slurp path))]
+        (is (contains? after "user-lint") "user hook preserved")
+        (is (contains? after agy/hook-key) "cch hook added"))
+      ;; Re-install is idempotent (still exactly the two keys).
+      (agy/install-hooks! :config-path path)
+      (is (= #{"user-lint" agy/hook-key}
+             (set (keys (json/parse-string (slurp path))))))
+      ;; Uninstall strips only cch's key.
+      (let [{:keys [removed]} (agy/uninstall-hooks! :config-path path)]
+        (is removed)
+        (is (= {"user-lint" {"PostToolUse" []}}
+               (json/parse-string (slurp path)))))
+      (finally (fs/delete-tree dir)))))
+
+(deftest uninstall-hooks-deletes-file-when-only-cch-remains
+  (let [dir  (str (fs/create-temp-dir {:prefix "agy-hooks-"}))
+        path (str dir "/hooks.json")]
+    (try
+      (agy/install-hooks! :config-path path)
+      (is (fs/exists? path))
+      (agy/uninstall-hooks! :config-path path)
+      (is (not (fs/exists? path)) "file removed once cch's key is the last one")
+      (testing "uninstall on an absent file is a no-op"
+        (is (false? (:removed (agy/uninstall-hooks! :config-path path)))))
+      (finally (fs/delete-tree dir)))))
+
+(deftest normalize-event-payload-maps-agy-shape-to-cch
+  (let [out (agy/normalize-event-payload
+              "PreToolUse"
+              {:conversationId "conv-123"
+               :workspacePaths ["/home/example/proj" "/tmp"]
+               :stepIdx 19
+               :toolCall {:name "run_command" :args {:CommandLine "npm test"}}})]
+    (is (= "PreToolUse" (:hook_event_name out)))
+    (is (= "conv-123"   (:session_id out)))
+    (is (= "/home/example/proj" (:cwd out)) "first workspace path becomes cwd")
+    (is (= "run_command" (:tool_name out)))
+    (is (= {:CommandLine "npm test"} (:tool_input out)))
+    (is (= 19 (:stepIdx out)) "original AGY fields retained for the extra blob"))
+  (testing "a payload with no toolCall (e.g. Stop) omits tool keys"
+    (let [out (agy/normalize-event-payload
+                "Stop" {:conversationId "c" :executionNum 1 :terminationReason "model_stop"})]
+      (is (= "Stop" (:hook_event_name out)))
+      (is (= "c" (:session_id out)))
+      (is (nil? (:tool_name out)))
+      (is (nil? (:tool_input out))))))
+
+(deftest hook-response-matches-agy-contract
+  (testing "PreToolUse with no decision returns explicit allow (empty = deny in AGY)"
+    (is (= {"decision" "allow"}
+           (json/parse-string (agy/->hook-response "PreToolUse" nil)))))
+  (testing "PreToolUse maps cch :deny/:ask to AGY vocab, carrying reason"
+    (is (= {"decision" "deny" "reason" "nope"}
+           (json/parse-string (agy/->hook-response "PreToolUse" {:decision :deny :reason "nope"}))))
+    (is (= {"decision" "ask"}
+           (json/parse-string (agy/->hook-response "PreToolUse" {:decision :ask})))))
+  (testing "PostToolUse and Stop return a neutral empty object"
+    (is (= {} (json/parse-string (agy/->hook-response "PostToolUse" nil))))
+    (is (= {} (json/parse-string (agy/->hook-response "Stop" nil))))))
+
+(deftest find-config-up-is-nil-safe
+  ;; Regression: agy payloads can lack workspacePaths, so cwd resolves to nil;
+  ;; find-config-up must not NPE on a nil dir (was (fs/path nil)).
+  (is (nil? (@(requiring-resolve 'cch.config/find-config-up) nil ".cch-config.yaml"))))

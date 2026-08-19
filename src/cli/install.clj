@@ -174,8 +174,13 @@
   (let [{:keys [path script]} (agy/install!)]
     (println (format "Installed cch AGY usage capture to %s" path))
     (println (format "  status-line adapter: %s" script))
-    (println "  AGY quota snapshots will appear under Source → AGY on /usage")
-    (print-server-warning-if-down)))
+    (println "  AGY quota snapshots will appear under Source → AGY on /usage"))
+  (let [{:keys [path events]} (agy/install-hooks!)]
+    (println (format "Installed cch AGY lifecycle hooks to %s" path))
+    (println (format "  %d event(s) routed to /dispatch: %s"
+                     (count events) (str/join ", " events)))
+    (println "  AGY tool events will appear in the event log tagged agent=agy"))
+  (print-server-warning-if-down))
 
 (defn run
   "cch install [--global] [--codex|--agy] — bootstrap cch.
@@ -243,11 +248,16 @@
         (println "  hook_config table cleared"))
 
       agy?
-      (let [{:keys [path restored]} (agy/uninstall!)]
-        (println (format "Uninstalled cch AGY usage capture from %s" path))
-        (println (if restored
-                   "  previous AGY status line restored"
-                   "  current AGY status line left unchanged")))
+      (do
+        (let [{:keys [path restored]} (agy/uninstall!)]
+          (println (format "Uninstalled cch AGY usage capture from %s" path))
+          (println (if restored
+                     "  previous AGY status line restored"
+                     "  current AGY status line left unchanged")))
+        (let [{:keys [path removed]} (agy/uninstall-hooks!)]
+          (println (format "Removed cch AGY lifecycle hooks from %s" path))
+          (when-not removed
+            (println "  (no cch hook block was present)"))))
 
       :else
       (let [path (if global?

@@ -621,6 +621,9 @@
     (let [body-str  (slurp (:body req))
           parsed    (json/parse-string body-str true)
           agent     (or (get-in req [:headers "x-cch-agent"]) "claude-code")
+          ;; AGY sends camelCase/protojson payloads; reshape to cch's canonical
+          ;; keys so matcher + log middleware read tool/session/cwd correctly.
+          parsed    (if (= agent "agy") (agy/normalize-event-payload event parsed) parsed)
           input     (assoc parsed :cch/agent agent)
           cwd       (:cwd input)
           effective (config/load-effective-config cwd)
@@ -628,16 +631,25 @@
           apps      (applicable-hooks candidates (:tool_name input) effective)
           results   (mapv #(run-hook % input event) apps)
           reconciled (reconcile results)
-          json-out  (proto/->response event reconciled)]
+          ;; AGY's hook stdout contract differs from Claude/Codex: an empty
+          ;; PreToolUse response reads as a deny, so build its response shape
+          ;; explicitly (allow by default) rather than via proto/->response.
+          json-out  (if (= agent "agy")
+                      (agy/->hook-response event reconciled)
+                      (proto/->response event reconciled))]
       {:status  200
        :headers {"Content-Type" "application/json"}
        :body    (or json-out "{}")})
     (catch Exception e
       (binding [*out* *err*]
         (println (format "cch.server: /dispatch/%s error: %s" event (.getMessage e))))
-      {:status  500
+      ;; Fail open: never hand the agent a body it can't parse or an error
+      ;; that reads as a deny. An empty object is the neutral "no decision"
+      ;; response every supported CLI (Claude/Codex/AGY) treats as allow, so a
+      ;; dispatcher bug degrades to no-op logging rather than blocking tools.
+      {:status  200
        :headers {"Content-Type" "application/json"}
-       :body    (json/generate-string {:error (.getMessage e)})})))
+       :body    "{}"})))
 
 (defn- parse-query
   "Parse httpkit's :query-string into a keyword-keyed map. {} when blank."

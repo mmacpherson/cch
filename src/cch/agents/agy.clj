@@ -6,10 +6,14 @@
   cch's canonical Claude-shaped `rate_limits` map and owns installation of a
   lightweight status-line forwarding script."
   (:require [babashka.fs :as fs]
+            [cheshire.core :as json]
             [cli.settings :as settings]
             [clojure.java.io :as io]
             [clojure.string :as str])
   (:import (java.time Instant)))
+
+(def ^:const default-host "127.0.0.1")
+(def ^:const default-port 8888)
 
 (defn settings-path
   "Default AGY CLI settings file."
@@ -28,6 +32,13 @@
   []
   (str (System/getProperty "user.home")
        "/.gemini/antigravity-cli/cch-statusline-backup.json"))
+
+(defn hooks-config-path
+  "AGY's GLOBAL lifecycle-hooks file. Per the Antigravity customization guide,
+  global discovery is `~/.gemini/config/`, so a hooks.json there applies to
+  every agy session regardless of workspace."
+  []
+  (str (System/getProperty "user.home") "/.gemini/config/hooks.json"))
 
 (defn- bucket-window
   "Map an AGY quota bucket ID onto a cch window. AGY currently documents a
@@ -241,3 +252,104 @@
     {:path config-path
      :script adapter-path
      :restored restored}))
+
+;; --- Lifecycle hooks (event federation) ---
+;;
+;; AGY lifecycle hooks are `type: command` only (no native HTTP), so — like
+;; the Codex adapter — cch installs a curl-to-/dispatch/ command per event.
+;; Hooks live in a single JSON object keyed by hook name; cch owns the
+;; `cch-dispatcher` key and leaves any user hooks untouched.
+
+(def ^:const hook-key
+  "The cch-owned key in agy's hooks.json. Isolating our config under one
+  named hook lets uninstall strip it without disturbing user hooks."
+  "cch-dispatcher")
+
+(defn dispatch-command
+  "Render the curl command agy runs for `event`: pipe agy's stdin payload to
+  the cch dispatcher, tagged X-CCH-Agent: agy so the dispatcher normalizes the
+  agy-shaped payload and attributes rows. Short timeout + fail-open (-sS, empty
+  stdout on failure) so a wedged/absent cch never blocks the agent loop."
+  [event & {:keys [host port] :or {host default-host port default-port}}]
+  (format "curl -sS --max-time 5 -H 'X-CCH-Agent: agy' --data-binary @- http://%s:%d/dispatch/%s"
+          host port event))
+
+(defn dispatcher-hooks
+  "The cch-managed hooks.json fragment: {hook-key {event -> handlers}}.
+  Pre/PostToolUse are the grouped shape (matcher + hooks wrapper); Stop is the
+  flat shape (a bare handler list), per AGY's hooks spec. String keys so the
+  serialized JSON matches AGY's schema and merges with user hooks verbatim."
+  [& {:keys [host port] :or {host default-host port default-port}}]
+  (let [cmd     (fn [ev] (dispatch-command ev :host host :port port))
+        grouped (fn [ev] [{"matcher" "*"
+                           "hooks" [{"type" "command" "command" (cmd ev) "timeout" 10}]}])
+        flat    (fn [ev] [{"type" "command" "command" (cmd ev) "timeout" 10}])]
+    {hook-key {"PreToolUse"  (grouped "PreToolUse")
+               "PostToolUse" (grouped "PostToolUse")
+               "Stop"        (flat "Stop")}}))
+
+(defn- read-hooks-json
+  "Parse agy's hooks.json (string keys preserved), or nil if absent/malformed."
+  [path]
+  (when (fs/exists? path)
+    (try (json/parse-string (slurp path)) (catch Exception _ nil))))
+
+(defn install-hooks!
+  "Write cch's dispatcher lifecycle hooks into agy's global hooks.json under
+  `hook-key`, preserving any existing user hooks. Idempotent (re-running just
+  overwrites our own key)."
+  [& {:keys [config-path host port]}]
+  (let [path     (or config-path (hooks-config-path))
+        existing (or (read-hooks-json path) {})
+        merged   (merge existing (dispatcher-hooks :host (or host default-host)
+                                                   :port (or port default-port)))]
+    (when-let [parent (fs/parent path)]
+      (fs/create-dirs parent))
+    (spit path (json/generate-string merged {:pretty true}))
+    {:path path :hook-key hook-key :events ["PreToolUse" "PostToolUse" "Stop"]}))
+
+(defn uninstall-hooks!
+  "Remove cch's `hook-key` from agy's hooks.json, preserving user hooks. Deletes
+  the file if it becomes empty. No-op if the file is absent."
+  [& {:keys [config-path]}]
+  (let [path     (or config-path (hooks-config-path))
+        existing (read-hooks-json path)]
+    (when existing
+      (let [cleaned (dissoc existing hook-key)]
+        (if (empty? cleaned)
+          (fs/delete-if-exists path)
+          (spit path (json/generate-string cleaned {:pretty true})))))
+    {:path path :removed (boolean (get existing hook-key))}))
+
+(defn normalize-event-payload
+  "Translate an AGY lifecycle-hook payload (camelCase protojson) into cch's
+  canonical Claude-shaped input keys so the dispatcher's matcher and the log
+  middleware read tool/session/cwd correctly. `event` is the dispatch event
+  name from the URL — AGY payloads don't carry it. Original AGY fields are kept
+  (they flow into the row's `extra` blob for diagnostics)."
+  [event payload]
+  (let [tc (:toolCall payload)]
+    (cond-> (assoc payload
+                   :hook_event_name event
+                   :session_id (:conversationId payload)
+                   :cwd (first (:workspacePaths payload)))
+      tc (assoc :tool_name  (:name tc)
+                :tool_input (:args tc)))))
+
+(defn ->hook-response
+  "Render AGY's expected hook stdout for `event` from cch's reconciled result
+  (a map with optional :decision/:reason, or nil = allow).
+
+  Critically, AGY reads an EMPTY PreToolUse response as a DENY, so a
+  no-decision (logger-only) result must return an explicit `allow` or every
+  tool call is blocked. PostToolUse and Stop take a neutral empty object —
+  Stop without a `{decision:\"continue\"}` lets the agent stop normally."
+  [event reconciled]
+  (let [reason (:reason reconciled)]
+    (if (= event "PreToolUse")
+      (let [d (case (:decision reconciled)
+                (:deny :block) "deny"
+                :ask           "ask"
+                "allow")]
+        (json/generate-string (cond-> {:decision d} reason (assoc :reason reason))))
+      (json/generate-string {}))))
