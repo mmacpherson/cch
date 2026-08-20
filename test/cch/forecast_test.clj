@@ -179,8 +179,8 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest window-priors-distinct-per-window
-  (testing "5h prior is much larger than 7d (μ in %/hr units)"
-    (with-redefs [cch.forecast/learned-prior (fn [_] nil)]
+  (testing "5h seed prior is much larger than 7d (μ in %/hr units)"
+    (with-redefs [cch.forecast/learned-prior (fn [_ _] nil)]
       (let [seven-day (#'cch.forecast/window-priors "claude-code" :seven-day)
             five-hour (#'cch.forecast/window-priors "claude-code" :five-hour)]
         (is (= 0.42 (:prior-mu seven-day)))
@@ -188,30 +188,42 @@
             "5h prior must NOT silently default to the 7d rate — that was z3w")
         (is (< (:prior-mu seven-day) (:prior-mu five-hour)))))))
 
-(deftest window-priors-learned-overlays-only-on-7d
-  (with-redefs [cch.forecast/learned-prior (fn [_] {:mu 0.99 :sigma 0.01})]
-    ;; learned-prior returns {:mu :sigma}, NOT {:prior-mu :prior-sigma}. The
-    ;; current merge passes them through under their existing keys, so the
-    ;; baseline :prior-mu/:prior-sigma still win for downstream consumers.
-    ;; This test pins that behaviour: 5h gets baseline only, 7d gets both.
+(deftest window-priors-applies-learned-when-available
+  ;; The learned empirical-Bayes prior (per agent, per window) MUST reach the
+  ;; projection as :prior-mu/:prior-sigma, replacing the cold-start seed.
+  ;; Regression: window-priors used to `(merge base learned)`, leaving learned
+  ;; under :mu/:sigma where downstream :prior-mu/:prior-sigma consumers dropped
+  ;; it — the learned prior was dead code.
+  (with-redefs [cch.forecast/learned-prior
+                (fn [_ window-key]
+                  (case window-key
+                    :seven-day {:mu 0.99 :sigma 0.01}
+                    :five-hour {:mu 5.5  :sigma 0.7}))]
     (let [seven-day (#'cch.forecast/window-priors "claude-code" :seven-day)
           five-hour (#'cch.forecast/window-priors "claude-code" :five-hour)]
-      (is (= 0.99 (:mu seven-day)) "learned overlay survives merge on 7d")
-      (is (nil? (:mu five-hour))   "learned overlay is NOT consulted for 5h")
-      (is (= 3.75 (:prior-mu five-hour))
-          "5h baseline prior unaffected by learned-prior"))))
+      (is (= 0.99 (:prior-mu seven-day)) "learned prior reaches 7d as :prior-mu")
+      (is (= 0.01 (:prior-sigma seven-day)))
+      (is (= 5.5 (:prior-mu five-hour)) "learned prior reaches 5h as :prior-mu")
+      (is (= 0.7 (:prior-sigma five-hour))))))
+
+(deftest window-priors-falls-back-to-seed-without-history
+  (testing "no learned prior → window-config cold-start seed is used"
+    (with-redefs [cch.forecast/learned-prior (fn [_ _] nil)]
+      (let [five-hour (#'cch.forecast/window-priors "claude-code" :five-hour)]
+        (is (= 3.75 (:prior-mu five-hour)))
+        (is (= 1.3 (:prior-sigma five-hour)))))))
 
 (deftest build-current-window-projection-uses-window-specific-prior
   ;; Reproduce z3w. Build-current-window's projection bundle must carry the
   ;; same prior-mu/prior-sigma that compute-window-stats would pass — so the
   ;; /usage chart and the /forecast statusline agree.
   (let [captured (atom [])]
-    (with-redefs [cch.forecast/learned-prior          (fn [_] nil)
+    (with-redefs [cch.forecast/learned-prior          (fn [_ _] nil)
                   cch.forecast/latest-resets-at       (fn [_ _] 1000000000)
                   cch.forecast/filtered-samples       (fn [_ _ _] [])
                   cch.forecast/rate-5h-samples        (fn [_ _] [])
                   cch.forecast/raw-sample-count       (fn [_ _ _] 0)
-                  cch.forecast/historical-final-pcts  (fn [_] nil)
+                  cch.forecast/historical-final-pcts  (fn [_ _] nil)
                   cch.projections/rate-bayes-projection
                   (fn [_observed window-info]
                     (swap! captured conj (select-keys window-info

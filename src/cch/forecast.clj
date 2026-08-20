@@ -174,73 +174,85 @@
   "Pure fn: given a seq of completed-window rows [{:final_pct N} ...] ordered
    newest-first, returns {:mu :sigma} in %/hr units using exponentially-decayed
    weights (most-recent weight = 1, each older week × prior-decay-lambda).
-   Returns nil when fewer than 2 windows are supplied."
-  [rows]
-  (when (>= (count rows) 2)
-    (let [rates (mapv #(/ (double (:final_pct %)) (* 7.0 24.0)) rows)
-          ws    (mapv #(Math/pow prior-decay-lambda %) (range (count rates)))
-          sw    (reduce + 0.0 ws)
-          mu    (/ (reduce + 0.0 (map * ws rates)) sw)
-          sw2   (reduce + 0.0 (map #(* % %) ws))
-          var   (/ (reduce + 0.0 (map (fn [w r] (* w (Math/pow (- r mu) 2.0))) ws rates))
-                   (- sw (/ sw2 sw)))
-          sigma (max prior-sigma-floor (Math/sqrt var))]
-      {:mu mu :sigma sigma})))
+   `hours` is the window length used to convert a final used_percentage into a
+   burn rate (168 for 7d, 5 for 5h); defaults to 7d. Returns nil when fewer
+   than 2 windows are supplied."
+  ([rows] (weighted-prior-params rows (* 7.0 24.0)))
+  ([rows hours]
+   (when (>= (count rows) 2)
+     (let [rates (mapv #(/ (double (:final_pct %)) hours) rows)
+           ws    (mapv #(Math/pow prior-decay-lambda %) (range (count rates)))
+           sw    (reduce + 0.0 ws)
+           mu    (/ (reduce + 0.0 (map * ws rates)) sw)
+           sw2   (reduce + 0.0 (map #(* % %) ws))
+           var   (/ (reduce + 0.0 (map (fn [w r] (* w (Math/pow (- r mu) 2.0))) ws rates))
+                    (- sw (/ sw2 sw)))
+           sigma (max prior-sigma-floor (Math/sqrt var))]
+       {:mu mu :sigma sigma}))))
 
-(defn- historical-finals-sql [agent]
-  (format
+(def ^:private window-json-key
+  "rate_limits sub-key in the snapshot payload, per window."
+  {:seven-day "seven_day" :five-hour "five_hour"})
+
+(def ^:private window-hours
+  "Window length in hours — converts a completed window's final
+  used_percentage into a burn rate (%/hr)."
+  {:seven-day (* 7.0 24.0) :five-hour 5.0})
+
+(defn- historical-finals-sql [agent window-key]
+  (let [wk (window-json-key window-key)
+        ex (fn [field] (str "json_extract(payload,'$.rate_limits." wk "." field "')"))]
     (str "SELECT final_pct FROM ("
-         "  SELECT MAX(CAST(json_extract(payload,'$.rate_limits.seven_day.used_percentage') AS REAL))"
-         "    AS final_pct"
+         "  SELECT MAX(CAST(" (ex "used_percentage") " AS REAL)) AS final_pct"
          "  FROM context_snapshots"
-         "  WHERE json_extract(payload,'$.rate_limits.seven_day.resets_at') < strftime('%%s','now')"
-         "    AND json_extract(payload,'$.rate_limits.seven_day.used_percentage') IS NOT NULL"
-         "    AND session_id NOT LIKE 'test%%'"
-         "    %s"
-         "  GROUP BY json_extract(payload,'$.rate_limits.seven_day.resets_at')"
-         "  ORDER BY json_extract(payload,'$.rate_limits.seven_day.resets_at') DESC"
+         "  WHERE " (ex "resets_at") " < strftime('%s','now')"
+         "    AND " (ex "used_percentage") " IS NOT NULL"
+         "    AND session_id NOT LIKE 'test%'"
+         "    " (agent-clause agent)
+         "  GROUP BY " (ex "resets_at")
+         "  ORDER BY " (ex "resets_at") " DESC"
          "  LIMIT 12"
-         ") WHERE final_pct >= 10")
-    (agent-clause agent)))
+         ") WHERE final_pct >= 10")))
 
 (defn- historical-final-pcts
-  "Final used_percentage for each completed 7-day window, newest-first, up to 12."
-  [agent]
-  (some->> (db/query (historical-finals-sql agent))
+  "Final used_percentage for each completed `window-key` window, newest-first,
+  up to 12."
+  [agent window-key]
+  (some->> (db/query (historical-finals-sql agent window-key))
            (mapv #(double (:final_pct %)))))
 
 (defn- learned-prior
-  "Derive an empirical Bayes prior (μ/σ in %/hr) from completed windows
-   for `agent`. Returns nil during the first week when there is no history."
-  [agent]
-  (some->> (db/query (historical-finals-sql agent))
-           (weighted-prior-params)))
+  "Empirical-Bayes prior (μ/σ in %/hr) from completed `window-key` windows for
+   `agent`. Returns nil until at least 2 completed windows exist to learn from."
+  [agent window-key]
+  (some->> (db/query (historical-finals-sql agent window-key))
+           (#(weighted-prior-params % (window-hours window-key)))))
 
 (def ^:private window-config
-  "Per-window Bayesian prior defaults (μ, σ in %/hr), grounded in observed
-  completed-window burn rates (2026-08, claude-code, ~14 5h + 17 7d windows):
-  the 5h window burns ~3.75 %/hr, the 7d window ~0.42 %/hr — ≈9× apart, since
-  a 5h window packs a week's proportional burn into 5 hours. These baselines
-  are the live priors the projection anchors on. `window-priors` also merges a
-  learned prior, but that overlay is NOT yet wired into the projection (it
-  returns :mu/:sigma while consumers read :prior-mu/:prior-sigma — see the
-  follow-up issue), so getting these constants right is what matters today.
+  "Cold-start seed priors (μ, σ in %/hr), used ONLY until an agent has ≥2
+  completed windows to learn from. Grounded in observed completed-window burn
+  rates (2026-08, claude-code, ~14 5h + 17 7d windows): the 5h window burns
+  ~3.75 %/hr, the 7d window ~0.42 %/hr — ≈9× apart, since a 5h window packs a
+  week's proportional burn into 5 hours.
 
-  The previous 5h μ=15.0/σ=8.0 was a ~4× overestimate that biased every eo5h
-  projection toward premature exhaustion."
+  Once history exists, `learned-prior` computes the live prior per window and
+  these seeds fall away (see `window-priors`). They only shape the first week
+  of an agent's projections."
   {:seven-day {:prior-mu 0.42 :prior-sigma 0.13}
    :five-hour {:prior-mu 3.75 :prior-sigma 1.3}})
 
 (defn- window-priors
-  "Best-available prior for [agent window-key]: window-config baseline
-  merged with the empirical-Bayes learned prior (7d only — 5h relies on
-  the hardcoded baseline until enough completed 5h windows exist to
-  learn from). Both /usage and statusline projections MUST go through
+  "Best-available prior for [agent window-key], as :prior-mu/:prior-sigma.
+  Prefers the empirical-Bayes prior learned from this agent's own completed
+  windows; falls back to the window-config cold-start seed until ≥2 windows
+  exist to learn from. Both /usage and statusline projections MUST go through
   this so they agree."
   [agent window-key]
-  (let [base    (window-config window-key)
-        learned (when (= window-key :seven-day) (learned-prior agent))]
-    (merge base learned)))
+  (let [seed    (window-config window-key)
+        learned (learned-prior agent window-key)]
+    (if learned
+      {:prior-mu (:mu learned) :prior-sigma (:sigma learned)}
+      seed)))
 
 (defn- build-current-window
   "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
@@ -262,10 +274,7 @@
           ;; reset. Only keep samples tagged with the current resets_at.
           in-window    (filterv #(= (:resets-at %) resets-at) raw-samples)
           last-pct     (or (:pct (last in-window)) 0.0)
-          ;; Historical priors only derived for 7d today — 5h relies on the
-          ;; hardcoded window-config prior. Plenty of 5h windows exist to
-          ;; learn from later; that's deferred work.
-          hist-finals  (when (= window-key :seven-day) (historical-final-pcts agent))
+          hist-finals  (historical-final-pcts agent window-key)
           {:keys [prior-mu prior-sigma]} (window-priors agent window-key)
           window-info  {:now now :resets-at resets-at
                         :window-start window-start :last-pct last-pct
@@ -391,7 +400,7 @@
           raw-samples  (filtered-samples agent (epoch->iso window-start) window-key)
           in-window    (filterv #(= (:resets-at %) resets-at) raw-samples)
           last-pct     (:pct (last in-window))
-          hist-finals  (when (= window-key :seven-day) (historical-final-pcts agent))
+          hist-finals  (historical-final-pcts agent window-key)
           window-info  {:now now :resets-at resets-at
                         :window-start window-start :last-pct last-pct
                         :prior-mu prior-mu :prior-sigma prior-sigma

@@ -333,15 +333,14 @@
 
 ;; --- 4. Bayesian conjugate Gaussian on the rate ---
 
-;; Empirical prior on the average weekly rate.
-;; User reports typical end-of-week pct 80-95%, occasionally 100%:
-;;   mean_rate ≈ 87.5/(7·24) = 0.521 %/hr
-;;   σ on average rate ≈ (15pp/2)/(7·24) ≈ 0.045 %/hr (across-week)
-;; This is a strong prior — the user has a confident sense of their
-;; baseline. Tightness here is what stops the posterior from running
-;; off to whatever the most recent few rate samples suggest.
-(def ^:private bayes-prior-mu 0.55)
-(def ^:private bayes-prior-sigma 0.045)
+;; Fallback prior on the average 7-day rate, used ONLY when a caller invokes
+;; this projection without an explicit prior. Callers in cch.forecast always
+;; pass a per-agent, per-window prior (learned from completed windows, or the
+;; window-config cold-start seed) via window-info, so these defaults are a
+;; safety net rather than the live prior. Values match the 7d cold-start seed,
+;; grounded in observed completed-window burn (~0.42 %/hr, 2026-08, claude-code).
+(def ^:private bayes-prior-mu 0.42)
+(def ^:private bayes-prior-sigma 0.13)
 
 ;; Floor on observed rate noise: pct is quantized to integer percent,
 ;; so a 1-hour gap carries ±0.5%/hr quantization noise. Without this
@@ -435,7 +434,8 @@
 (defn rate-bayes-projection
   "Bayesian Gaussian model with conjugate update on the rate R.
 
-   1. Empirical prior: R ~ N(μ₀, σ₀²) centered at 0.55 %/hr.
+   1. Empirical prior: R ~ N(μ₀, σ₀²), supplied per window by the caller
+      (learned or seed); falls back to the 7d default when omitted.
    2. Brownian-motion variance: Var[pct(reset)] = σ²_R·Δt² + σ²_BM·Δt,
       so bands scale like √Δt at long horizons rather than Δt.
    3. Non-negative support via truncated normal: instead of clamping
