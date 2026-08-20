@@ -217,12 +217,19 @@
            (weighted-prior-params)))
 
 (def ^:private window-config
-  "Per-window Bayesian prior defaults (μ, σ in %/hr). The 5h prior is
-  much larger than the 7d one because a 5h window's burn rate is on a
-  ~7.5× higher scale (a 30% pct → 7d takes a week; 5h takes 5h).
-  `window-priors` overlays the 7d learned prior when available."
-  {:seven-day {:prior-mu 0.55 :prior-sigma 0.045}
-   :five-hour {:prior-mu 15.0 :prior-sigma 8.0}})
+  "Per-window Bayesian prior defaults (μ, σ in %/hr), grounded in observed
+  completed-window burn rates (2026-08, claude-code, ~14 5h + 17 7d windows):
+  the 5h window burns ~3.75 %/hr, the 7d window ~0.42 %/hr — ≈9× apart, since
+  a 5h window packs a week's proportional burn into 5 hours. These baselines
+  are the live priors the projection anchors on. `window-priors` also merges a
+  learned prior, but that overlay is NOT yet wired into the projection (it
+  returns :mu/:sigma while consumers read :prior-mu/:prior-sigma — see the
+  follow-up issue), so getting these constants right is what matters today.
+
+  The previous 5h μ=15.0/σ=8.0 was a ~4× overestimate that biased every eo5h
+  projection toward premature exhaustion."
+  {:seven-day {:prior-mu 0.42 :prior-sigma 0.13}
+   :five-hour {:prior-mu 3.75 :prior-sigma 1.3}})
 
 (defn- window-priors
   "Best-available prior for [agent window-key]: window-config baseline
