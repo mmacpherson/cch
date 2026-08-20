@@ -10,10 +10,12 @@
     list                Show available and installed hooks
     log                 Query event history
     attention           Time agents spent blocked on you
+    doctor              Report per-agent federation wiring on this box
     serve               Run the HTTP dispatcher + web dashboard
     install-service     Install OS-native auto-start for `cch serve`
     uninstall-service   Remove the auto-start unit/plist"
   (:require [cch.attention :as attention]
+            [cch.doctor :as doctor]
             [cch.server :as server]
             [cli.init :as init]
             [cli.install :as install]
@@ -34,6 +36,7 @@
   (println "  list                Show available and installed hooks")
   (println "  log                 Query event history")
   (println "  attention           Time agents spent blocked on you")
+  (println "  doctor              Report per-agent federation wiring on this box")
   (println "  serve               Run the HTTP dispatcher + web dashboard")
   (println "  install-service     Install OS-native auto-start for `cch serve`")
   (println "  uninstall-service   Remove the auto-start unit/plist")
@@ -57,6 +60,7 @@
       "list"              (apply list-cmd/run rest-args)
       "log"               (apply log-cmd/run rest-args)
       "attention"         (println (attention/report (parse-attention-args rest-args)))
+      "doctor"            (apply doctor/run rest-args)
       "serve"             (apply server/-main rest-args)
       "install-service"   (apply service-cmd/run rest-args)
       "uninstall-service" (apply service-cmd/run-uninstall rest-args)
