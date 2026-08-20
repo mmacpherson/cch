@@ -31,7 +31,7 @@
   (println)
   (println "Commands:")
   (println "  init                Set up cch in the current project")
-  (println "  install             Bootstrap cch (--global, --codex, --agy)")
+  (println "  install             Bootstrap cch (--all, --global, --codex, --agy)")
   (println "  uninstall <hook>    Disable a hook")
   (println "  list                Show available and installed hooks")
   (println "  log                 Query event history")

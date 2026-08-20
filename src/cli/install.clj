@@ -16,6 +16,7 @@
             [cch.agents.codex :as codex]
             [cch.config-db :as cdb]
             [cch.db :as db]
+            [cch.doctor :as doctor]
             [cch.log :as log]
             [cli.registry :as registry]
             [cli.settings :as settings]
@@ -51,7 +52,7 @@
 
 (def ^:private known-flags
   "Flags accepted by both `cch install` and `cch uninstall`."
-  #{"--codex" "--agy" "--global"})
+  #{"--codex" "--agy" "--global" "--all"})
 
 (defn- help? [args]
   (boolean (some #{"--help" "-h"} args)))
@@ -62,14 +63,17 @@
   (seq (remove (conj known-flags "--help") flag-set)))
 
 (defn- print-install-help []
-  (println "cch install [--global] [--codex|--agy]")
+  (println "cch install [--global] [--all|--codex|--agy]")
   (println)
   (println "Bootstrap cch. Default target is the current repo's settings.local.json.")
+  (println "  --all      Detect every agent on this box and provision each one")
   (println "  --global   Write to the global Claude settings.json instead")
   (println "  --codex    Write Codex entries to $CODEX_HOME/config.toml")
   (println "  --agy      Configure the AGY statusLine feed for quota capture")
   (println)
-  (println "--global, --codex, and --agy are mutually exclusive."))
+  (println "--codex and --agy are mutually exclusive with each other and --global.")
+  (println "--all provisions all present agents; combine with --global to target")
+  (println "the global Claude settings.json. Afterward, run `cch doctor` to verify."))
 
 (defn- print-uninstall-help []
   (println "cch uninstall [--global] [--codex|--agy]")
@@ -182,6 +186,34 @@
     (println "  AGY tool events will appear in the event log tagged agent=agy"))
   (print-server-warning-if-down))
 
+(defn- run-all-install!
+  "Detect which agents are on this box and provision cch into each present
+  one in a single pass. `global?` selects the Claude target (global
+  settings.json vs the repo's settings.local.json). Absent agents are reported
+  and skipped. Prints the codex interactive-trust reminder when codex is
+  provisioned, since that step can't be automated headlessly."
+  [global?]
+  (let [agents  (doctor/detect-agents (System/getProperty "user.dir"))
+        present (filter :present? agents)]
+    (println "cch install --all — detecting agents on this box")
+    (doseq [{:keys [agent present?]} agents]
+      (println (format "  %-13s %s" agent (if present? "found" "not found — skipped"))))
+    (println)
+    (doseq [{:keys [agent]} present]
+      (println (format "── %s ──" agent))
+      (case agent
+        "claude-code" (run-claude-install! global?)
+        "codex"       (run-codex-install!)
+        "agy"         (run-agy-install!))
+      (println))
+    (when (some #(= "codex" (:agent %)) present)
+      (println "⚠  codex requires a one-time INTERACTIVE trust before headless")
+      (println "   'codex exec' will fire the hooks. Run codex interactively once")
+      (println "   in this box and trust it, then confirm with:")
+      (println "       cch doctor")
+      (println))
+    (println "Verify wiring across all agents with:  cch doctor")))
+
 (defn run
   "cch install [--global] [--codex|--agy] — bootstrap cch.
 
@@ -195,6 +227,7 @@
   All paths enable :code hooks at global scope."
   [& args]
   (let [[flags _kvs _pos] (parse-flags args)
+        all?    (contains? flags "--all")
         codex?  (contains? flags "--codex")
         agy?    (contains? flags "--agy")
         global? (contains? flags "--global")]
@@ -205,9 +238,16 @@
       (unknown-flags flags)
       (reject-unknown! (unknown-flags flags) "install")
 
+      (and all? (or codex? agy?))
+      (do (println "Error: --all cannot be combined with --codex or --agy")
+          (System/exit 2))
+
       (> (count (filter true? [codex? agy? global?])) 1)
       (do (println "Error: --global, --codex, and --agy are mutually exclusive")
           (System/exit 2))
+
+      all?
+      (run-all-install! global?)
 
       codex?
       (run-codex-install!)
