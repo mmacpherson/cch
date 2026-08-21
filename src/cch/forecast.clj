@@ -13,6 +13,7 @@
   crosses the process boundary."
   (:require [cch.db :as db]
             [cch.projections :as proj]
+            [cch.settings :as settings]
             [clojure.core.async :as async])
   (:import (java.time Instant)))
 
@@ -422,15 +423,19 @@
 
 (def ^:private forecast-cache (atom nil))
 (def ^:private bg-thread (atom nil))
-(def ^:private signal-ch-ref (atom nil))
+(def ^:private stop-ch-ref (atom nil))
+(def ^:private last-watermark (atom nil))
 
 (defn signal-new-data!
-  "Notify the bg thread that a new context snapshot has arrived.
-   dropping-buffer 1 means concurrent signals coalesce — at most one
-   wakeup is queued regardless of how many sessions post at once."
-  []
-  (when-let [ch @signal-ch-ref]
-    (async/put! ch :signal)))
+  "No-op, retained for API compatibility.
+
+  Each context-snapshot POST used to signal the bg thread to recompute, but at
+  a busy box's snapshot rate (several per second) that drove the refresh loop
+  continuously and pinned a core. The loop now recomputes on a fixed cadence
+  (cch.settings/forecast-refresh-interval-ms), gated on a cheap snapshot
+  watermark so it only works when new rows have actually arrived. Callers no
+  longer need to signal; kept so existing call sites stay valid."
+  [])
 
 (defn- do-refresh!
   "Refresh the statusline forecast cache. Claude-only — the statusLine
@@ -451,47 +456,61 @@
          (binding [*out* *err*]
            (println "cch.forecast: refresh failed:" (.getMessage t))))))
 
+(defn- snapshot-watermark
+  "Cheap change-detector for the refresh gate: the highest context_snapshots
+  id, or nil if unavailable. A single MAX(id) over the primary key —
+  sub-millisecond even on a large table — so an idle loop costs almost nothing."
+  []
+  (try (some-> (db/query "SELECT MAX(id) AS m FROM context_snapshots") first :m)
+       (catch Throwable _ nil)))
+
+(defn- maybe-refresh!
+  "Recompute only when new snapshots have arrived since the last refresh.
+  Returns true if it refreshed. The watermark check means an idle box does no
+  forecast work at all, and a busy box does exactly one recompute per cadence
+  tick regardless of how many snapshots landed in between."
+  []
+  (let [wm (snapshot-watermark)]
+    (when (not= wm @last-watermark)
+      (reset! last-watermark wm)
+      (safe-refresh!)
+      true)))
+
 (defn start-bg-refresh!
-  "Start a background thread that refreshes the forecast cache.
+  "Start the background forecast refresher.
 
-   Two wakeup paths, so liveness does not depend on signal delivery:
-     - signal channel: a /context-snapshot POST signals immediately,
-       loop debounces `debounce-ms` to coalesce bursts, then refreshes.
-     - timer: every `max-stale-ms` the loop refreshes anyway, so even
-       if signals are dropped/lost the cache never goes stale.
+  Recomputes on a FIXED cadence (`interval-ms`, default from cch.settings)
+  rather than per snapshot, and only when context_snapshots has grown since the
+  last run (watermark gate). This caps recompute cost regardless of event rate:
+  an idle box does almost nothing, a busy box recomputes at most once per
+  interval. Previously the loop woke on every snapshot POST, which at a busy
+  box's rate pinned a core in back-to-back refreshes.
 
-   Closing the channel (stop-bg-refresh!) makes the next take return nil → exit."
-  [& {:keys [debounce-ms max-stale-ms]
-      :or   {debounce-ms 3000 max-stale-ms 60000}}]
-  (let [ch (async/chan (async/dropping-buffer 1))
+  Shutdown: stop-bg-refresh! closes the stop channel, which the timer wait
+  selects immediately, exiting the loop."
+  [& {:keys [interval-ms]
+      :or   {interval-ms (settings/forecast-refresh-interval-ms)}}]
+  (let [stop-ch (async/chan)
         t  (Thread.
              (fn []
+               ;; Seed once at startup so the statusline has data immediately.
                (safe-refresh!)
+               (reset! last-watermark (snapshot-watermark))
                (loop []
-                 (let [timeout-ch (async/timeout max-stale-ms)
-                       [v port]   (try (async/alts!! [ch timeout-ch])
-                                       (catch Throwable t
-                                         (binding [*out* *err*]
-                                           (println "cch.forecast: alts!! failed:" (.getMessage t)))
-                                         [:tick timeout-ch]))
-                       signaled?  (identical? port ch)
-                       closed?    (and signaled? (nil? v))]
-                   (when-not closed?
-                     (when signaled?
-                       ;; debounce to absorb a burst of concurrent posts
-                       (try (Thread/sleep (long debounce-ms))
-                            (catch InterruptedException _)))
-                     (safe-refresh!)
+                 (let [[_ port] (async/alts!! [stop-ch (async/timeout interval-ms)])]
+                   ;; stop-ch is only ever readable once closed → that's our exit.
+                   (when-not (identical? port stop-ch)
+                     (maybe-refresh!)
                      (recur))))))]
-    (reset! signal-ch-ref ch)
+    (reset! stop-ch-ref stop-ch)
     (.setDaemon t true)
     (.start t)
     (reset! bg-thread t)))
 
 (defn stop-bg-refresh! []
-  (when-let [ch @signal-ch-ref]
+  (when-let [ch @stop-ch-ref]
     (async/close! ch)
-    (reset! signal-ch-ref nil))
+    (reset! stop-ch-ref nil))
   (reset! bg-thread nil))
 
 (defn statusline-stats

@@ -71,6 +71,25 @@ CREATE INDEX IF NOT EXISTS idx_ctx_agent     ON context_snapshots(agent);
 CREATE INDEX IF NOT EXISTS idx_ctx_node      ON context_snapshots(node);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ctx_node_origin ON context_snapshots(node, origin_id);
 
+-- Covering expression indexes for the forecast's completed-window "finals"
+-- queries (cch.forecast/historical-finals-sql). Those GROUP BY resets_at and
+-- MAX(used_percentage) per window across ALL history — an unbounded scan that,
+-- without these, re-parses every payload blob (seconds per call on a large DB;
+-- once pinned a core in the bg-refresh loop). Indexing the extracted JSON paths
+-- makes the query index-only (~50ms), never touching the payload column.
+-- The column order matches the query's filters: agent (=), resets_at (range +
+-- GROUP BY), then used_percentage and session_id to make the index cover it.
+CREATE INDEX IF NOT EXISTS idx_ctx_7d_finals ON context_snapshots(
+  agent,
+  json_extract(payload, '$.rate_limits.seven_day.resets_at'),
+  json_extract(payload, '$.rate_limits.seven_day.used_percentage'),
+  session_id);
+CREATE INDEX IF NOT EXISTS idx_ctx_5h_finals ON context_snapshots(
+  agent,
+  json_extract(payload, '$.rate_limits.five_hour.resets_at'),
+  json_extract(payload, '$.rate_limits.five_hour.used_percentage'),
+  session_id);
+
 -- Federation shipper watermark. One row per shipped table holding the
 -- highest local id already sent to the collector. The background shipper
 -- (cch.federation) reads WHERE id > last_shipped_id, POSTs the batch, then

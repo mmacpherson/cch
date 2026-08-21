@@ -61,113 +61,95 @@
       (is (= sigma 0.03)))))
 
 ;; ---------------------------------------------------------------------------
-;; bg-refresh lifecycle + signal/debounce — requires a real (empty) DB
+;; bg-refresh: fixed-cadence timer gated on a snapshot watermark.
 ;;
-;; Uses a private-var ref hack to watch and reset the cache atom without
-;; exposing it in the public API.  Short debounce-ms keeps wall-clock time
-;; manageable: 100 ms debounce, 300-500 ms sleeps for timing slack.
+;; The refresh no longer wakes per snapshot (that pinned a core at a busy box's
+;; snapshot rate); it recomputes at most once per cadence tick, and only when
+;; context_snapshots has grown. These tests drive the pure gate (maybe-refresh!)
+;; directly where possible, and keep one lenient timing test for the loop.
 ;; ---------------------------------------------------------------------------
+
+(def ^:private maybe-refresh!   #'cch.forecast/maybe-refresh!)
+(def ^:private snapshot-watermark #'cch.forecast/snapshot-watermark)
+(def ^:private do-refresh!      #'cch.forecast/do-refresh!)
+(def ^:private safe-refresh!    #'cch.forecast/safe-refresh!)
+
+(defn- insert-snapshot! []
+  (db/query "INSERT INTO context_snapshots (session_id) VALUES ('bg-test')"))
 
 (defn- with-fresh-bg
   "Run `f` against a throw-away SQLite DB, then stop the bg thread and
   reset global atoms so tests don't bleed into each other."
-  [debounce-ms f]
+  [f]
   (let [tmp     (str (fs/create-temp-dir {:prefix "forecast-bg-test-"}))
         db-path (str tmp "/events.db")]
     (with-redefs [db/db-path (fn [] db-path)]
       (log/ensure-db! db-path)
+      (reset! @#'cch.forecast/last-watermark nil)
       (try
-        (f debounce-ms)
+        (f)
         (finally
           (stop-bg-refresh!)
           (reset! @#'cch.forecast/forecast-cache nil)
+          (reset! @#'cch.forecast/last-watermark nil)
           (fs/delete-tree tmp))))))
 
 (deftest bg-refresh-seeds-cache-on-startup
-  (with-fresh-bg 100
-    (fn [debounce-ms]
-      (start-bg-refresh! :debounce-ms debounce-ms)
+  (with-fresh-bg
+    (fn []
+      (start-bg-refresh! :interval-ms 10000) ; long — we only want the startup seed
       (Thread/sleep 300)
       (testing "statusline-stats returns a map immediately after startup"
         (is (map? (statusline-stats))
             "cache should be a map (windows may be nil-valued on empty DB)")))))
 
-(deftest signal-triggers-recompute
-  (with-fresh-bg 100
-    (fn [debounce-ms]
-      (start-bg-refresh! :debounce-ms debounce-ms)
-      (Thread/sleep 300) ; let initial compute settle
-      (let [updates (atom 0)
-            cache   @#'cch.forecast/forecast-cache]
-        (add-watch cache ::signal-test (fn [_ _ _ _] (swap! updates inc)))
-        (try
-          (signal-new-data!)
-          (Thread/sleep 400) ; debounce (100 ms) + compute + margin
-          (is (pos? @updates) "a signal should trigger at least one cache update")
-          (finally
-            (remove-watch cache ::signal-test)))))))
+(deftest maybe-refresh-gates-on-watermark
+  (with-fresh-bg
+    (fn []
+      (testing "first call refreshes (watermark moves from nil)"
+        ;; empty DB: MAX(id) is nil, last-watermark is nil → no change → skip
+        (is (nil? (snapshot-watermark)))
+        (is (not (maybe-refresh!)) "no rows, no movement → no refresh"))
+      (testing "a new snapshot moves the watermark → one refresh"
+        (insert-snapshot!)
+        (is (some? (snapshot-watermark)))
+        (is (maybe-refresh!) "new row → refresh")
+        (is (map? (statusline-stats))))
+      (testing "no further rows → gate skips, however many ticks"
+        (is (not (maybe-refresh!)))
+        (is (not (maybe-refresh!))))
+      (testing "another snapshot re-opens the gate"
+        (insert-snapshot!)
+        (is (maybe-refresh!))))))
 
-(deftest bg-loop-survives-throwable-from-refresh
+(deftest safe-refresh-swallows-throwable
   ;; Regression: a Throwable (Error, not Exception) escaping do-refresh! used
-  ;; to kill the bg thread silently, freezing /forecast on a stale snapshot.
-  (with-fresh-bg 100
-    (fn [debounce-ms]
-      (let [calls (atom 0)
-            mode  (atom :throw)
-            real  @#'cch.forecast/do-refresh!]
-        (with-redefs [cch.forecast/do-refresh!
-                      (fn []
-                        (swap! calls inc)
-                        (case @mode
-                          :throw (throw (Error. "simulated fatal"))
-                          :ok    (real)))]
-          (start-bg-refresh! :debounce-ms debounce-ms)
-          (Thread/sleep 300) ; initial seed throws
-          (signal-new-data!)
-          (Thread/sleep 300) ; second refresh also throws
-          (let [calls-after-throws @calls]
-            (is (>= calls-after-throws 2)
-                "thread must keep handling signals after throwing")
-            (reset! mode :ok)
-            (signal-new-data!)
-            (Thread/sleep 300)
-            (is (> @calls calls-after-throws)
-                "subsequent signal must trigger another refresh attempt")))))))
+  ;; to kill the bg thread, freezing /forecast on a stale snapshot. safe-refresh!
+  ;; must swallow it so the loop survives.
+  (with-fresh-bg
+    (fn []
+      (with-redefs [cch.forecast/do-refresh! (fn [] (throw (Error. "simulated fatal")))]
+        (is (nil? (safe-refresh!)) "must not propagate the Error")
+        ;; and the gate, which calls safe-refresh!, also must not throw
+        (insert-snapshot!)
+        (is (true? (maybe-refresh!)) "gate still reports it attempted a refresh")))))
 
-(deftest timer-backstop-refreshes-without-signals
-  ;; Liveness must not depend on signal delivery: even with zero signals,
-  ;; the bg loop must keep the cache fresh via its timer wakeup.
-  (with-fresh-bg 50
-    (fn [debounce-ms]
-      (start-bg-refresh! :debounce-ms debounce-ms :max-stale-ms 150)
-      (Thread/sleep 100) ; initial seed
+(deftest timer-drives-refresh-on-new-data
+  ;; One lenient timing test: with a short cadence, a snapshot inserted after
+  ;; startup must be picked up by a subsequent tick.
+  (with-fresh-bg
+    (fn []
+      (start-bg-refresh! :interval-ms 80)
+      (Thread/sleep 150) ; startup seed + at least one tick on the empty DB
       (let [updates (atom 0)
             cache   @#'cch.forecast/forecast-cache]
-        (add-watch cache ::tick-test (fn [_ _ _ _] (swap! updates inc)))
+        (add-watch cache ::tick (fn [_ _ _ _] (swap! updates inc)))
         (try
-          ;; Send no signals — wait long enough for ≥2 timer ticks.
-          (Thread/sleep 500)
-          (is (>= @updates 2)
-              "timer backstop must drive refreshes when no signals arrive")
+          (insert-snapshot!)
+          (Thread/sleep 300) ; several 80ms ticks — one must catch the new row
+          (is (pos? @updates) "a tick must recompute after new data arrives")
           (finally
-            (remove-watch cache ::tick-test)))))))
-
-(deftest signal-debounces-burst
-  (with-fresh-bg 200
-    (fn [debounce-ms]
-      (start-bg-refresh! :debounce-ms debounce-ms)
-      (Thread/sleep 500) ; let initial compute settle
-      (let [updates (atom 0)
-            cache   @#'cch.forecast/forecast-cache]
-        (add-watch cache ::burst-test (fn [_ _ _ _] (swap! updates inc)))
-        (try
-          ;; 8 signals spaced 15 ms apart — all within a single debounce window.
-          (dotimes [_ 8] (signal-new-data!) (Thread/sleep 15))
-          (Thread/sleep 800) ; debounce (200 ms) + compute + generous margin
-          (is (<= @updates 2)
-              "8 rapid signals within one debounce window should coalesce to ≤2 computes")
-          (finally
-            (remove-watch cache ::burst-test)))))))
+            (remove-watch cache ::tick)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; window-priors — both /usage and /forecast (statusline) MUST share this so
