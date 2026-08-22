@@ -90,6 +90,19 @@ CREATE INDEX IF NOT EXISTS idx_ctx_5h_finals ON context_snapshots(
   json_extract(payload, '$.rate_limits.five_hour.used_percentage'),
   session_id);
 
+-- Covering index for the 7d statusline sample query (cch.forecast/filtered-
+-- samples): a windowed CTE over the last 7 days of snapshots. Ordered
+-- agent (=), timestamp (range + ORDER BY), then the extracted pct/resets_at and
+-- session_id so the CTE's source scan is index-only. Takes that query from
+-- ~350ms to ~40ms. (The 5h sample query spans only 5h of rows and is already
+-- cheap, so it doesn't need one.)
+CREATE INDEX IF NOT EXISTS idx_ctx_7d_samples ON context_snapshots(
+  agent,
+  timestamp,
+  json_extract(payload, '$.rate_limits.seven_day.used_percentage'),
+  json_extract(payload, '$.rate_limits.seven_day.resets_at'),
+  session_id);
+
 -- Federation shipper watermark. One row per shipped table holding the
 -- highest local id already sent to the collector. The background shipper
 -- (cch.federation) reads WHERE id > last_shipped_id, POSTs the batch, then
