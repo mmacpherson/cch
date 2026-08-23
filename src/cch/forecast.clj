@@ -13,8 +13,7 @@
   crosses the process boundary."
   (:require [cch.db :as db]
             [cch.projections :as proj]
-            [cch.settings :as settings]
-            [clojure.core.async :as async])
+            [cch.settings :as settings])
   (:import (java.time Instant)))
 
 ;; --- Query building ---
@@ -423,7 +422,6 @@
 
 (def ^:private forecast-cache (atom nil))
 (def ^:private bg-thread (atom nil))
-(def ^:private stop-ch-ref (atom nil))
 (def ^:private last-watermark (atom nil))
 
 (defn signal-new-data!
@@ -486,32 +484,30 @@
   interval. Previously the loop woke on every snapshot POST, which at a busy
   box's rate pinned a core in back-to-back refreshes.
 
-  Shutdown: stop-bg-refresh! closes the stop channel, which the timer wait
-  selects immediately, exiting the loop."
+  A plain daemon thread with an interruptible sleep — no core.async needed for
+  a single timer-with-stop loop. Shutdown: stop-bg-refresh! interrupts the
+  thread, so the sleep throws InterruptedException and the loop exits."
   [& {:keys [interval-ms]
       :or   {interval-ms (settings/forecast-refresh-interval-ms)}}]
-  (let [stop-ch (async/chan)
-        t  (Thread.
-             (fn []
-               ;; Seed once at startup so the statusline has data immediately.
-               (safe-refresh!)
-               (reset! last-watermark (snapshot-watermark))
-               (loop []
-                 (let [[_ port] (async/alts!! [stop-ch (async/timeout interval-ms)])]
-                   ;; stop-ch is only ever readable once closed → that's our exit.
-                   (when-not (identical? port stop-ch)
-                     (maybe-refresh!)
-                     (recur))))))]
-    (reset! stop-ch-ref stop-ch)
+  (let [t (Thread.
+            (fn []
+              ;; Seed once at startup so the statusline has data immediately.
+              (safe-refresh!)
+              (reset! last-watermark (snapshot-watermark))
+              (loop []
+                ;; Sleep the cadence; a stop-interrupt breaks us out cleanly.
+                (when (try (Thread/sleep (long interval-ms)) true
+                           (catch InterruptedException _ false))
+                  (maybe-refresh!)
+                  (recur)))))]
     (.setDaemon t true)
     (.start t)
     (reset! bg-thread t)))
 
 (defn stop-bg-refresh! []
-  (when-let [ch @stop-ch-ref]
-    (async/close! ch)
-    (reset! stop-ch-ref nil))
-  (reset! bg-thread nil))
+  (when-let [t @bg-thread]
+    (.interrupt ^Thread t)
+    (reset! bg-thread nil)))
 
 (defn statusline-stats
   "Current forecast bundle for the statusLine. Sub-millisecond atom read —

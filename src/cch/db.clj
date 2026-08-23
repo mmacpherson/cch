@@ -2,7 +2,28 @@
   "SQLite read access for server-context callers (forecast, log queries,
   config-db reads). Uses next.jdbc against a read-only connection to
   events.db. SQLite WAL mode means this read path coexists with the
-  cch.log writer subprocess without locking contention."
+  cch.log writer subprocess without locking contention.
+
+  --- SQL style: raw strings vs HoneySQL ---
+
+  `query` takes a finished SQL string; how you build that string is a
+  deliberate, per-query choice, not an accident of who wrote it:
+
+    * RAW SQL STRINGS for complex, STATIC analytic queries — the forecast
+      window CTEs (window functions, monotone/bucketing passes), the
+      recent-session NOT EXISTS walk. These are hand-tuned and read far more
+      clearly as SQL than as nested HoneySQL data; there is nothing dynamic to
+      compose. Interpolate only trusted, escaped values (see agent-clause /
+      escape-sql-literal) — never raw user input.
+
+    * HONEYSQL (`honey.sql/format`) for DYNAMIC queries assembled from a
+      variable set of filters — cch.stats/stat-counts and cch.log/query-events
+      bolt on optional WHERE clauses with `cond->`. Building those by string
+      concatenation is exactly the injection-prone tedium HoneySQL removes.
+
+  Rule of thumb: if the SQL shape is fixed, write SQL; if the shape varies with
+  the arguments, build it with HoneySQL. Don't port the forecast CTEs into
+  HoneySQL (it's worse), and don't hand-concatenate dynamic WHERE clauses."
   (:require [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs]))
 
