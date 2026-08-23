@@ -25,7 +25,7 @@
       (true? (:enabled row))   true
       :else                    false)))
 
-(defn run [& _args]
+(defn run [_options _arguments]
   (let [global-rows (cdb/list-for-scope cdb/global-scope)
         hooks       (registry/list-hooks)]
     (println (format "Registered hooks (%d):" (count hooks)))

@@ -237,19 +237,11 @@
 
 (defn run
   "cch doctor [--cwd DIR] — report per-agent federation wiring on this box.
-  Exits nonzero if the dispatcher is down or an agent is installed-but-unwired."
-  [& args]
-  (if (some #{"--help" "-h"} args)
-    (do (println "cch doctor [--cwd DIR]")
-        (println)
-        (println "Report whether each agent on this box is wired to federate:")
-        (println "  installed?  cch dispatch hooks present in the agent's config")
-        (println "  enabled?    code hooks enabled globally in the cch DB")
-        (println "  reachable?  the cch dispatcher is up at 127.0.0.1:8888")
-        (println "  trusted?    (codex) this dir is a trusted codex project"))
-    (let [kv     (apply hash-map args)
-          cwd    (or (get kv "--cwd") (System/getProperty "user.dir"))
-          box    (box-status)
-          agents (detect-agents cwd)]
-      (println (render box agents))
-      (System/exit (if (seq (problems box agents)) 1 0)))))
+  Exits nonzero if the dispatcher is down or an agent is installed-but-unwired.
+  Options are parsed by the cli.cch dispatcher; this handler receives the map."
+  [{:keys [cwd]} _arguments]
+  (let [cwd    (or cwd (System/getProperty "user.dir"))
+        box    (box-status)
+        agents (detect-agents cwd)]
+    (println (render box agents))
+    (System/exit (if (seq (problems box agents)) 1 0))))

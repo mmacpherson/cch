@@ -1,19 +1,17 @@
 (ns cli.cch
   "cch — Claude Code Hooks CLI.
 
-  Usage: cch <command> [args]
+  The command surface is DATA: `commands` is an ordered table mapping each
+  subcommand to its description, handler, and (optional) tools.cli option spec.
+  One generic dispatcher interprets it — parsing options, generating per-command
+  --help from the spec, reporting unknown-flag/parse errors uniformly, and
+  routing to the handler. Adding a command or flag is a table edit; the top-level
+  usage text is derived from the table, so it can't drift.
 
-  Commands:
-    init                Set up cch in the current project
-    install <hook>      Enable a hook (project-local by default)
-    uninstall <hook>    Disable a hook
-    list                Show available and installed hooks
-    log                 Query event history
-    attention           Time agents spent blocked on you
-    doctor              Report per-agent federation wiring on this box
-    serve               Run the HTTP dispatcher + web dashboard
-    install-service     Install OS-native auto-start for `cch serve`
-    uninstall-service   Remove the auto-start unit/plist"
+  Handler contract: each `:fn` is called as (handler options arguments), where
+  options is the parsed option map and arguments the leftover positionals.
+  A `:raw true` command bypasses parsing and receives the raw arg strings
+  (used by `serve`, which delegates to the server's own arg handling)."
   (:require [cch.attention :as attention]
             [cch.doctor :as doctor]
             [cch.server :as server]
@@ -21,8 +19,61 @@
             [cli.install :as install]
             [cli.list-cmd :as list-cmd]
             [cli.log-cmd :as log-cmd]
-            [cli.service-cmd :as service-cmd])
+            [cli.service-cmd :as service-cmd]
+            [clojure.tools.cli :as cli])
   (:gen-class))
+
+(defn- attention-cmd
+  "Handler for `cch attention`: render the blocked-on-you report."
+  [options _arguments]
+  (println (attention/report options)))
+
+(def ^:private commands
+  "Ordered subcommand table. Each entry: [name {:desc :fn :opts? :raw?}].
+  :opts is a tools.cli option spec (a vector of [short long desc & kvs])."
+  [["init"      {:desc "Set up cch in the current project"
+                 :fn   #'init/run}]
+   ["install"   {:desc "Bootstrap cch"
+                 :fn   #'install/run
+                 :opts [[nil "--all"    "Detect and provision every agent on this box"]
+                        [nil "--global" "Write to the global Claude settings.json"]
+                        [nil "--codex"  "Write Codex entries to $CODEX_HOME/config.toml"]
+                        [nil "--agy"    "Configure the AGY statusLine feed for quota capture"]]}]
+   ["uninstall" {:desc "Remove cch-owned entries"
+                 :fn   #'install/run-uninstall
+                 :opts [[nil "--global" "Remove from the global Claude settings.json"]
+                        [nil "--codex"  "Remove the cch block from $CODEX_HOME/config.toml"]
+                        [nil "--agy"    "Restore the previous AGY status line"]]}]
+   ["list"      {:desc "Show available and installed hooks"
+                 :fn   #'list-cmd/run}]
+   ["log"       {:desc "Query event history"
+                 :fn   #'log-cmd/run
+                 :opts [[nil "--limit N"      "Max rows to show" :parse-fn parse-long]
+                        [nil "--hook HOOK"    "Filter by hook name"]
+                        [nil "--event EVENT"  "Filter by event type"]
+                        [nil "--session ID"   "Filter by session id"]
+                        [nil "--decision DEC" "Filter by decision (allow/ask/deny)"]
+                        [nil "--since TS"     "Only events at or after TS"]]}]
+   ["attention" {:desc "Time agents spent blocked on you"
+                 :fn   #'attention-cmd
+                 :opts [[nil "--days N"  "Look back N days (default: all history)" :parse-fn parse-long]
+                        [nil "--limit N" "Max rows" :parse-fn parse-long]]}]
+   ["doctor"    {:desc "Report per-agent federation wiring on this box"
+                 :fn   #'doctor/run
+                 :opts [[nil "--cwd DIR" "Scope the codex trust check to DIR"]]}]
+   ["serve"     {:desc "Run the HTTP dispatcher + web dashboard"
+                 :fn   #'server/-main
+                 :raw  true}]
+   ["install-service"   {:desc "Install OS-native auto-start for `cch serve`"
+                         :fn   #'service-cmd/run}]
+   ["uninstall-service" {:desc "Remove the auto-start unit/plist"
+                         :fn   #'service-cmd/run-uninstall}]])
+
+(defn- lookup [cmd]
+  (some (fn [[n spec]] (when (= n cmd) spec)) commands))
+
+(def ^:private help-opt
+  [nil "--help" "Show this command's options"])
 
 (defn print-usage []
   (println "cch — Claude Code Hooks")
@@ -30,38 +81,36 @@
   (println "Usage: cch <command> [args]")
   (println)
   (println "Commands:")
-  (println "  init                Set up cch in the current project")
-  (println "  install             Bootstrap cch (--all, --global, --codex, --agy)")
-  (println "  uninstall <hook>    Disable a hook")
-  (println "  list                Show available and installed hooks")
-  (println "  log                 Query event history")
-  (println "  attention           Time agents spent blocked on you")
-  (println "  doctor              Report per-agent federation wiring on this box")
-  (println "  serve               Run the HTTP dispatcher + web dashboard")
-  (println "  install-service     Install OS-native auto-start for `cch serve`")
-  (println "  uninstall-service   Remove the auto-start unit/plist")
+  (doseq [[name {:keys [desc]}] commands]
+    (println (format "  %-18s %s" name desc)))
   (println)
   (println "Run 'cch <command> --help' for details."))
 
-(defn parse-attention-args
-  "cch attention [--days N] [--limit N]. Absent --days means all history."
-  [args]
-  (let [m (apply hash-map args)]
-    (cond-> {}
-      (get m "--days")  (assoc :days  (parse-long (get m "--days")))
-      (get m "--limit") (assoc :limit (parse-long (get m "--limit"))))))
-
 (defn -main [& args]
-  (let [[cmd & rest-args] args]
-    (case cmd
-      "init"              (apply init/run rest-args)
-      "install"           (apply install/run rest-args)
-      "uninstall"         (apply install/run-uninstall rest-args)
-      "list"              (apply list-cmd/run rest-args)
-      "log"               (apply log-cmd/run rest-args)
-      "attention"         (println (attention/report (parse-attention-args rest-args)))
-      "doctor"            (apply doctor/run rest-args)
-      "serve"             (apply server/-main rest-args)
-      "install-service"   (apply service-cmd/run rest-args)
-      "uninstall-service" (apply service-cmd/run-uninstall rest-args)
-      (print-usage))))
+  (let [[cmd & rest-args] args
+        spec (lookup cmd)]
+    (cond
+      (nil? spec)
+      (print-usage)
+
+      (:raw spec)
+      (apply (:fn spec) rest-args)
+
+      :else
+      (let [opt-spec (conj (vec (:opts spec)) help-opt)
+            {:keys [options arguments errors summary]} (cli/parse-opts rest-args opt-spec)]
+        (cond
+          (:help options)
+          (do (println (format "cch %s — %s" cmd (:desc spec)))
+              (println)
+              (println "Options:")
+              (println summary))
+
+          (seq errors)
+          (do (run! println errors)
+              (println)
+              (println summary)
+              (System/exit 2))
+
+          :else
+          ((:fn spec) options arguments))))))

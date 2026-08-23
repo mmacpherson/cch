@@ -3,17 +3,6 @@
   (:require [cch.log :as log]
             [clojure.string :as str]))
 
-(defn parse-opts
-  "Parse --key=value flags from args."
-  [args]
-  (reduce (fn [m arg]
-            (if-let [[_ k v] (re-matches #"--(\w+)=(.+)" arg)]
-              (assoc m (keyword k) v)
-              (if-let [[_ k] (re-matches #"--(\w+)" arg)]
-                (assoc m (keyword k) true)
-                m)))
-          {} args))
-
 (defn format-event [e]
   (let [ts   (:timestamp e)
         hook (:hook_name e)
@@ -29,15 +18,14 @@
             (or file "")
             (if ms (format "  (%.1fms)" (double ms)) ""))))
 
-(defn run [& args]
-  (let [opts   (parse-opts args)
-        events (log/query-events
-                 :limit    (some-> (:limit opts) parse-long)
-                 :hook     (:hook opts)
-                 :event    (:event opts)
-                 :session  (:session opts)
-                 :decision (:decision opts)
-                 :since    (:since opts))]
+(defn run [{:keys [limit hook event session decision since]} _arguments]
+  (let [events (log/query-events
+                 :limit    limit
+                 :hook     hook
+                 :event    event
+                 :session  session
+                 :decision decision
+                 :since    since)]
     (if (seq events)
       (do
         (println "Timestamp              Hook           Tool     Decision  File")

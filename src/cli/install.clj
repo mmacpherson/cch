@@ -32,68 +32,6 @@
       true)
     (catch Exception _ false)))
 
-(defn parse-flags
-  "Parse --flag and --key=value forms from args.
-  Returns [flag-set kv-map positional-vec]."
-  [args]
-  (reduce (fn [[flags kvs pos] arg]
-            (cond
-              (re-matches #"--([\w-]+)=(.+)" arg)
-              (let [[_ k v] (re-matches #"--([\w-]+)=(.+)" arg)]
-                [flags (assoc kvs (keyword k) v) pos])
-
-              (str/starts-with? arg "--")
-              [(conj flags arg) kvs pos]
-
-              :else
-              [flags kvs (conj pos arg)]))
-          [#{} {} []]
-          args))
-
-(def ^:private known-flags
-  "Flags accepted by both `cch install` and `cch uninstall`."
-  #{"--codex" "--agy" "--global" "--all"})
-
-(defn- help? [args]
-  (boolean (some #{"--help" "-h"} args)))
-
-(defn- unknown-flags
-  "Flags in `flag-set` that are neither a known flag nor --help."
-  [flag-set]
-  (seq (remove (conj known-flags "--help") flag-set)))
-
-(defn- print-install-help []
-  (println "cch install [--global] [--all|--codex|--agy]")
-  (println)
-  (println "Bootstrap cch. Default target is the current repo's settings.local.json.")
-  (println "  --all      Detect every agent on this box and provision each one")
-  (println "  --global   Write to the global Claude settings.json instead")
-  (println "  --codex    Write Codex entries to $CODEX_HOME/config.toml")
-  (println "  --agy      Configure the AGY statusLine feed for quota capture")
-  (println)
-  (println "--codex and --agy are mutually exclusive with each other and --global.")
-  (println "--all provisions all present agents; combine with --global to target")
-  (println "the global Claude settings.json. Afterward, run `cch doctor` to verify."))
-
-(defn- print-uninstall-help []
-  (println "cch uninstall [--global] [--codex|--agy]")
-  (println)
-  (println "Remove cch-owned entries. Default target is the repo's settings.local.json.")
-  (println "  --global   Remove from the global Claude settings.json instead")
-  (println "  --codex    Remove the cch sentinel block from $CODEX_HOME/config.toml")
-  (println "  --agy      Restore the previous AGY status line")
-  (println)
-  (println "--global, --codex, and --agy are mutually exclusive.")
-  (println "Always clears the hook_config table."))
-
-(defn- reject-unknown!
-  "Print an error for unknown flags and exit non-zero. `cmd` is \"install\"
-  or \"uninstall\" (used in the follow-up hint)."
-  [unknown cmd]
-  (println (format "Error: unknown flag(s): %s" (str/join ", " unknown)))
-  (println (format "Run 'cch %s --help' for usage." cmd))
-  (System/exit 2))
-
 (defn- clear-hook-config!
   "Delete every row from hook_config. Used by uninstall."
   []
@@ -215,95 +153,68 @@
     (println "Verify wiring across all agents with:  cch doctor")))
 
 (defn run
-  "cch install [--global] [--codex|--agy] — bootstrap cch.
+  "cch install [--all|--global|--codex|--agy] — bootstrap cch.
 
   Default: writes Claude Code dispatcher entries to the current repo's
-  settings.local.json. With --global, writes the global Claude
-  settings.json. With --codex, writes Codex entries to the user's
-  $CODEX_HOME/config.toml instead (Codex has no project-vs-global split, so
-  --codex and --global are mutually exclusive). With --agy, configures the
-  documented AGY statusLine feed for quota capture.
+  settings.local.json. --global writes the global Claude settings.json.
+  --codex writes Codex entries to $CODEX_HOME/config.toml. --agy configures the
+  AGY statusLine feed. --all detects every agent on this box and provisions each
+  (may combine with --global for the Claude target).
 
-  All paths enable :code hooks at global scope."
-  [& args]
-  (let [[flags _kvs _pos] (parse-flags args)
-        all?    (contains? flags "--all")
-        codex?  (contains? flags "--codex")
-        agy?    (contains? flags "--agy")
-        global? (contains? flags "--global")]
-    (cond
-      (help? args)
-      (print-install-help)
+  --codex/--agy/--global are mutually exclusive; --all cannot combine with
+  --codex/--agy. All paths enable :code hooks at global scope. Options are
+  parsed by the cli.cch dispatcher; this handler receives the parsed map."
+  [{:keys [all global codex agy]} _arguments]
+  (cond
+    (and all (or codex agy))
+    (do (println "Error: --all cannot be combined with --codex or --agy")
+        (System/exit 2))
 
-      (unknown-flags flags)
-      (reject-unknown! (unknown-flags flags) "install")
+    (> (count (filter true? [codex agy global])) 1)
+    (do (println "Error: --global, --codex, and --agy are mutually exclusive")
+        (System/exit 2))
 
-      (and all? (or codex? agy?))
-      (do (println "Error: --all cannot be combined with --codex or --agy")
-          (System/exit 2))
-
-      (> (count (filter true? [codex? agy? global?])) 1)
-      (do (println "Error: --global, --codex, and --agy are mutually exclusive")
-          (System/exit 2))
-
-      all?
-      (run-all-install! global?)
-
-      codex?
-      (run-codex-install!)
-
-      agy?
-      (run-agy-install!)
-
-      :else
-      (run-claude-install! global?))))
+    all   (run-all-install! (boolean global))
+    codex (run-codex-install!)
+    agy   (run-agy-install!)
+    :else (run-claude-install! (boolean global))))
 
 (defn run-uninstall
-  "cch uninstall [--global] [--codex|--agy] — remove cch-owned entries.
+  "cch uninstall [--global|--codex|--agy] — remove cch-owned entries.
 
-  Default removes them from the repo's Claude settings.local.json;
-  --global removes from the global Claude settings.json; --codex removes
-  the cch sentinel block from $CODEX_HOME/config.toml. --codex and --global
-  are mutually exclusive. Always clears the hook_config table."
-  [& args]
-  (let [[flags _kvs _pos] (parse-flags args)
-        codex?  (contains? flags "--codex")
-        agy?    (contains? flags "--agy")
-        global? (contains? flags "--global")]
-    (cond
-      (help? args)
-      (print-uninstall-help)
+  Default removes them from the repo's Claude settings.local.json; --global
+  removes from the global Claude settings.json; --codex removes the cch block
+  from $CODEX_HOME/config.toml; --agy restores the previous AGY status line.
+  --codex/--agy/--global are mutually exclusive. Always clears hook_config."
+  [{:keys [global codex agy]} _arguments]
+  (cond
+    (> (count (filter true? [codex agy global])) 1)
+    (do (println "Error: --global, --codex, and --agy are mutually exclusive")
+        (System/exit 2))
 
-      (unknown-flags flags)
-      (reject-unknown! (unknown-flags flags) "uninstall")
+    codex
+    (let [path (codex/uninstall!)]
+      (clear-hook-config!)
+      (println (format "Uninstalled cch from %s" path))
+      (println "  hook_config table cleared"))
 
-      (> (count (filter true? [codex? agy? global?])) 1)
-      (do (println "Error: --global, --codex, and --agy are mutually exclusive")
-          (System/exit 2))
+    agy
+    (do
+      (let [{:keys [path restored]} (agy/uninstall!)]
+        (println (format "Uninstalled cch AGY usage capture from %s" path))
+        (println (if restored
+                   "  previous AGY status line restored"
+                   "  current AGY status line left unchanged")))
+      (let [{:keys [path removed]} (agy/uninstall-hooks!)]
+        (println (format "Removed cch AGY lifecycle hooks from %s" path))
+        (when-not removed
+          (println "  (no cch hook block was present)"))))
 
-      codex?
-      (let [path (codex/uninstall!)]
-        (clear-hook-config!)
-        (println (format "Uninstalled cch from %s" path))
-        (println "  hook_config table cleared"))
-
-      agy?
-      (do
-        (let [{:keys [path restored]} (agy/uninstall!)]
-          (println (format "Uninstalled cch AGY usage capture from %s" path))
-          (println (if restored
-                     "  previous AGY status line restored"
-                     "  current AGY status line left unchanged")))
-        (let [{:keys [path removed]} (agy/uninstall-hooks!)]
-          (println (format "Removed cch AGY lifecycle hooks from %s" path))
-          (when-not removed
-            (println "  (no cch hook block was present)"))))
-
-      :else
-      (let [path (if global?
-                   (settings/global-settings-path)
-                   (settings/project-settings-path "."))]
-        (settings/remove-all-cch! path)
-        (clear-hook-config!)
-        (println (format "Uninstalled cch from %s" path))
-        (println "  hook_config table cleared")))))
+    :else
+    (let [path (if global
+                 (settings/global-settings-path)
+                 (settings/project-settings-path "."))]
+      (settings/remove-all-cch! path)
+      (clear-hook-config!)
+      (println (format "Uninstalled cch from %s" path))
+      (println "  hook_config table cleared"))))

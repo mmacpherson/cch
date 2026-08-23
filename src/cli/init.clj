@@ -33,7 +33,7 @@
         (fs/create-sym-link link repo-root)
         (println "  Created repo symlink:" link "→" repo-root)))))
 
-(defn run [& _args]
+(defn run [_options _arguments]
   (println "Initializing cch...")
 
   ;; Detect and link repo

@@ -95,7 +95,7 @@
 (defn run
   "cch install-service — write the unit/plist for the current OS and
   print the activation command."
-  [& _args]
+  [_options _arguments]
   (let [os (host-os)]
     (when (= os :unsupported)
       (binding [*out* *err*]
@@ -121,7 +121,7 @@
 (defn run-uninstall
   "cch uninstall-service — remove the unit/plist and print the disable
   command the user should run to stop the service."
-  [& _args]
+  [_options _arguments]
   (let [os (host-os)]
     (when (= os :unsupported)
       (binding [*out* *err*]
