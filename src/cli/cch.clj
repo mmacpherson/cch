@@ -15,6 +15,7 @@
   (:require [cch.attention :as attention]
             [cch.doctor :as doctor]
             [cch.server :as server]
+            [cli.control-cmd :as control-cmd]
             [cli.init :as init]
             [cli.install :as install]
             [cli.list-cmd :as list-cmd]
@@ -61,6 +62,9 @@
    ["doctor"    {:desc "Report per-agent federation wiring on this box"
                  :fn   #'doctor/run
                  :opts [[nil "--cwd DIR" "Scope the codex trust check to DIR"]]}]
+   ["control"   {:desc "Native Claude/Codex session routing (POC)"
+                 :fn   #'control-cmd/run
+                 :raw  true}]
    ["serve"     {:desc "Run the HTTP dispatcher + web dashboard"
                  :fn   #'server/-main
                  :raw  true}]

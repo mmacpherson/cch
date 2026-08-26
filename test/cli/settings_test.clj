@@ -123,6 +123,20 @@
           (is (= 120 (:timeout hook)))
           (is (= "agent:edit-review" (:__cch hook))))))))
 
+(deftest test-add-control-registration-entry
+  (with-tmp-settings
+    (fn [tmp]
+      (settings/add-control-registration-entry! tmp)
+      (settings/add-control-registration-entry! tmp)
+      (let [hooks (get-in (settings/read-settings tmp) [:hooks :SessionStart])
+            hook (get-in (first hooks) [:hooks 0])]
+        (is (= 1 (count hooks)) "one-time install is idempotent")
+        (is (= "command" (:type hook)))
+        (is (= "cch control register-claude" (:command hook)))
+        (is (true? (:async hook)) "registration never delays session startup")
+        (is (= 30 (:timeout hook)))
+        (is (= "control-plane:claude-registration" (:__cch hook)))))))
+
 ;; --- Full cleanup ---
 
 (deftest test-remove-all-cch

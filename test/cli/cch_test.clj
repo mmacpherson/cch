@@ -25,7 +25,8 @@
   (let [out (with-out-str (cch/-main "bogus"))]
     (is (re-find #"Usage: cch" out))
     (is (re-find #"install" out) "usage lists commands straight from the table")
-    (is (re-find #"doctor" out))))
+    (is (re-find #"doctor" out))
+    (is (re-find #"control" out))))
 
 (deftest no-command-prints-usage
   (let [out (with-out-str (cch/-main))]

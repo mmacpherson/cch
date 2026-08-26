@@ -185,6 +185,32 @@
                    if             (assoc :if if))]
     (upsert-hook-entry! settings-path event matcher "agent" hook-name hook-map)))
 
+(def ^:private control-registration-tag
+  "control-plane:claude-registration")
+
+(defn add-control-registration-entry!
+  "Install the lightweight SessionStart registration hook used by the native
+  control-plane POC. The hook inherits Claude's per-session inbox environment,
+  writes it to cch's local-only registry, and exits. Reinstall is idempotent."
+  [settings-path]
+  (let [settings (read-settings settings-path)
+        entries  (get-in settings [:hooks :SessionStart] [])
+        strip-registration
+        (fn [entry]
+          (let [kept (vec (remove #(= control-registration-tag (:__cch %))
+                                  (:hooks entry)))]
+            (when (seq kept) (assoc entry :hooks kept))))
+        filtered (vec (keep strip-registration entries))
+        hook      {:type "command"
+                   :command "cch control register-claude"
+                   :async true
+                   :timeout 30
+                   :__cch control-registration-tag}
+        updated   (assoc-in settings [:hooks :SessionStart]
+                            (conj filtered {:hooks [hook]}))]
+    (write-settings! settings-path updated)
+    updated))
+
 (defn remove-hook-entry!
   "Remove a prompt or agent cch-owned entry by hook-name. Scans all event types
   since the caller may not remember which event it was installed under."
