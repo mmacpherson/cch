@@ -1,18 +1,34 @@
 (ns cch.control.codex-test
   (:require [cch.control.codex :as codex]
+            [cch.control.unix-websocket :as websocket]
+            [cheshire.core :as json]
             [clojure.test :refer [deftest is]]))
 
-(def ^:private fake-app-server
-  ["bash" "-c"
-   (str "while IFS= read -r line; do "
-        "case \"$line\" in "
-        "*'\"method\":\"initialize\"'*) echo '{\"id\":1,\"result\":{}}' ;; "
-        "*'\"method\":\"thread/list\"'*) echo '{\"id\":2,\"result\":{\"data\":[{\"id\":\"thread-1\",\"cwd\":\"/synthetic/project\",\"status\":{\"type\":\"idle\"},\"canAcceptDirectInput\":true,\"cliVersion\":\"0.149.0\",\"source\":\"cli\"}]}}' ;; "
-        "*'\"method\":\"thread/queue/add\"'*) echo '{\"id\":3,\"result\":{\"queuedSubmission\":{}}}' ;; "
-        "esac; done")])
+(defrecord FakeTransport [responses requests]
+  websocket/TextTransport
+  (send-text! [_ text]
+    (swap! requests conj (json/parse-string text true)))
+  (read-text! [_]
+    (let [response (first @responses)]
+      (swap! responses subvec 1)
+      (json/generate-string response)))
+  (close! [_] nil))
+
+(defn- fake-transport []
+  (->FakeTransport
+    (atom [{:id 1 :result {}}
+           {:id 2 :result
+            {:data [{:id "thread-1"
+                     :cwd "/synthetic/project"
+                     :status {:type "idle"}
+                     :canAcceptDirectInput nil
+                     :cliVersion "0.149.0"
+                     :source "cli"}]}}
+           {:id 3 :result {:queuedSubmission {}}}])
+    (atom [])))
 
 (deftest discovers-and-queues-through-app-server-json-rpc
-  (binding [codex/*proxy-command* fake-app-server]
+  (binding [codex/*connect!* (fn [_] (fake-transport))]
     (let [sessions (codex/sessions)]
       (is (= ["codex:thread-1"] (mapv :id sessions)))
       (is (true? (:available (first sessions)))))
@@ -24,8 +40,10 @@
       (is (= "submitted" (:status result))))))
 
 (deftest unavailable-daemon-has-actionable-error
-  (binding [codex/*proxy-command* ["bash" "-c" "echo native-daemon-missing >&2; exit 1"]]
+  (binding [codex/*connect!* (fn [_] (throw (Exception. "native-daemon-missing")))]
     (let [message (try (codex/sessions) nil
                        (catch clojure.lang.ExceptionInfo e (.getMessage e)))]
       (is (re-find #"shared app-server daemon is unavailable" message))
-      (is (re-find #"codex remote-control start" message)))))
+      (is (re-find #"cch control install" message))
+      (is (re-find #"app-server --listen unix://" message))
+      (is (not (re-find #"standalone" message))))))

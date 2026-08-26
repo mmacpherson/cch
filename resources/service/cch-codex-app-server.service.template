@@ -1,0 +1,15 @@
+[Unit]
+Description=Codex shared app server for cch
+Documentation=https://developers.openai.com/codex/app-server
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="CODEX_HOME={{CODEX_HOME}}"
+Environment="PATH={{PATH}}"
+ExecStart="{{CODEX_BIN}}" app-server --listen unix://
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

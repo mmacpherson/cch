@@ -1,9 +1,10 @@
 (ns cli.control-cmd
   "CLI entrypoint for the native control-plane proof of concept."
-  (:require [babashka.process :as p]
-            [cch.control.claude :as claude]
+  (:require [cch.control.claude :as claude]
             [cch.control.core :as control]
+            [cch.subprocess :as subprocess]
             [cheshire.core :as json]
+            [cli.codex-app-server-service :as codex-service]
             [cli.settings :as settings]
             [clojure.string :as str]
             [clojure.tools.cli :as cli]))
@@ -16,12 +17,12 @@
 
 (defn- command-available? [command]
   (try
-    (zero? (:exit (p/sh [command "--version"] {:continue true})))
+    (zero? (:exit (subprocess/run [command "--version"])))
     (catch Exception _ false)))
 
 (defn- configured? [command args]
   (try
-    (zero? (:exit (p/sh (into [command] args) {:continue true})))
+    (zero? (:exit (subprocess/run (into [command] args))))
     (catch Exception _ false)))
 
 (defn- install-mcp! [agent]
@@ -30,9 +31,9 @@
     (when (command-available? "claude")
       (if (configured? "claude" ["mcp" "get" "cch"])
         :present
-        (let [result (p/sh ["claude" "mcp" "add" "--scope" "user"
-                            "cch" "--" "cch" "control" "mcp"]
-                           {:continue true})]
+        (let [result (subprocess/run
+                       ["claude" "mcp" "add" "--scope" "user"
+                        "cch" "--" "cch" "control" "mcp"])]
           (if (zero? (:exit result)) :installed
               (throw (ex-info (str "Could not install Claude MCP config: "
                                    (str/trim (:err result)))
@@ -42,9 +43,9 @@
     (when (command-available? "codex")
       (if (configured? "codex" ["mcp" "get" "cch"])
         :present
-        (let [result (p/sh ["codex" "mcp" "add" "cch" "--"
-                            "cch" "control" "mcp"]
-                           {:continue true})]
+        (let [result (subprocess/run
+                       ["codex" "mcp" "add" "cch" "--"
+                        "cch" "control" "mcp"])]
           (if (zero? (:exit result)) :installed
               (throw (ex-info (str "Could not install Codex MCP config: "
                                    (str/trim (:err result)))
@@ -62,8 +63,21 @@
                          :present "already configured"
                          nil "CLI not found; skipped"))))
     (println)
-    (println "Codex also needs its shared native daemon. Run once:")
-    (println "  codex remote-control start")
+    (if (command-available? "codex")
+      (let [{:keys [status path]} (codex-service/install!)]
+        (case status
+          :installed
+          (do
+            (println "Codex app-server: installed and started local systemd user service")
+            (println "  " path)
+            (println "Codex Remote Control remains disabled for this POC."))
+
+          :unsupported
+          (do
+            (println "Codex app-server: automatic supervision currently requires Linux/systemd.")
+            (println "Start the local socket without Remote Control:")
+            (println "  codex app-server --listen unix://"))))
+      (println "Codex app-server: CLI not found; skipped"))
     (println "No per-session cch pairing or login is required after this install.")))
 
 (defn- print-json [value]

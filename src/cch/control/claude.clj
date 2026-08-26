@@ -1,8 +1,8 @@
 (ns cch.control.claude
   "Claude Code native session discovery, registration, and inbox delivery."
   (:require [babashka.fs :as fs]
-            [babashka.process :as p]
             [cch.control.store :as store]
+            [cch.subprocess :as subprocess]
             [cheshire.core :as json]
             [clojure.string :as str])
   (:import [java.net StandardProtocolFamily UnixDomainSocketAddress]
@@ -45,8 +45,7 @@
   "Ask Claude's supported session registry for current presence."
   []
   (try
-    (let [{:keys [exit out err]} (p/sh ["claude" "agents" "--json"]
-                                           {:continue true})]
+    (let [{:keys [exit out err]} (subprocess/run ["claude" "agents" "--json"])]
       (if (zero? exit)
         (json/parse-string out true)
         (throw (ex-info (str "claude agents failed: " (str/trim err))

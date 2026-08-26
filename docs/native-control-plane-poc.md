@@ -18,27 +18,46 @@ Install `cch` so it is on `PATH`, then run:
 
 ```bash
 cch control install
-codex remote-control start
 ```
 
-The first command installs one global Claude registration hook and registers the
-same local MCP server with Claude and Codex. Starting an agent after that has no
-cch-specific pairing step and no additional provider login: each native CLI
-continues to use its own existing account credentials. Codex currently requires
-the standalone distribution managed by its installer for the shared daemon; the
-control plane reports an actionable error when that prerequisite is absent.
+The command installs one global Claude registration hook, registers the same
+local MCP server with Claude and Codex, and, on Linux, installs and starts a
+systemd user service for the package-managed Codex binary:
+
+```text
+codex app-server --listen unix://
+```
+
+This local service does not use Codex's standalone shell-script installer or
+updater, and it does not enable Codex Remote Control. Starting an agent after
+that has no cch-specific pairing step and no additional provider login: each
+native CLI continues to use its own existing account credentials. The service
+captures the install-time `PATH` so its Codex threads can start the configured
+cch MCP process. On platforms without systemd, start the same local app-server
+command with an OS-native supervisor before running the smoke test.
+
+For this POC, start Codex sessions as clients of the shared app-server:
+
+```bash
+codex --remote unix://
+```
+
+There is no pairing or provider login per start. A bare `codex` currently owns
+its own in-process runtime and is not discoverable through the shared daemon.
+Whether a separate command or shell abbreviation is acceptable is part of the
+POC go/no-go decision; cch does not install a `codex` PATH shim.
 
 Claude Code must be version 2.1.224 or newer for native cross-session messaging.
-Global Remote Control may be enabled independently; cch does not proxy its cloud
-connection or approval channel.
+Claude or Codex Remote Control may be enabled independently after the POC; cch
+does not proxy either provider's cloud connection or approval channel.
 
 ## Manual smoke test
 
-Start two ordinary Codex sessions and one ordinary Claude session. Ask any of
-them to call `list_sessions`, then send a synthetic message to another route.
-The destination receives text prefixed with its claimed source route and stable
-message id. Repeat the call with the same `message_id`; it returns `duplicate`
-without delivering again.
+Start two `codex --remote unix://` sessions and one ordinary Claude session. Ask
+any of them to call `list_sessions`, then send a synthetic message to another
+route. The destination receives text prefixed with its claimed source route and
+stable message id. Repeat the call with the same `message_id`; it returns
+`duplicate` without delivering again.
 
 The CLI offers the same narrow surface for diagnosis:
 
