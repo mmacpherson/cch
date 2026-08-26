@@ -5,6 +5,7 @@
             [cch.subprocess :as subprocess]
             [cheshire.core :as json]
             [cli.codex-app-server-service :as codex-service]
+            [cli.codex-settings :as codex-settings]
             [cli.settings :as settings]
             [clojure.string :as str]
             [clojure.tools.cli :as cli]))
@@ -25,42 +26,56 @@
     (zero? (:exit (subprocess/run (into [command] args))))
     (catch Exception _ false)))
 
-(defn- install-mcp! [agent]
+(defn- mcp-commands [agent codex-home]
   (case agent
     :claude
-    (when (command-available? "claude")
-      (if (configured? "claude" ["mcp" "get" "cch"])
-        :present
-        (let [result (subprocess/run
-                       ["claude" "mcp" "add" "--scope" "user"
-                        "cch" "--" "cch" "control" "mcp"])]
-          (if (zero? (:exit result)) :installed
-              (throw (ex-info (str "Could not install Claude MCP config: "
-                                   (str/trim (:err result)))
-                              {:type :mcp-install-failed :agent "claude"}))))))
+    {:get ["claude" "mcp" "get" "cch"]
+     :remove ["claude" "mcp" "remove" "cch" "--scope" "user"]
+     :add ["claude" "mcp" "add" "--scope" "user" "cch"
+           "--env" (str "CODEX_HOME=" codex-home)
+           "--" "cch" "control" "mcp"]}
 
     :codex
-    (when (command-available? "codex")
-      (if (configured? "codex" ["mcp" "get" "cch"])
-        :present
-        (let [result (subprocess/run
-                       ["codex" "mcp" "add" "cch" "--"
-                        "cch" "control" "mcp"])]
-          (if (zero? (:exit result)) :installed
-              (throw (ex-info (str "Could not install Codex MCP config: "
-                                   (str/trim (:err result)))
-                              {:type :mcp-install-failed :agent "codex"}))))))))
+    {:get ["codex" "mcp" "get" "cch"]
+     :remove ["codex" "mcp" "remove" "cch"]
+     :add ["codex" "mcp" "add" "--env" (str "CODEX_HOME=" codex-home)
+           "cch" "--" "cch" "control" "mcp"]}))
+
+(defn- run-mcp-command! [agent action argv]
+  (let [result (subprocess/run argv)]
+    (when-not (zero? (:exit result))
+      (throw (ex-info (str "Could not " (name action) " " (name agent)
+                           " MCP config: " (str/trim (:err result)))
+                      {:type :mcp-install-failed
+                       :agent (name agent)
+                       :action action})))
+    result))
+
+(defn- install-mcp! [agent codex-home]
+  (let [command (name agent)]
+    (when (command-available? command)
+      (let [{:keys [get remove add]} (mcp-commands agent codex-home)
+            present? (configured? command (rest get))]
+        ;; Provider CLIs may sanitize inherited environment variables before
+        ;; spawning MCP servers. Reconcile the cch-owned entry so both agents
+        ;; can always resolve the shared Codex socket, including relocated
+        ;; CODEX_HOME installations.
+        (when present?
+          (run-mcp-command! agent :remove remove))
+        (run-mcp-command! agent :install add)
+        (if present? :updated :installed)))))
 
 (defn- install! []
-  (let [path (settings/global-settings-path)]
+  (let [path (settings/global-settings-path)
+        codex-home (codex-settings/codex-home)]
     (settings/add-control-registration-entry! path)
     (println "Installed automatic Claude session registration in" path)
     (doseq [agent [:claude :codex]
-            :let [status (install-mcp! agent)]]
+            :let [status (install-mcp! agent codex-home)]]
       (println (format "%-7s MCP: %s" (name agent)
                        (case status
                          :installed "installed"
-                         :present "already configured"
+                         :updated "configuration reconciled"
                          nil "CLI not found; skipped"))))
     (println)
     (if (command-available? "codex")
