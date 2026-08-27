@@ -1,5 +1,6 @@
 (ns cli.control-cmd-test
   (:require [cch.subprocess :as subprocess]
+            [cch.control.remote :as remote]
             [cli.control-cmd :as control-cmd]
             [clojure.test :refer [deftest is testing]]))
 
@@ -48,3 +49,17 @@
                "--env" "CCH_MCP_CALLER=codex"
                "cch" "--" "cch" "control" "mcp"]]
              @calls)))))
+
+(deftest paired-runner-config-is-captured-once-by-agent-mcp-registration
+  (with-redefs [remote/config-from-env
+                (constantly {:url "https://broker.invalid"
+                             :runner-id "runner-a"
+                             :token "synthetic-token"})]
+    (let [add (get (#'control-cmd/mcp-commands
+                     :codex "/home/example/.config/codex") :add)]
+      (is (= ["--env" "CCH_CONTROL_BROKER_URL=https://broker.invalid"
+              "--env" "CCH_CONTROL_RUNNER_ID=runner-a"
+              "--env" "CCH_CONTROL_RUNNER_TOKEN=synthetic-token"]
+             (subvec add 7 13)))
+      (is (= ["cch" "--" "cch" "control" "mcp"]
+             (subvec add 13))))))

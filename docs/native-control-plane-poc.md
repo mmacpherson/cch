@@ -1,9 +1,10 @@
 # Native control-plane proof of concept
 
 This repository is testing a broader product identity: a multi-agent local
-execution control plane. The first gate is deliberately small. It proves native
-Claude-to-Codex, Codex-to-Claude, and Codex-to-Codex text routing on one machine
-before a hosted broker, web UI, or data-federation redesign is built.
+execution control plane. The first gate deliberately proved native
+Claude-to-Codex, Codex-to-Claude, and Codex-to-Codex text routing on one machine.
+The second gate adds two paired runners and a disposable broker before a hosted
+service, web UI, or data-federation redesign is built.
 
 The POC does not wrap terminals or launch agents. Claude sessions publish their
 documented per-session inbox to a separate local SQLite `control.db` from an
@@ -60,6 +61,52 @@ Claude Code must be version 2.1.224 or newer for native cross-session messaging.
 Claude or Codex Remote Control may be enabled independently after the POC; cch
 does not proxy either provider's cloud connection or approval channel.
 
+## Disposable cross-runner broker
+
+The cross-machine POC is a separate, transient transport. A broker holds an
+in-memory directory of short route leases and in-memory message envelopes. Each
+machine runs one outbound polling runner. Agents do not connect to the broker,
+open listening ports, or pair themselves; their already-installed cch MCP
+process sends through the machine's runner identity.
+
+Create one opaque id and random pairing token per machine. On the broker, pass
+the mapping as process environment and bind to loopback behind an existing
+Tailscale HTTPS proxy:
+
+```bash
+export CCH_CONTROL_RUNNER_TOKENS='{"runner-a":"replace-with-random-token-a","runner-b":"replace-with-random-token-b"}'
+cch control broker --host 127.0.0.1 --port 8787
+```
+
+Configure each machine once with its own values. The HTTPS URL is the private
+overlay URL that forwards to the broker's loopback listener:
+
+```bash
+export CCH_CONTROL_BROKER_URL='https://broker-name.example-tailnet.ts.net'
+export CCH_CONTROL_RUNNER_ID='runner-a'
+export CCH_CONTROL_RUNNER_TOKEN='replace-with-random-token-a'
+
+cch control install
+cch control runner
+```
+
+`control install` captures the three pairing values in the owner-local Claude
+and Codex MCP registrations. Starting dozens of later agent sessions requires
+no cch authentication or pairing chore. `control runner` is manually
+supervised during this gate; installing it as an OS service is deliberately a
+post-gate production task.
+
+The runner refreshes only `id`, agent family, availability, and coarse native
+status. It omits names, cwd values, PIDs, sockets, provider credentials, and
+transcript data. The broker accepts only ordinary text messages, retries
+unacknowledged delivery three times within a short expiry window, and drops the
+body after a terminal acknowledgement or expiry. Pairing tokens are never
+written to this repository or printed by the broker.
+
+Unsetting the three `CCH_CONTROL_*` runner values returns cch to local-only
+routing. Stopping the runner or broker does not stop, wrap, or alter any native
+Claude or Codex session.
+
 ## Manual smoke test
 
 Start two `codex --remote unix://` sessions and one ordinary Claude session. Ask
@@ -105,6 +152,15 @@ destination displayed the other client's native route as its source without
 either model supplying a trusted source claim. The remaining local question is
 product UX: Codex must currently be launched with `--remote unix://`.
 
+The disposable broker and outbound runner are exercised by an actual HTTP
+integration harness with two independently authenticated logical machines.
+Synthetic Codex-to-Claude delivery and its Claude-to-Codex reply cross the
+broker, acknowledgements remove message bodies, duplicate ids are suppressed,
+unacknowledged messages stop after three attempts, leases and envelopes expire,
+and registration recovers after lease loss. This harness deliberately uses
+loopback and synthetic routes. A real two-machine Tailscale HTTPS exercise is
+still required before the cross-machine gate is recorded as passed.
+
 ## Security and privacy boundary
 
 - The MCP API accepts plain text, not raw native frames. It cannot send approval
@@ -123,6 +179,10 @@ product UX: Codex must currently be launched with `--remote unix://`.
   are omitted from listing APIs and must never be sent to a future broker.
 - Message bodies and transcript previews are not persisted by cch. Delivery
   deduplication stores only a SHA-256 digest and routing metadata.
+- Cross-runner message bodies exist transiently in broker memory only. The
+  broker has no database; it stores neither provider credentials nor native
+  machine metadata. A persistent pairing credential identifies a runner, not
+  each agent session.
 - No private hostnames, private user identities, private repository names,
   OAuth client details, session transcripts, or real route IDs belong in this
   public repository.
@@ -132,6 +192,8 @@ product UX: Codex must currently be launched with `--remote unix://`.
 The local POC has passed its technical gate: all three direction pairs work
 with trustworthy source attribution, idempotent retries, clear stale-session
 failures, restart recovery, and no permission relay. The non-default Codex
-launch UX remains a product decision, not a routing uncertainty. The next gate
-repeats the test across two machines. Postgres, Google OIDC, the hosted
-switchboard, and federation migration remain downstream of those results.
+launch UX remains a product decision, not a routing uncertainty. The
+cross-runner implementation now passes its synthetic network harness; its gate
+remains open until the same request/reply matrix runs on two physical machines.
+Postgres, Google OIDC, the hosted switchboard, and federation migration remain
+downstream of those results.

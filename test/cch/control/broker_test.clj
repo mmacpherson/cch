@@ -1,0 +1,155 @@
+(ns cch.control.broker-test
+  (:require [cch.control.broker :as broker]
+            [clojure.test :refer [deftest is]]))
+
+(def runner-tokens
+  {"runner-a" "synthetic-token-a"
+   "runner-b" "synthetic-token-b"})
+
+(def runner-a-sessions
+  [{:id "codex:00000000-0000-0000-0000-00000000000a"
+    :agent "codex" :native-id "private-native-value" :cwd "/private/path"
+    :name "Private label" :status "idle" :available true}])
+
+(def runner-b-sessions
+  [{:id "codex:00000000-0000-0000-0000-00000000000b"
+    :agent "codex" :status "idle" :available true}
+   {:id "claude:00000000-0000-0000-0000-00000000000c"
+    :agent "claude" :status "working" :available true}
+   {:id "claude:00000000-0000-0000-0000-00000000000d"
+    :agent "claude" :status "stale" :available false}])
+
+(defn- register-pair! [b]
+  (broker/register! b {:runner-id "runner-a" :token "synthetic-token-a"
+                       :sessions runner-a-sessions})
+  (broker/register! b {:runner-id "runner-b" :token "synthetic-token-b"
+                       :sessions runner-b-sessions}))
+
+(deftest registration-publishes-only-sanitized-available-routes
+  (let [b (broker/new-broker runner-tokens)]
+    (register-pair! b)
+    (is (= [{:id "claude:00000000-0000-0000-0000-00000000000c"
+             :agent "claude" :status "working" :available true
+             :runner-id "runner-b"}
+            {:id "codex:00000000-0000-0000-0000-00000000000a"
+             :agent "codex" :status "idle" :available true
+             :runner-id "runner-a"}
+            {:id "codex:00000000-0000-0000-0000-00000000000b"
+             :agent "codex" :status "idle" :available true
+             :runner-id "runner-b"}]
+           (broker/sessions b)))
+    (is (nil? (:cwd (first (broker/sessions b)))))
+    (is (= :unauthorized
+           (try
+             (broker/register! b {:runner-id "runner-a" :token "wrong"
+                                  :sessions []})
+             (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
+
+(deftest messages-cross-both-directions-and-deduplicate
+  (let [b (broker/new-broker runner-tokens)
+        a "codex:00000000-0000-0000-0000-00000000000a"
+        c "claude:00000000-0000-0000-0000-00000000000c"]
+    (register-pair! b)
+    (is (= "queued"
+           (:status (broker/enqueue! b {:runner-id "runner-a"
+                                        :token "synthetic-token-a"
+                                        :source a :target c
+                                        :message "Synthetic request"
+                                        :message-id "message-forward"}))))
+    (let [message (-> (broker/poll! b {:runner-id "runner-b"
+                                       :token "synthetic-token-b"})
+                      :messages first)]
+      (is (= {:message-id "message-forward"
+              :source a :target c :body "Synthetic request"
+              :attempts 1}
+             (dissoc message :expires-at))))
+    (is (= "delivered"
+           (:status (broker/ack! b {:runner-id "runner-b"
+                                    :token "synthetic-token-b"
+                                    :message-id "message-forward"
+                                    :status "delivered"}))))
+    (is (= "duplicate"
+           (:status (broker/enqueue! b {:runner-id "runner-a"
+                                        :token "synthetic-token-a"
+                                        :source a :target c
+                                        :message "Synthetic request"
+                                        :message-id "message-forward"}))))
+    (is (= "queued"
+           (:status (broker/enqueue! b {:runner-id "runner-b"
+                                        :token "synthetic-token-b"
+                                        :source c :target a
+                                        :message "Synthetic reply"
+                                        :message-id "message-reply"}))))
+    (is (= "Synthetic reply"
+           (-> (broker/poll! b {:runner-id "runner-a"
+                                :token "synthetic-token-a"})
+               :messages first :body)))
+    (is (= :message-id-conflict
+           (try
+             (broker/enqueue! b {:runner-id "runner-a"
+                                 :token "synthetic-token-a"
+                                 :source a :target c
+                                 :message "Changed body"
+                                 :message-id "message-forward"})
+             (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
+
+(deftest unacked-delivery-has-bounded-retries
+  (let [clock (atom 10000)
+        b (broker/new-broker runner-tokens
+                             {:now-fn #(deref clock)
+                              :ack-timeout-ms 100
+                              :message-ttl-ms 5000
+                              :max-attempts 3})
+        source "codex:00000000-0000-0000-0000-00000000000a"
+        target "codex:00000000-0000-0000-0000-00000000000b"]
+    (register-pair! b)
+    (broker/enqueue! b {:runner-id "runner-a" :token "synthetic-token-a"
+                        :source source :target target :message "Retry me"
+                        :message-id "message-retry"})
+    (doseq [attempt [1 2 3]]
+      (is (= attempt
+             (-> (broker/poll! b {:runner-id "runner-b"
+                                  :token "synthetic-token-b"})
+                 :messages first :attempts)))
+      (swap! clock + 100))
+    (is (empty? (:messages (broker/poll! b {:runner-id "runner-b"
+                                            :token "synthetic-token-b"}))))
+    (is (= {:message-id "message-retry" :source source :target target
+            :status "failed" :attempts 3 :created-at 10000 :expires-at 15000
+            :failure "attempts-exhausted"}
+           (broker/message-status b "runner-a" "synthetic-token-a"
+                                  "message-retry")))))
+
+(deftest leases-and-messages-expire-and-runners-can-reconnect
+  (let [clock (atom 20000)
+        b (broker/new-broker runner-tokens
+                             {:now-fn #(deref clock)
+                              :lease-ms 1000 :message-ttl-ms 1000})
+        source "codex:00000000-0000-0000-0000-00000000000a"
+        target "claude:00000000-0000-0000-0000-00000000000c"]
+    (register-pair! b)
+    (broker/enqueue! b {:runner-id "runner-a" :token "synthetic-token-a"
+                        :source source :target target :message "Short lived"
+                        :message-id "message-expiry"})
+    (swap! clock + 1001)
+    (is (empty? (broker/sessions b)))
+    (is (= "expired" (:status (broker/message-status
+                                b "runner-a" "synthetic-token-a"
+                                "message-expiry"))))
+    (is (= "registered"
+           (:status (broker/register! b {:runner-id "runner-b"
+                                         :token "synthetic-token-b"
+                                         :sessions runner-b-sessions}))))
+    (is (= 2 (count (broker/sessions b))))))
+
+(deftest source-routes-cannot-be-spoofed-by-another-runner
+  (let [b (broker/new-broker runner-tokens)]
+    (register-pair! b)
+    (is (= :invalid-source
+           (try
+             (broker/enqueue! b {:runner-id "runner-b"
+                                 :token "synthetic-token-b"
+                                 :source "codex:00000000-0000-0000-0000-00000000000a"
+                                 :target "claude:00000000-0000-0000-0000-00000000000c"
+                                 :message "Forged" :message-id "message-forged"})
+             (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
