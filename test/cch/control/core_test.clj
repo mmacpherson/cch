@@ -48,6 +48,15 @@
                                    :message (apply str (repeat 33000 "x"))})
            (catch clojure.lang.ExceptionInfo e (:type (ex-data e)))))))
 
+(deftest command-mode-input-is-rejected-before-transport
+  (doseq [message ["/permissions" "  /mcp" "\n/help"]]
+    (is (= :command-mode-not-allowed
+           (try
+             (control/send-message! {:target "claude:session-1"
+                                     :message message})
+             (catch clojure.lang.ExceptionInfo e (:type (ex-data e)))))
+        message)))
+
 (deftest attribution-labels-cannot-inject-envelope-lines
   (is (= :invalid-message
          (try

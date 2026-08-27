@@ -55,8 +55,10 @@ POC go/no-go decision; cch does not install a `codex` PATH shim.
 
 Codex asks once whether to trust newly installed hooks when a session first
 sees the configuration change. That is configuration trust, not per-agent cch
-pairing. Each `send_message` still displays Codex's ordinary MCP approval unless
-the operator separately chooses a broader native Codex permission.
+pairing. The installer allowlists exactly `list_sessions`, `get_session`, and
+`send_message` on Codex's `cch` MCP server and grants exactly the corresponding
+three Claude permission rules. It does not use a wildcard or change either
+provider's global approval policy, auto mode, or permissions for other tools.
 
 Claude Code must be version 2.1.224 or newer for native cross-session messaging.
 Claude or Codex Remote Control may be enabled independently after the POC; cch
@@ -182,6 +184,11 @@ preserved native delivery and thread persistence semantics.
 
 - The MCP API accepts plain text, not raw native frames. It cannot send approval
   responses, permission decisions, slash commands, or terminal keystrokes.
+- Unknown envelope fields are rejected rather than ignored, including fields
+  shaped as credentials, approval replies, permissions, commands, or raw
+  frames. Provider credentials are not part of the message contract. As with
+  any text channel, operators and agents must still avoid pasting secrets into
+  an ordinary message body.
 - Provider-native approval prompts remain in the originating CLI. In the live
   matrix, approving cch tool use authorized only the plain-text tool call; no
   approval response was exposed to or forwarded by cch.

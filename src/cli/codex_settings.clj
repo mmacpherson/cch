@@ -96,6 +96,34 @@
          body "\n"
          "# cch:end " name "\n")))
 
+(def control-mcp-tools
+  "Exact raw MCP tool names exposed to Codex. This is deliberately not a
+  wildcard so adding a future cch tool cannot grant it ambient authority."
+  ["list_sessions" "get_session" "send_message"])
+
+(defn render-control-mcp-block
+  "Render the complete cch-owned Codex MCP server configuration. Approval is
+  scoped to this server, not Codex's global approval policy or auto mode."
+  [{:keys [command args env]}]
+  (let [quoted (fn [value]
+                 (str "\"" (escape-toml-string value) "\""))
+        array-value (fn [values]
+                      (str "[" (str/join ", " (map quoted values)) "]"))
+        env-lines (->> env
+                       (sort-by key)
+                       (map (fn [[key value]]
+                              (str key " = " (quoted value)))))]
+    (str "# cch:begin cch-control-mcp\n"
+         "[mcp_servers.cch]\n"
+         "command = " (quoted command) "\n"
+         "args = " (array-value args) "\n"
+         "enabled_tools = " (array-value control-mcp-tools) "\n"
+         "default_tools_approval_mode = \"approve\"\n"
+         "required = true\n"
+         "\n[mcp_servers.cch.env]\n"
+         (str/join "\n" env-lines) "\n"
+         "# cch:end cch-control-mcp\n")))
+
 (defn- block-pattern
   "Regex matching one named cch block. Consumes one leading newline (the
   separator inserted by `upsert-block`) and the block's own trailing
@@ -137,6 +165,21 @@
   Codex config at `path`. `entries` as in `render-block`."
   [path name entries]
   (let [updated (upsert-block (read-config path) name entries)]
+    (write-config! path updated)
+    updated))
+
+(defn install-control-mcp!
+  "Atomically install the complete, allowlisted cch MCP server block. Any
+  prior cch-owned version is replaced while unrelated TOML is preserved."
+  [path config]
+  (let [contents (read-config path)
+        stripped (strip-block contents "cch-control-mcp")
+        sep (cond
+              (str/blank? stripped) ""
+              (str/ends-with? stripped "\n\n") ""
+              (str/ends-with? stripped "\n") "\n"
+              :else "\n\n")
+        updated (str stripped sep (render-control-mcp-block config))]
     (write-config! path updated)
     updated))
 

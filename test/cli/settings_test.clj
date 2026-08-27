@@ -146,6 +146,25 @@
              (get-in (settings/read-settings tmp)
                      [:hooks :SessionStart 0 :hooks 0 :command]))))))
 
+(deftest control-mcp-permissions-are-exact-and-idempotent
+  (with-tmp-settings
+    (fn [tmp]
+      (settings/write-settings!
+        tmp {:permissions {:allow ["Read"]
+                           :defaultMode "auto"}})
+      (settings/add-control-mcp-permissions! tmp)
+      (settings/add-control-mcp-permissions! tmp)
+      (let [permissions (:permissions (settings/read-settings tmp))]
+        (is (= ["Read"
+                "mcp__cch__list_sessions"
+                "mcp__cch__get_session"
+                "mcp__cch__send_message"]
+               (:allow permissions)))
+        (is (= "auto" (:defaultMode permissions))
+            "the user's Claude permission mode is untouched")
+        (is (not-any? #(re-find #"\*" %) (:allow permissions))
+            "future cch tools are not authorized by wildcard")))))
+
 ;; --- Full cleanup ---
 
 (deftest test-remove-all-cch
@@ -154,7 +173,8 @@
       ;; Drop in mixed cch + non-cch entries
       (settings/write-settings!
         tmp
-        {:hooks
+        {:permissions {:allow ["Read" "mcp__cch__send_message"]}
+         :hooks
          {:PreToolUse [{:matcher "Edit|Write"
                         :hooks [{:type "command" :command "ruff format --quiet"}
                                 {:type "http" :url "http://127.0.0.1:8888/dispatch/PreToolUse" :timeout 30}]}]
@@ -173,7 +193,9 @@
           ;; SessionStart: cch prompt entry was the only one → empty after prune
           (is (empty? (get-in s [:hooks :SessionStart])))
           ;; Stop: non-cch entry untouched
-          (is (= 1 (count (get-in s [:hooks :Stop])))))))))
+          (is (= 1 (count (get-in s [:hooks :Stop]))))
+          (is (= ["Read"] (get-in s [:permissions :allow]))
+              "only exact cch control permissions are removed"))))))
 
 (deftest test-remove-all-cch-cleans-legacy-entries
   (with-tmp-settings

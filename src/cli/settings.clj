@@ -188,6 +188,30 @@
 (def ^:private control-registration-tag
   "control-plane:claude-registration")
 
+(def control-mcp-permissions
+  "Exact Claude permission rules owned by the native control plane. Keep this
+  list explicit: a server wildcard would silently authorize future tools."
+  ["mcp__cch__list_sessions"
+   "mcp__cch__get_session"
+   "mcp__cch__send_message"])
+
+(defn add-control-mcp-permissions!
+  "Pre-authorize only cch's three narrow MCP tools. Existing permission rules
+  and Claude's selected permission mode are preserved; reinstall is
+  idempotent."
+  [settings-path]
+  (let [settings (read-settings settings-path)
+        existing (vec (or (get-in settings [:permissions :allow]) []))
+        updated-rules (reduce (fn [rules rule]
+                                (if (some #{rule} rules)
+                                  rules
+                                  (conj rules rule)))
+                              existing
+                              control-mcp-permissions)
+        updated (assoc-in settings [:permissions :allow] updated-rules)]
+    (write-settings! settings-path updated)
+    updated))
+
 (defn add-control-registration-entry!
   "Install the lightweight SessionStart registration hook used by the native
   control plane. The hook inherits Claude's per-session inbox environment,
@@ -239,7 +263,8 @@
 ;; --- Full cleanup ---
 
 (defn remove-all-cch!
-  "Remove every cch-owned entry from settings.json (dispatch, prompt, agent).
+  "Remove every cch-owned entry from settings.json (dispatch, prompt, agent,
+  and exact control-plane MCP permissions).
   Preserves all non-cch hooks. Used by `cch uninstall` with no args."
   [settings-path]
   (let [settings  (read-settings settings-path)
@@ -256,6 +281,12 @@
                                            hooks-vec))]
                         (assoc-in s [:hooks key] pruned)))
                     settings
-                    event-types)]
+                    event-types)
+        updated (if (contains? (get updated :permissions {}) :allow)
+                  (update-in updated [:permissions :allow]
+                             (fn [rules]
+                               (vec (remove (set control-mcp-permissions)
+                                            (or rules [])))))
+                  updated)]
     (write-settings! settings-path updated)
     updated))

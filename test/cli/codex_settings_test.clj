@@ -42,6 +42,34 @@
         text (cs/render-block "x" entries)]
     (is (str/includes? text "command = \"echo \\\"hi\\\"\""))))
 
+(deftest render-control-mcp-block-is-narrowly-allowlisted
+  (let [text (cs/render-control-mcp-block
+               {:command "/opt/cch/bin/cch"
+                :args ["control" "mcp"]
+                :env {"CODEX_HOME" "/home/example/.config/codex"
+                      "CCH_MCP_CALLER" "codex"}})]
+    (is (str/includes? text "[mcp_servers.cch]"))
+    (is (str/includes? text
+                       "enabled_tools = [\"list_sessions\", \"get_session\", \"send_message\"]"))
+    (is (str/includes? text "default_tools_approval_mode = \"approve\""))
+    (is (str/includes? text "required = true"))
+    (is (not (str/includes? text "approval_policy"))
+        "global Codex approval policy is untouched")))
+
+(deftest install-control-mcp-preserves-user-content-and-is-idempotent
+  (with-tmp
+    (fn [tmp]
+      (spit tmp "model = \"gpt-5.5\"\n")
+      (let [config {:command "/opt/cch/bin/cch"
+                    :args ["control" "mcp"]
+                    :env {"CCH_MCP_CALLER" "codex"}}]
+        (cs/install-control-mcp! tmp config)
+        (cs/install-control-mcp! tmp config)
+        (let [contents (slurp tmp)]
+          (is (str/starts-with? contents "model = \"gpt-5.5\"\n"))
+          (is (= 1 (count (re-seq #"# cch:begin cch-control-mcp"
+                                  contents)))))))))
+
 (deftest install-into-empty-file
   (with-tmp
     (fn [tmp]

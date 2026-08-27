@@ -16,6 +16,25 @@
 (defn caller-agent []
   (System/getenv "CCH_MCP_CALLER"))
 
+(def ^:private send-message-keys
+  #{:target :message :message_id :source_proof})
+
+(defn- validate-send-arguments!
+  "Fail closed when a client attempts to smuggle a second protocol through
+  the generic message tool. Provider credentials, permission replies, raw
+  frames, and command input are not fields in this capability."
+  [arguments caller]
+  (let [unsupported (seq (remove send-message-keys (keys arguments)))]
+    (when unsupported
+      (throw (ex-info "send_message accepts only its documented text envelope"
+                      {:type :unsupported-control-input
+                       :fields (vec (sort (map name unsupported)))})))
+    (when (and (not= "codex" caller) (contains? arguments :source_proof))
+      (throw (ex-info "source_proof is reserved for the trusted Codex hook"
+                      {:type :unsupported-control-input
+                       :fields ["source_proof"]})))
+    arguments))
+
 (defn ^{:mcp-name "list_sessions" :mcp-type :tool}
   list-sessions
   "List active native Claude and Codex sessions. Credentials and transcript
@@ -44,8 +63,11 @@
            message_id
            ^{:doc "Reserved Codex hook proof; callers must not supply this field"
              :type "string" :required? false}
-           source_proof]}]
-  (let [source (case (caller-agent)
+           source_proof]
+    :as arguments}]
+  (let [caller (caller-agent)
+        _ (validate-send-arguments! arguments caller)
+        source (case caller
                  "codex" (codex-binding/claim-source!
                            {:source-proof source_proof
                             :target target

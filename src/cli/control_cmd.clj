@@ -55,12 +55,7 @@
 
     :codex
     {:get ["codex" "mcp" "get" "cch"]
-     :remove ["codex" "mcp" "remove" "cch"]
-     :add (vec (concat ["codex" "mcp" "add"
-                        "--env" (str "CODEX_HOME=" codex-home)
-                        "--env" "CCH_MCP_CALLER=codex"
-                        "--env" (str "CCH_CONTROL_PAIRING_PATH=" pairing-path)]
-                       ["cch" "--" cch-bin "control" "mcp"]))}))
+     :remove ["codex" "mcp" "remove" "cch"]}))
 
 (def ^:private codex-binding-block "cch-control-plane")
 
@@ -98,7 +93,20 @@
         ;; CODEX_HOME installations.
         (when present?
           (run-mcp-command! agent :remove remove))
-        (run-mcp-command! agent :install add)
+        (if (= :codex agent)
+          (do
+            ;; `codex mcp add` does not expose the upstream allowlist and
+            ;; approval settings. Own the complete cch table so no broad
+            ;; provider-level approval policy is needed.
+            (codex-settings/install-control-mcp!
+              (str codex-home "/config.toml")
+              {:command cch-bin
+               :args ["control" "mcp"]
+               :env {"CODEX_HOME" codex-home
+                     "CCH_MCP_CALLER" "codex"
+                     "CCH_CONTROL_PAIRING_PATH" pairing-path}})
+            (run-mcp-command! agent :validate get))
+          (run-mcp-command! agent :install add))
         (if present? :updated :installed)))))
 
 (defn- print-runner-service-status! [{:keys [status path]}]
@@ -129,7 +137,9 @@
       (remote/save-config! env-pairing))
     (settings/add-control-registration-entry!
       path (str (shell-quote cch-bin) " control register-claude"))
+    (settings/add-control-mcp-permissions! path)
     (println "Installed automatic Claude session registration in" path)
+    (println "Pre-authorized only cch's three native routing tools for Claude")
     (doseq [agent [:claude :codex]
             :let [status (install-mcp! agent codex-home cch-bin pairing-path)]]
       (println (format "%-7s MCP: %s" (name agent)

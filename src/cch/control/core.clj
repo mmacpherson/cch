@@ -85,6 +85,9 @@
     (throw (ex-info "target is required" {:type :invalid-message})))
   (when (str/blank? message)
     (throw (ex-info "message is required" {:type :invalid-message})))
+  (when (str/starts-with? (str/triml message) "/")
+    (throw (ex-info "command-mode input is not allowed through send_message"
+                    {:type :command-mode-not-allowed})))
   (when-not (valid-envelope-label? target)
     (throw (ex-info "target must be 1-512 characters without control characters"
                     {:type :invalid-message})))
