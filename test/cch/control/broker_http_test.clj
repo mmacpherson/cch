@@ -2,8 +2,11 @@
   (:require [cch.control.broker :as broker]
             [cch.control.broker-http :as broker-http]
             [cch.control.remote :as remote]
+            [babashka.fs :as fs]
             [clojure.test :refer [deftest is testing]])
-  (:import [java.net ServerSocket]))
+  (:import [java.net ServerSocket]
+           [java.nio.file Files LinkOption]
+           [java.nio.file.attribute PosixFilePermissions]))
 
 (defn- free-port []
   (with-open [socket (ServerSocket. 0)]
@@ -90,3 +93,24 @@
            (broker-http/runner-tokens-from-env {})
            (catch clojure.lang.ExceptionInfo error
              (:type (ex-data error)))))))
+
+(deftest pairing-config-is-durable-owner-only-and-env-takes-precedence
+  (let [directory (fs/create-temp-dir {:prefix "cch-control-pairing-test-"})
+        path (str directory "/control-runner.json")
+        stored {:url "https://broker.invalid"
+                :runner-id "runner-file"
+                :token "synthetic-file-token"}
+        from-env {:url "https://other-broker.invalid"
+                  :runner-id "runner-env"
+                  :token "synthetic-env-token"}]
+    (try
+      (is (= path (remote/save-config! path stored)))
+      (is (= stored (remote/config-from-file path)))
+      (is (= (PosixFilePermissions/fromString "rw-------")
+             (Files/getPosixFilePermissions
+               (.toPath (fs/file path)) (make-array LinkOption 0))))
+      (with-redefs [remote/config-from-env (constantly from-env)
+                    remote/config-from-file (constantly stored)]
+        (is (= from-env (remote/config))))
+      (finally
+        (fs/delete-tree directory)))))

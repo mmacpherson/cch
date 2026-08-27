@@ -1,6 +1,5 @@
 (ns cli.control-cmd-test
   (:require [cch.subprocess :as subprocess]
-            [cch.control.remote :as remote]
             [cli.control-cmd :as control-cmd]
             [clojure.test :refer [deftest is testing]]))
 
@@ -11,13 +10,15 @@
             ["claude" "mcp" "add" "--scope" "user" "cch"
              "--env" "CODEX_HOME=/home/example/.config/codex"
              "--env" "CCH_MCP_CALLER=claude"
-             "--" "cch" "control" "mcp"]]
+             "--env" "CCH_CONTROL_PAIRING_PATH=/home/example/.config/cch/control-runner.json"
+             "--" "/opt/cch/bin/cch" "control" "mcp"]]
            [:codex
             ["codex" "mcp" "remove" "cch"]
             ["codex" "mcp" "add" "--env"
              "CODEX_HOME=/home/example/.config/codex"
              "--env" "CCH_MCP_CALLER=codex"
-             "cch" "--" "cch" "control" "mcp"]]]]
+             "--env" "CCH_CONTROL_PAIRING_PATH=/home/example/.config/cch/control-runner.json"
+             "cch" "--" "/opt/cch/bin/cch" "control" "mcp"]]]]
     (testing (name agent)
       (let [calls (atom [])]
         (with-redefs [subprocess/run
@@ -26,7 +27,8 @@
                         {:exit 0 :out "" :err ""})]
           (is (= :updated
                  (#'control-cmd/install-mcp!
-                   agent "/home/example/.config/codex")))
+                   agent "/home/example/.config/codex" "/opt/cch/bin/cch"
+                   "/home/example/.config/cch/control-runner.json")))
           (is (= [[(name agent) "--version"]
                   [(name agent) "mcp" "get" "cch"]
                   expected-remove
@@ -41,25 +43,22 @@
                     {:exit (if (= ["codex" "mcp" "get" "cch"] argv) 1 0)
                      :out "" :err "not found"})]
       (is (= :installed
-             (#'control-cmd/install-mcp! :codex "/home/example/.codex")))
+             (#'control-cmd/install-mcp!
+               :codex "/home/example/.codex" "/opt/cch/bin/cch"
+               "/home/example/.config/cch/control-runner.json")))
       (is (= [["codex" "--version"]
               ["codex" "mcp" "get" "cch"]
               ["codex" "mcp" "add" "--env"
                "CODEX_HOME=/home/example/.codex"
                "--env" "CCH_MCP_CALLER=codex"
-               "cch" "--" "cch" "control" "mcp"]]
+               "--env" "CCH_CONTROL_PAIRING_PATH=/home/example/.config/cch/control-runner.json"
+               "cch" "--" "/opt/cch/bin/cch" "control" "mcp"]]
              @calls)))))
 
-(deftest paired-runner-config-is-captured-once-by-agent-mcp-registration
-  (with-redefs [remote/config-from-env
-                (constantly {:url "https://broker.invalid"
-                             :runner-id "runner-a"
-                             :token "synthetic-token"})]
-    (let [add (get (#'control-cmd/mcp-commands
-                     :codex "/home/example/.config/codex") :add)]
-      (is (= ["--env" "CCH_CONTROL_BROKER_URL=https://broker.invalid"
-              "--env" "CCH_CONTROL_RUNNER_ID=runner-a"
-              "--env" "CCH_CONTROL_RUNNER_TOKEN=synthetic-token"]
-             (subvec add 7 13)))
-      (is (= ["cch" "--" "cch" "control" "mcp"]
-             (subvec add 13))))))
+(deftest provider-mcp-uses-absolute-cch-and-does-not-copy-runner-token
+  (let [add (get (#'control-cmd/mcp-commands
+                   :codex "/home/example/.config/codex" "/opt/cch/bin/cch"
+                   "/home/example/.config/cch/control-runner.json") :add)]
+    (is (= ["cch" "--" "/opt/cch/bin/cch" "control" "mcp"]
+           (subvec add 9)))
+    (is (not-any? #(re-find #"TOKEN|synthetic-token" %) add))))

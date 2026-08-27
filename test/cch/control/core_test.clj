@@ -61,7 +61,7 @@
   (let [deliveries (atom {})
         sent (atom nil)
         route-id "claude:30000000-0000-0000-0000-00000000000a"]
-    (with-redefs [remote/config-from-env
+    (with-redefs [remote/config
                   (constantly {:url "https://broker.invalid"
                                :runner-id "runner-a" :token "synthetic"})
                   remote/sessions #(throw (ex-info "offline"
@@ -91,7 +91,7 @@
   (let [deliveries (atom {})
         enqueued (atom [])
         target "codex:30000000-0000-0000-0000-00000000000b"]
-    (with-redefs [remote/config-from-env
+    (with-redefs [remote/config
                   (constantly {:url "https://broker.invalid"
                                :runner-id "runner-a" :token "synthetic"})
                   remote/sessions

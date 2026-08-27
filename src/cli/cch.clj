@@ -62,7 +62,7 @@
    ["doctor"    {:desc "Report per-agent federation wiring on this box"
                  :fn   #'doctor/run
                  :opts [[nil "--cwd DIR" "Scope the codex trust check to DIR"]]}]
-   ["control"   {:desc "Native Claude/Codex session routing (POC)"
+   ["control"   {:desc "Native multi-agent session routing"
                  :fn   #'control-cmd/run
                  :raw  true}]
    ["serve"     {:desc "Run the HTTP dispatcher + web dashboard"

@@ -25,6 +25,17 @@
     (is (str/includes? unit "/home/u/code%%x"))
     (is (str/includes? unit "/home/u/100%%/bin"))))
 
+(deftest render-plist-runs-package-managed-codex-with-complete-environment
+  (let [plist (service/render-plist "/opt/homebrew/bin/codex"
+                                    "/Users/example/.config/codex"
+                                    "/Users/example"
+                                    "/opt/homebrew/bin:/usr/bin")]
+    (is (str/includes? plist "<string>/opt/homebrew/bin/codex</string>"))
+    (is (str/includes? plist "<string>/Users/example/.config/codex</string>"))
+    (is (str/includes? plist "<string>/opt/homebrew/bin:/usr/bin</string>"))
+    (is (str/includes? plist "<string>app-server</string>"))
+    (is (not (str/includes? plist "--remote-control")))))
+
 (deftest install-writes-enables-and-starts-an-inactive-user-service
   (let [home (str (fs/create-temp-dir {:prefix "cch-codex-service-"}))
         calls (atom [])
@@ -153,17 +164,49 @@
       (finally
         (fs/delete-tree home)))))
 
-(deftest install-does-nothing-outside-linux
+(deftest install-bootstraps-macos-launchagent
+  (let [home (str (fs/create-temp-dir {:prefix "cch-codex-macos-service-"}))
+        calls (atom [])
+        ready (atom [])]
+    (try
+      (let [result
+            (service/install!
+              {:os-name "Mac OS X" :home home
+               :codex-home "/Users/example/.config/codex"
+               :path "/opt/homebrew/bin:/usr/bin" :uid "501"
+               :resolve-command
+               (fn [command _]
+                 (get {"codex" "/opt/homebrew/bin/codex"
+                       "launchctl" "/bin/launchctl"} command))
+               :run-command
+               (fn [argv]
+                 (swap! calls conj argv)
+                 {:exit (if (= "print" (second argv)) 1 0)
+                  :out "" :err ""})
+               :wait-ready #(do (swap! ready conj %) true)})
+            plist-path (service/service-path :macos home)]
+        (is (= :installed (:status result)))
+        (is (fs/exists? plist-path))
+        (is (= [["/bin/launchctl" "print"
+                 (str "gui/501/" service/macos-label)]
+                ["/bin/launchctl" "bootstrap" "gui/501" plist-path]]
+               @calls))
+        (is (= ["/Users/example/.config/codex/app-server-control/app-server-control.sock"]
+               @ready)))
+      (finally
+        (fs/delete-tree home)))))
+
+(deftest install-does-nothing-outside-linux-or-macos
   (let [called? (atom false)
         result (service/install!
-                 {:os-name "Mac OS X"
+                 {:os-name "Windows 11"
                   :home "/home/example"
                   :codex-home "/home/example/.codex"
                   :path "/usr/bin"
                   :resolve-command (fn [& _] (reset! called? true))
                   :run-command (fn [& _] (reset! called? true))
                   :wait-ready (fn [& _] (reset! called? true))})]
-    (is (= {:status :unsupported :reason :requires-linux-systemd} result))
+    (is (= {:status :unsupported :reason :requires-systemd-or-launchd} result))
     (is (false? @called?))))
 
 (deftest failed-systemctl-command-is-actionable

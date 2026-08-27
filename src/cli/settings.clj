@@ -190,26 +190,29 @@
 
 (defn add-control-registration-entry!
   "Install the lightweight SessionStart registration hook used by the native
-  control-plane POC. The hook inherits Claude's per-session inbox environment,
+  control plane. The hook inherits Claude's per-session inbox environment,
   writes it to cch's local-only registry, and exits. Reinstall is idempotent."
-  [settings-path]
-  (let [settings (read-settings settings-path)
-        entries  (get-in settings [:hooks :SessionStart] [])
-        strip-registration
-        (fn [entry]
-          (let [kept (vec (remove #(= control-registration-tag (:__cch %))
-                                  (:hooks entry)))]
-            (when (seq kept) (assoc entry :hooks kept))))
-        filtered (vec (keep strip-registration entries))
-        hook      {:type "command"
-                   :command "cch control register-claude"
-                   :async true
-                   :timeout 30
-                   :__cch control-registration-tag}
-        updated   (assoc-in settings [:hooks :SessionStart]
-                            (conj filtered {:hooks [hook]}))]
-    (write-settings! settings-path updated)
-    updated))
+  ([settings-path]
+   (add-control-registration-entry! settings-path
+                                    "cch control register-claude"))
+  ([settings-path command]
+   (let [settings (read-settings settings-path)
+         entries  (get-in settings [:hooks :SessionStart] [])
+         strip-registration
+         (fn [entry]
+           (let [kept (vec (remove #(= control-registration-tag (:__cch %))
+                                   (:hooks entry)))]
+             (when (seq kept) (assoc entry :hooks kept))))
+         filtered (vec (keep strip-registration entries))
+         hook      {:type "command"
+                    :command command
+                    :async true
+                    :timeout 30
+                    :__cch control-registration-tag}
+         updated   (assoc-in settings [:hooks :SessionStart]
+                             (conj filtered {:hooks [hook]}))]
+     (write-settings! settings-path updated)
+     updated)))
 
 (defn remove-hook-entry!
   "Remove a prompt or agent cch-owned entry by hook-name. Scans all event types

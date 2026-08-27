@@ -38,7 +38,8 @@
    ;; rather than an env var because the JVM cannot set its own env, so
    ;; this holds however the tests are started.
    :jvm-opts    ["-Dcch.db.path=target/test-events.db"
-                 "-Dcch.config.path=target/test-config.yaml"]
+                 "-Dcch.config.path=target/test-config.yaml"
+                 "-Dcch.control.pairing.path=target/test-control-runner.json"]
    :exec-fn     cognitect.test-runner.api/test
    :exec-args   {:dirs ["test"]}}
 

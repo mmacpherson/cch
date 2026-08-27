@@ -30,7 +30,7 @@
      :errors (vec (keep :error [claude-result codex-result]))}))
 
 (defn- remote-presence []
-  (when-let [config (remote/config-from-env)]
+  (when-let [config (remote/config)]
     (try
       {:config config :sessions (remote/sessions config)}
       (catch Exception error
@@ -182,7 +182,7 @@
   (let [{:keys [target message source message-id] :as envelope}
         (validate-envelope request)
         local-ids (set (map :id (:sessions (list-local-sessions))))
-        config (remote/config-from-env)]
+        config (remote/config)]
     (if (or (contains? local-ids target)
             (nil? config)
             (nil? (remote-target config target)))

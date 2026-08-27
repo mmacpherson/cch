@@ -3,14 +3,16 @@
 This repository is testing a broader product identity: a multi-agent local
 execution control plane. The first gate deliberately proved native
 Claude-to-Codex, Codex-to-Claude, and Codex-to-Codex text routing on one machine.
-The second gate adds two paired runners and a disposable broker before a hosted
-service, web UI, or data-federation redesign is built.
+The second gate added two paired runners and a disposable broker before a
+hosted service, web UI, or data-federation redesign. Both physical-machine
+gates passed; the implementation is now being hardened into the production
+foundation described below.
 
-The POC does not wrap terminals or launch agents. Claude sessions publish their
-documented per-session inbox to a separate local SQLite `control.db` from an
-asynchronous `SessionStart` hook, so registration does not delay agent startup.
-Codex sessions are discovered and addressed through the shared app-server
-daemon. A PluMCP stdio server exposes only three operations:
+The POC does not wrap terminals or launch provider agent sessions. Claude
+sessions publish their documented per-session inbox to a separate local SQLite
+`control.db` from an asynchronous `SessionStart` hook, so registration does not
+delay agent startup. Codex sessions are discovered and addressed through the
+shared app-server daemon. A PluMCP stdio server exposes only three operations:
 `list_sessions`, `get_session`, and `send_message`.
 
 ## One-time setup
@@ -23,23 +25,22 @@ cch control install
 
 The command installs one global Claude registration hook, registers the same
 local MCP server with Claude and Codex, installs a narrowly matched Codex
-`PreToolUse` caller-binding hook, and, on Linux, installs and starts a systemd
-user service for the package-managed Codex binary:
+`PreToolUse` caller-binding hook, and installs and starts a systemd user service
+or macOS LaunchAgent for the package-managed Codex binary:
 
 ```text
 codex app-server --listen unix://
 ```
 
 This local service does not use Codex's standalone shell-script installer or
-updater, and it does not enable Codex Remote Control. Starting an agent after
-that has no cch-specific pairing step and no additional provider login: each
-native CLI continues to use its own existing account credentials. The service
-captures the install-time `PATH` so its Codex threads can start the configured
-cch MCP process. The MCP registrations also receive the resolved `CODEX_HOME`,
-so they find the same owner-only app-server socket even when Codex uses a
-non-default config directory. On platforms without systemd, start the same
-local app-server command with an OS-native supervisor before running the smoke
-test.
+updater. It does not change Codex Remote Control configuration. Starting an
+agent after that has no cch-specific pairing step and no additional provider
+login: each native CLI continues to use its own existing account credentials.
+Hooks and MCP registrations use the absolute installed `cch` executable and
+receive the resolved `CODEX_HOME`, so service-launched agents do not depend on
+an interactive shell's `PATH` and find the same owner-only app-server socket.
+On platforms without systemd or launchd, start the same local app-server
+command with an OS-native supervisor before running the smoke test.
 
 For this POC, start Codex sessions as clients of the shared app-server:
 
@@ -78,23 +79,24 @@ export CCH_CONTROL_RUNNER_TOKENS='{"runner-a":"replace-with-random-token-a","run
 cch control broker --host 127.0.0.1 --port 8787
 ```
 
-Configure each machine once with its own values. The HTTPS URL is the private
-overlay URL that forwards to the broker's loopback listener:
+Pair each machine once with its own values. The HTTPS URL is the private overlay
+URL that forwards to the broker's loopback listener:
 
 ```bash
 export CCH_CONTROL_BROKER_URL='https://broker-name.example-tailnet.ts.net'
 export CCH_CONTROL_RUNNER_ID='runner-a'
 export CCH_CONTROL_RUNNER_TOKEN='replace-with-random-token-a'
 
-cch control install
-cch control runner
+cch control pair
 ```
 
-`control install` captures the three pairing values in the owner-local Claude
-and Codex MCP registrations. Starting dozens of later agent sessions requires
-no cch authentication or pairing chore. `control runner` is manually
-supervised during this gate; installing it as an OS service is deliberately a
-post-gate production task.
+`control pair` atomically stores the three values in an owner-only
+`control-runner.json` outside the repository and installs the outbound runner
+as a systemd user service or macOS LaunchAgent. The token is not copied into
+provider MCP definitions or service files. Hooks, MCP processes, and the runner
+all use the same local configuration. Starting dozens of later agent sessions
+requires no cch authentication or pairing chore. Re-running setup never
+restarts an active runner or shared Codex app-server implicitly.
 
 The runner refreshes only `id`, agent family, availability, and coarse native
 status. It omits names, cwd values, PIDs, sockets, provider credentials, and
@@ -104,8 +106,20 @@ body after a terminal acknowledgement or expiry. Pairing tokens are never
 written to this repository or printed by the broker.
 
 Unsetting the three `CCH_CONTROL_*` runner values returns cch to local-only
-routing. Stopping the runner or broker does not stop, wrap, or alter any native
-Claude or Codex session.
+routing only when there is no saved pairing file. Remove or replace that local
+file deliberately to unpair a machine. Stopping the runner or broker does not
+stop, wrap, or alter any native Claude or Codex session.
+
+Run the sanitized capability check at any time:
+
+```bash
+cch control doctor
+```
+
+It checks Claude and Codex discovery, generates the installed Codex CLI's own
+app-server schema to verify `thread/list` and `thread/queue/add`, and reports
+pairing and runner supervision. It emits counts and versions, not route ids,
+paths, broker identities, tokens, transcripts, or message bodies.
 
 ## Manual smoke test
 
@@ -158,8 +172,11 @@ Synthetic Codex-to-Claude delivery and its Claude-to-Codex reply cross the
 broker, acknowledgements remove message bodies, duplicate ids are suppressed,
 unacknowledged messages stop after three attempts, leases and envelopes expire,
 and registration recovers after lease loss. This harness deliberately uses
-loopback and synthetic routes. A real two-machine Tailscale HTTPS exercise is
-still required before the cross-machine gate is recorded as passed.
+loopback and synthetic routes. The same request/reply matrix then passed across
+two physical machines over tailnet-private HTTPS, including native
+Codex-to-Codex and Codex-to-Claude delivery, reconnect, acknowledgement, and
+duplicate suppression. Codex versions with different TUI repaint behavior
+preserved native delivery and thread persistence semantics.
 
 ## Security and privacy boundary
 
@@ -179,21 +196,21 @@ still required before the cross-machine gate is recorded as passed.
   are omitted from listing APIs and must never be sent to a future broker.
 - Message bodies and transcript previews are not persisted by cch. Delivery
   deduplication stores only a SHA-256 digest and routing metadata.
-- Cross-runner message bodies exist transiently in broker memory only. The
-  broker has no database; it stores neither provider credentials nor native
-  machine metadata. A persistent pairing credential identifies a runner, not
-  each agent session.
+- In the disposable broker, cross-runner message bodies exist transiently in
+  memory only. It stores neither provider credentials nor native machine
+  metadata. A persistent pairing credential identifies a runner, not each agent
+  session, and remains in one owner-only local file.
 - No private hostnames, private user identities, private repository names,
   OAuth client details, session transcripts, or real route IDs belong in this
   public repository.
 
-## Gate before hosted work
+## Hosted-work decision
 
-The local POC has passed its technical gate: all three direction pairs work
-with trustworthy source attribution, idempotent retries, clear stale-session
-failures, restart recovery, and no permission relay. The non-default Codex
-launch UX remains a product decision, not a routing uncertainty. The
-cross-runner implementation now passes its synthetic network harness; its gate
-remains open until the same request/reply matrix runs on two physical machines.
-Postgres, Google OIDC, the hosted switchboard, and federation migration remain
-downstream of those results.
+The architecture is a GO. Local and physical cross-machine tests passed with
+trustworthy source attribution, idempotent retries, clear stale-session
+failures, restart recovery, and no permission relay. Native local execution
+continues during runner or broker failure. The non-default Codex launch UX
+remains a product concern, not a routing uncertainty. Postgres broker storage,
+Google OIDC for the human webapp, and federation migration remain downstream
+production phases; provider credentials, approvals, transcripts, and terminal
+bytes remain outside that hosted boundary.

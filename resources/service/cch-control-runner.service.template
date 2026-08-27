@@ -1,0 +1,15 @@
+[Unit]
+Description=cch paired multi-agent control runner
+Documentation=https://github.com/mmacpherson/claude-code-hooks
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="PATH={{PATH}}"
+Environment="CCH_CONTROL_PAIRING_PATH={{PAIRING_PATH}}"
+ExecStart="{{CCH_BIN}}" control runner
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

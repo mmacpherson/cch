@@ -137,6 +137,15 @@
         (is (= 30 (:timeout hook)))
         (is (= "control-plane:claude-registration" (:__cch hook)))))))
 
+(deftest control-registration-accepts-an-absolute-runtime-command
+  (with-tmp-settings
+    (fn [tmp]
+      (settings/add-control-registration-entry!
+        tmp "'/opt/cch runtime/bin/cch' control register-claude")
+      (is (= "'/opt/cch runtime/bin/cch' control register-claude"
+             (get-in (settings/read-settings tmp)
+                     [:hooks :SessionStart 0 :hooks 0 :command]))))))
+
 ;; --- Full cleanup ---
 
 (deftest test-remove-all-cch

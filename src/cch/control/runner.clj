@@ -1,5 +1,5 @@
 (ns cch.control.runner
-  "Outbound polling runner for the disposable cross-machine POC.
+  "Outbound polling runner for cross-machine native routing.
 
   A runner refreshes sanitized local presence, pulls messages addressed to its
   routes, submits them through local native adapters, and acknowledges only
@@ -48,7 +48,7 @@
 
 (defn start!
   "Start a daemon polling thread. The optional dependency map defaults to the
-  real local control adapters but remains injectable for POC tests."
+  real local control adapters but remains injectable for integration tests."
   ([config]
    (start! config
            {:list-local-sessions
