@@ -156,6 +156,19 @@ Destination-side durable deduplication still prevents a replay from becoming a
 second native submission. Terminal metadata is retained for 24 hours by
 default and then removed, bounding the idempotency ledger.
 
+The checked-in container definition packages the same JVM artifact used by the
+host CLI without an installation script:
+
+```bash
+clj -T:build uber
+podman build -t cch-control:local -f Containerfile .
+```
+
+Run the broker container on the private network that can resolve Postgres,
+publish its HTTP port to host loopback only, and place Tailscale Serve in front
+of that loopback listener. Serve provides tailnet-only HTTPS; Funnel is not
+required and should remain disabled.
+
 Run the sanitized capability check at any time:
 
 ```bash
