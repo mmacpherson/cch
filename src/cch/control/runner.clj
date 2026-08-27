@@ -12,6 +12,12 @@
   #{:invalid-message :invalid-route :message-too-large :stale-session
     :unknown-session :unsupported-agent})
 
+(defn- report-loop-error! [error]
+  (binding [*out* *err*]
+    (println (str "cch control runner: "
+                  (or (some-> error ex-data :type name) "unexpected-error")
+                  ": " (.getMessage error)))))
+
 (defn tick!
   "Run one reconnect-safe exchange. Dependencies are explicit so the transport
   and native delivery boundary can be exercised without real agent sessions."
@@ -52,6 +58,7 @@
   ([config dependencies]
    (let [stopping? (atom false)
          poll-ms (or (:poll-ms config) default-poll-ms)
+         last-error (atom nil)
          thread (Thread.
                   ^Runnable
                   (fn []
@@ -59,7 +66,13 @@
                       (while (not @stopping?)
                         (try
                           (tick! config dependencies)
-                          (catch Exception _ nil))
+                          (reset! last-error nil)
+                          (catch Exception error
+                            (let [signature [(some-> error ex-data :type)
+                                             (.getMessage error)]]
+                              (when (not= signature @last-error)
+                                (report-loop-error! error)
+                                (reset! last-error signature)))))
                         (Thread/sleep poll-ms))
                       (catch InterruptedException _ nil))))]
      (.setName thread "cch-control-runner")

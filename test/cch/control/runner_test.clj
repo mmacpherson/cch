@@ -4,7 +4,8 @@
             [cch.control.remote :as remote]
             [cch.control.runner :as runner]
             [clojure.test :refer [deftest is]])
-  (:import [java.net ServerSocket]))
+  (:import [java.net ServerSocket]
+           [java.util.concurrent CountDownLatch TimeUnit]))
 
 (defn- free-port []
   (with-open [socket (ServerSocket. 0)]
@@ -80,3 +81,36 @@
                                                             {:type :codex-daemon-unavailable}))})))
       (is (= [(route "codex" "b")] @registered))
       (is (empty? @acked)))))
+
+(deftest polling-loop-reports-distinct-errors-and-recovers
+  (let [calls (atom 0)
+        reported (atom [])
+        completed (CountDownLatch. 1)
+        report-var (ns-resolve 'cch.control.runner 'report-loop-error!)]
+    (with-redefs-fn
+      {#'runner/tick!
+       (fn [_ _]
+         (let [call (swap! calls inc)]
+           (case call
+             (1 2 4) (throw (ex-info "broker unavailable"
+                                     {:type :broker-unavailable}))
+             5 (do (.countDown completed) {:delivered 0})
+             {:delivered 0})))
+       report-var
+       (fn [error]
+         (swap! reported conj [(:type (ex-data error)) (.getMessage error)]))}
+      (fn []
+        (let [{:keys [thread stop]}
+              (runner/start! {:poll-ms 1}
+                             {:list-local-sessions (constantly {:sessions []})
+                              :deliver-local! identity})]
+          (try
+            (is (.await completed 1 TimeUnit/SECONDS))
+            (finally
+              (stop)
+              (.join thread 1000))))))
+    ;; Consecutive repetitions are suppressed. A successful tick resets the
+    ;; signature, so the same later outage remains visible to the operator.
+    (is (= [[:broker-unavailable "broker unavailable"]
+            [:broker-unavailable "broker unavailable"]]
+           @reported))))
