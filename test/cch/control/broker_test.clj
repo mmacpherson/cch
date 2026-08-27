@@ -142,6 +142,17 @@
                                          :sessions runner-b-sessions}))))
     (is (= 2 (count (broker/sessions b))))))
 
+(deftest default-lease-outlives-slow-native-discovery
+  (let [clock (atom 30000)
+        b (broker/new-broker runner-tokens {:now-fn #(deref clock)})]
+    (register-pair! b)
+    ;; Real Claude + Codex discovery took 13-15 seconds per runner in the
+    ;; physical-machine POC. Sequential refreshes must comfortably overlap.
+    (swap! clock + 30000)
+    (is (= 3 (count (broker/sessions b))))
+    (swap! clock + 30001)
+    (is (empty? (broker/sessions b)))))
+
 (deftest source-routes-cannot-be-spoofed-by-another-runner
   (let [b (broker/new-broker runner-tokens)]
     (register-pair! b)

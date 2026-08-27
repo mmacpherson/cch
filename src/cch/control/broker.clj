@@ -10,7 +10,7 @@
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest]))
 
-(def ^:const default-lease-ms 15000)
+(def ^:const default-lease-ms 60000)
 (def ^:const default-message-ttl-ms 30000)
 (def ^:const default-ack-timeout-ms 2000)
 (def ^:const default-max-attempts 3)
