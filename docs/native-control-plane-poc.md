@@ -112,6 +112,50 @@ routing only when there is no saved pairing file. Remove or replace that local
 file deliberately to unpair a machine. Stopping the runner or broker does not
 stop, wrap, or alter any native Claude or Codex session.
 
+## Production Postgres broker
+
+When `CCH_CONTROL_DATABASE_URL` is set, the same broker command replaces the
+disposable route directory with Postgres-backed leases and message metadata.
+If it is unset, the broker intentionally stays in memory-only development
+mode. A shared Postgres cluster is appropriate, but cch should own an isolated
+database or schema and a role that cannot access other applications' tables.
+For example, run the privileged setup once with values chosen outside this
+repository:
+
+```sql
+CREATE ROLE cch_control_app LOGIN PASSWORD 'replace-outside-source-control';
+GRANT CONNECT ON DATABASE application_data TO cch_control_app;
+CREATE SCHEMA cch_control AUTHORIZATION cch_control_app;
+```
+
+Then configure the broker process through private deployment environment, not
+checked-in files:
+
+```bash
+export CCH_CONTROL_DATABASE_URL='jdbc:postgresql://db.internal/application_data'
+export CCH_CONTROL_DATABASE_USER='cch_control_app'
+export CCH_CONTROL_DATABASE_PASSWORD='replace-outside-source-control'
+export CCH_CONTROL_DATABASE_SCHEMA='cch_control'       # default
+export CCH_CONTROL_DATABASE_POOL_SIZE='4'              # clamped to 1..8
+```
+
+Startup takes a transaction-scoped Postgres advisory lock and applies numbered
+migrations inside the pre-created schema. The application role needs to own
+only that schema; it does not need cluster administration or access to other
+schemas. The broker pool defaults to four connections and enables PostgreSQL
+TCP keepalive.
+
+Postgres is authoritative for runner leases, sanitized route ownership,
+message ids, content digests, delivery status, attempt counts, and expiry.
+There is deliberately no message-body, token, credential, transcript, cwd,
+socket, or provider-native metadata column. Message text remains in the active
+broker process for a maximum of 30 seconds. After a broker restart, a pending
+metadata row moves to `awaiting-replay`; an identical source retry rehydrates
+the transient body, while a different body or route with that id is rejected.
+Destination-side durable deduplication still prevents a replay from becoming a
+second native submission. Terminal metadata is retained for 24 hours by
+default and then removed, bounding the idempotency ledger.
+
 Run the sanitized capability check at any time:
 
 ```bash

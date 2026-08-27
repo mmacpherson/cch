@@ -1,6 +1,6 @@
 (ns cch.control.broker-http
   "Small JSON/HTTP boundary around the disposable in-memory broker."
-  (:require [cch.control.broker :as broker]
+  (:require [cch.control.broker-api :as broker]
             [cheshire.core :as json]
             [clojure.string :as str]
             [org.httpkit.server :as httpkit]))
@@ -47,42 +47,42 @@
     (try
       (cond
         (and (= :get request-method) (= "/health" uri))
-        (json-response 200 (broker/summary b))
+        (json-response 200 (broker/broker-summary b))
 
         (and (= :post request-method) (= "/v1/runners/register" uri))
         (let [payload (read-json request)]
           (json-response 200
-                         (broker/register! b (merge payload
-                                                    (credentials request payload)))))
+                         (broker/register-runner!
+                           b (merge payload (credentials request payload)))))
 
         (and (= :get request-method) (= "/v1/sessions" uri))
         (let [{:keys [runner-id token]} (credentials request {})]
-          (broker/authorize! b runner-id token)
-          (json-response 200 {:sessions (broker/sessions b)}))
+          (broker/authorize-runner! b runner-id token)
+          (json-response 200 {:sessions (broker/active-sessions b)}))
 
         (and (= :post request-method) (= "/v1/messages" uri))
         (let [payload (read-json request)]
           (json-response 202
-                         (broker/enqueue! b (merge payload
-                                                  (credentials request payload)))))
+                         (broker/enqueue-message!
+                           b (merge payload (credentials request payload)))))
 
         (and (= :post request-method) (= "/v1/runners/poll" uri))
         (let [payload (read-json request)]
           (json-response 200
-                         (broker/poll! b (merge payload
-                                               (credentials request payload)))))
+                         (broker/poll-messages!
+                           b (merge payload (credentials request payload)))))
 
         (and (= :post request-method) (= "/v1/messages/ack" uri))
         (let [payload (read-json request)]
           (json-response 200
-                         (broker/ack! b (merge payload
-                                              (credentials request payload)))))
+                         (broker/ack-message!
+                           b (merge payload (credentials request payload)))))
 
         (and (= :post request-method) (= "/v1/messages/status" uri))
         (let [payload (read-json request)
               {:keys [runner-id token]} (credentials request payload)]
-          (if-let [message (broker/message-status b runner-id token
-                                                  (:message-id payload))]
+          (if-let [message (broker/message-metadata
+                             b runner-id token (:message-id payload))]
             (json-response 200 {:message message})
             (json-response 404 {:type "unknown-message"
                                 :message "Unknown message"})))

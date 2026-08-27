@@ -5,7 +5,8 @@
   Native provider credentials and machine-local session metadata never enter
   this component. All mutation is serialized on the Broker value so enqueue,
   poll, acknowledgement, and duplicate detection are atomic."
-  (:require [cch.control.store :as store]
+  (:require [cch.control.broker-api :as api]
+            [cch.control.store :as store]
             [clojure.string :as str])
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest]))
@@ -42,7 +43,7 @@
 (defn- now [^Broker broker]
   ((:now-fn broker)))
 
-(defn- secure-equal? [a b]
+(defn secure-equal? [a b]
   (and (string? a)
        (string? b)
        (MessageDigest/isEqual (.getBytes ^String a StandardCharsets/UTF_8)
@@ -56,28 +57,28 @@
       (throw (ex-info "Runner authentication failed" {:type :unauthorized})))
     true))
 
-(defn- valid-label? [value]
+(defn valid-label? [value]
   (and (string? value)
        (<= 1 (count value) 512)
        (not (re-find #"[\p{Cntrl}]" value))))
 
-(defn- route-agent [route-id]
+(defn route-agent [route-id]
   (cond
     (str/starts-with? route-id "claude:") "claude"
     (str/starts-with? route-id "codex:") "codex"
     :else nil))
 
-(defn- sanitize-session [{:keys [id status available]}]
+(defn sanitize-session [{:keys [id status available]}]
   (when-let [agent (and (valid-label? id) (route-agent id))]
     {:id id
      :agent agent
      :status (if (valid-label? status) status "unknown")
      :available (boolean available)}))
 
-(defn- clamp [value lower upper]
+(defn clamp [value lower upper]
   (-> (or value lower) (max lower) (min upper)))
 
-(defn- terminal-status? [status]
+(defn terminal-status? [status]
   (contains? #{"delivered" "failed" "expired"} status))
 
 (defn- expire-state [state timestamp max-attempts]
@@ -317,3 +318,23 @@
      :runner-count (count (:runners state))
      :route-count (count (:routes state))
      :message-count (count (:messages state))}))
+
+(extend-type Broker
+  api/ControlBroker
+  (authorize-runner! [b runner-id token]
+    (authorize! b runner-id token))
+  (register-runner! [b request]
+    (register! b request))
+  (active-sessions [b]
+    (sessions b))
+  (enqueue-message! [b request]
+    (enqueue! b request))
+  (poll-messages! [b request]
+    (poll! b request))
+  (ack-message! [b request]
+    (ack! b request))
+  (message-metadata [b runner-id token message-id]
+    (message-status b runner-id token message-id))
+  (broker-summary [b]
+    (summary b))
+  (close-broker! [_] nil))

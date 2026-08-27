@@ -2,7 +2,9 @@
   "CLI entrypoint for native multi-agent session routing."
   (:require [cch.control.claude :as claude]
             [cch.control.broker :as broker]
+            [cch.control.broker-api :as broker-api]
             [cch.control.broker-http :as broker-http]
+            [cch.control.broker-postgres :as broker-postgres]
             [cch.control.codex-binding :as codex-binding]
             [cch.control.core :as control]
             [cch.control.doctor :as control-doctor]
@@ -234,13 +236,21 @@
 (defn- run-broker! [args]
   (let [{:keys [host port]} (parse-command-options args broker-options)
         tokens (broker-http/runner-tokens-from-env)
-        state (broker/new-broker tokens)
+        database (broker-postgres/database-config-from-env)
+        state (if database
+                (broker-postgres/new-broker tokens database)
+                (broker/new-broker tokens))
         server (broker-http/start! state {:host host :port port})]
-    (println (format "Disposable control broker listening on http://%s:%d" host port))
+    (println (format "Control broker listening on http://%s:%d" host port))
+    (println (if database
+               "Postgres route directory and message metadata enabled."
+               "Disposable in-memory route directory enabled."))
     (println "Terminate TLS with the private overlay; no provider credentials are accepted.")
     (println (format "%d paired runner credential(s) loaded from the environment."
                      (count tokens)))
-    (wait-until-shutdown! #((:stop server) :timeout 100))))
+    (wait-until-shutdown!
+      #(do ((:stop server) :timeout 100)
+           (broker-api/close-broker! state)))))
 
 (defn- run-runner! [args]
   (let [{:keys [poll-ms]} (parse-command-options args runner-options)
@@ -265,7 +275,7 @@
   (println "  sessions         List sanitized native session presence")
   (println "  get ROUTE        Get one session")
   (println "  send [options]   Send a native text message")
-  (println "  broker [options] Run the disposable in-memory POC broker")
+  (println "  broker [options] Run the private broker (Postgres when configured)")
   (println "  runner [options] Run one outbound paired runner")
   (println "  mcp              Run the PluMCP stdio server")
   (println "  register-claude  Internal SessionStart hook")
