@@ -9,11 +9,13 @@
             ["claude" "mcp" "remove" "cch" "--scope" "user"]
             ["claude" "mcp" "add" "--scope" "user" "cch"
              "--env" "CODEX_HOME=/home/example/.config/codex"
+             "--env" "CCH_MCP_CALLER=claude"
              "--" "cch" "control" "mcp"]]
            [:codex
             ["codex" "mcp" "remove" "cch"]
             ["codex" "mcp" "add" "--env"
              "CODEX_HOME=/home/example/.config/codex"
+             "--env" "CCH_MCP_CALLER=codex"
              "cch" "--" "cch" "control" "mcp"]]]]
     (testing (name agent)
       (let [calls (atom [])]
@@ -43,5 +45,6 @@
               ["codex" "mcp" "get" "cch"]
               ["codex" "mcp" "add" "--env"
                "CODEX_HOME=/home/example/.codex"
+               "--env" "CCH_MCP_CALLER=codex"
                "cch" "--" "cch" "control" "mcp"]]
              @calls)))))

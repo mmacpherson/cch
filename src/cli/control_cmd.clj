@@ -1,6 +1,7 @@
 (ns cli.control-cmd
   "CLI entrypoint for the native control-plane proof of concept."
   (:require [cch.control.claude :as claude]
+            [cch.control.codex-binding :as codex-binding]
             [cch.control.core :as control]
             [cch.subprocess :as subprocess]
             [cheshire.core :as json]
@@ -33,13 +34,26 @@
      :remove ["claude" "mcp" "remove" "cch" "--scope" "user"]
      :add ["claude" "mcp" "add" "--scope" "user" "cch"
            "--env" (str "CODEX_HOME=" codex-home)
+           "--env" "CCH_MCP_CALLER=claude"
            "--" "cch" "control" "mcp"]}
 
     :codex
     {:get ["codex" "mcp" "get" "cch"]
      :remove ["codex" "mcp" "remove" "cch"]
      :add ["codex" "mcp" "add" "--env" (str "CODEX_HOME=" codex-home)
+           "--env" "CCH_MCP_CALLER=codex"
            "cch" "--" "cch" "control" "mcp"]}))
+
+(def ^:private codex-binding-block "cch-control-plane")
+
+(defn- install-codex-binding-hook! [codex-home]
+  (codex-settings/install-hook!
+    (str codex-home "/config.toml")
+    codex-binding-block
+    [{:event "PreToolUse"
+      :matcher codex-binding/tool-name
+      :command "cch control bind-codex-source"
+      :timeout 30}]))
 
 (defn- run-mcp-command! [agent action argv]
   (let [result (subprocess/run argv)]
@@ -77,6 +91,9 @@
                          :installed "installed"
                          :updated "configuration reconciled"
                          nil "CLI not found; skipped"))))
+    (when (command-available? "codex")
+      (install-codex-binding-hook! codex-home)
+      (println "Codex caller binding hook: installed"))
     (println)
     (if (command-available? "codex")
       (let [{:keys [status path]} (codex-service/install!)]
@@ -103,6 +120,11 @@
     (claude/register-from-hook! payload)
     nil))
 
+(defn- bind-codex-source! []
+  (-> (json/parse-string (slurp *in*) true)
+      codex-binding/bind!
+      print-json))
+
 (defn- send! [args]
   (let [{:keys [options errors summary]} (cli/parse-opts args send-options)]
     (when (seq errors)
@@ -125,7 +147,8 @@
   (println "  get ROUTE        Get one session")
   (println "  send [options]   Send a native text message")
   (println "  mcp              Run the PluMCP stdio server")
-  (println "  register-claude  Internal SessionStart hook"))
+  (println "  register-claude  Internal SessionStart hook")
+  (println "  bind-codex-source Internal PreToolUse hook"))
 
 (defn run [& args]
   (let [[command & more] args]
@@ -136,4 +159,5 @@
       "send" (send! more)
       "mcp" ((requiring-resolve 'cch.control.mcp/-main))
       "register-claude" (register-claude!)
+      "bind-codex-source" (bind-codex-source!)
       (print-usage))))

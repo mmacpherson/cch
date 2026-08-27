@@ -6,7 +6,10 @@
   than message text."
   (:require [babashka.fs :as fs]
             [next.jdbc :as jdbc]
-            [next.jdbc.result-set :as rs]))
+            [next.jdbc.result-set :as rs])
+  (:import [java.math BigInteger]
+           [java.nio.charset StandardCharsets]
+           [java.security MessageDigest]))
 
 (def ^:const path-property "cch.control.db.path")
 
@@ -30,7 +33,11 @@
         "ON control_sessions(agent, native_id)")
    (str "CREATE TABLE IF NOT EXISTS control_deliveries ("
         "message_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
-        "content_sha256 TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)")])
+        "content_sha256 TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)")
+   (str "CREATE TABLE IF NOT EXISTS control_codex_bindings ("
+        "tool_use_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
+        "message_id TEXT, content_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL,"
+        "consumed_at INTEGER)")])
 
 (defonce ^:private ensured-paths (atom #{}))
 
@@ -61,6 +68,14 @@
   (ensure-db!)
   (jdbc/execute! (jdbc/get-datasource (datasource)) sql-params
                  {:builder-fn rs/as-unqualified-maps}))
+
+(defn content-digest
+  "SHA-256 for dedupe and source-binding records. Message bodies are never
+  persisted in the operational database."
+  [value]
+  (let [digest (.digest (MessageDigest/getInstance "SHA-256")
+                        (.getBytes ^String value StandardCharsets/UTF_8))]
+    (format "%064x" (BigInteger. 1 digest))))
 
 (defn upsert-claude!
   [{:keys [session-id cwd name socket-path auth-token pid]}]
@@ -109,3 +124,46 @@
     ["INSERT OR IGNORE INTO control_deliveries (message_id, source, target, content_sha256, status, created_at) VALUES (?, ?, ?, ?, ?, ?)"
      message-id source target content-sha256 status (System/currentTimeMillis)])
   (delivery message-id))
+
+(defn record-codex-binding!
+  "Record the trusted Codex hook observation that precedes one cch MCP call.
+  Only routing metadata and a message digest cross this boundary."
+  [{:keys [tool-use-id session-id target message-id message]}]
+  (let [now (System/currentTimeMillis)]
+    ;; Binding rows are immutable: replaying a hook event must never make a
+    ;; consumed proof valid again.
+    (execute! ["DELETE FROM control_codex_bindings WHERE created_at<?"
+               (- now (* 24 60 60 1000))])
+    (let [result (first
+                   (execute!
+                     [(str "INSERT OR IGNORE INTO control_codex_bindings "
+                           "(tool_use_id, source, target, message_id, content_sha256, created_at, consumed_at) "
+                           "VALUES (?, ?, ?, ?, ?, ?, NULL)")
+                      tool-use-id (str "codex:" session-id) target message-id
+                      (content-digest message) now]))]
+      (if (= 1 (:next.jdbc/update-count result))
+        tool-use-id
+        (throw (ex-info "Codex source binding already exists"
+                        {:type :duplicate-codex-binding}))))))
+
+(defn claim-codex-binding!
+  "Atomically consume a recent binding matching the MCP envelope. Returns the
+  authoritative Codex route, or nil for a missing, expired, mismatched, or
+  replayed proof."
+  [{:keys [tool-use-id target message-id message max-age-ms]
+    :or {max-age-ms (* 30 60 1000)}}]
+  (let [now (System/currentTimeMillis)
+        result (first
+                 (execute!
+                   [(str "UPDATE control_codex_bindings SET consumed_at=? "
+                         "WHERE tool_use_id=? AND target=? "
+                         "AND ((message_id IS NULL AND ? IS NULL) OR message_id=?) "
+                         "AND content_sha256=? AND consumed_at IS NULL AND created_at>=?")
+                    now tool-use-id target message-id message-id
+                    (content-digest message) (- now max-age-ms)]))]
+    (when (= 1 (:next.jdbc/update-count result))
+      (:source
+        (first
+          (execute!
+            ["SELECT source FROM control_codex_bindings WHERE tool_use_id=?"
+             tool-use-id]))))))

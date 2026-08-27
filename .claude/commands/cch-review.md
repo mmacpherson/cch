@@ -77,4 +77,4 @@ Only include sections where there is an actual finding.
 ## Notes for follow-up
 
 - **Hook logic / regex changes**: open a session in `~/projects/claude-code-hooks`
-- **Personal config** (`global-allowed-paths`, per-repo `.cch-config.yaml`): edit in `~/projects/private-monorepo` — these must **not** be committed to this public repo
+- **Personal config** (`global-allowed-paths`, per-repo `.cch-config.yaml`): edit in the private configuration repository — these must **not** be committed to this public repo

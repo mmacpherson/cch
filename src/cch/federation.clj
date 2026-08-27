@@ -37,9 +37,12 @@
 ;; --- Global config (read directly to avoid a cch.config load cycle) ---
 
 (defn- global-config-path []
-  (str (or (System/getenv "XDG_CONFIG_HOME")
-           (str (System/getProperty "user.home") "/.config"))
-       "/cch/config.yaml"))
+  ;; Keep this property in sync with cch.config without requiring that
+  ;; namespace and recreating the federation/log/config dependency cycle.
+  (or (System/getProperty "cch.config.path")
+      (str (or (System/getenv "XDG_CONFIG_HOME")
+               (str (System/getProperty "user.home") "/.config"))
+           "/cch/config.yaml")))
 
 (defn- load-global-config
   "Parsed global config map, or nil if missing/malformed. Federation must

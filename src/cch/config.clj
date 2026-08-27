@@ -41,12 +41,15 @@
             [cch.config-db :as cdb]
             [cli.registry :as registry]))
 
+(def ^:const path-property "cch.config.path")
+
 (defn global-config-path
   "Returns the global config path, respecting XDG_CONFIG_HOME."
   []
-  (str (or (System/getenv "XDG_CONFIG_HOME")
-           (str (System/getProperty "user.home") "/.config"))
-       "/cch/config.yaml"))
+  (or (System/getProperty path-property)
+      (str (or (System/getenv "XDG_CONFIG_HOME")
+               (str (System/getProperty "user.home") "/.config"))
+           "/cch/config.yaml")))
 
 (defn find-config-up
   "Walk up from dir looking for filename. Returns path or nil.

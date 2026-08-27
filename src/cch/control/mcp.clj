@@ -1,6 +1,7 @@
 (ns cch.control.mcp
   "PluMCP stdio facade for cch's native session directory and router."
-  (:require [cch.control.core :as control]
+  (:require [cch.control.codex-binding :as codex-binding]
+            [cch.control.core :as control]
             [cheshire.core :as json]
             [plumcp.core.api.entity-gen :as eg]
             [plumcp.core.api.entity-support :as es]
@@ -11,6 +12,9 @@
 (defn- tool-result [value]
   (-> value json/generate-string eg/make-text-content vector
       eg/make-call-tool-result))
+
+(defn caller-agent []
+  (System/getenv "CCH_MCP_CALLER"))
 
 (defn ^{:mcp-name "list_sessions" :mcp-type :tool}
   list-sessions
@@ -38,12 +42,21 @@
            message
            ^{:doc "Stable UUID-like id for retries" :type "string" :required? false}
            message_id
-           ^{:doc "Source route id; normally inferred from the MCP process environment"
+           ^{:doc "Reserved Codex hook proof; callers must not supply this field"
              :type "string" :required? false}
-           source]}]
-  (tool-result
-    (control/send-message! {:target target :message message
-                            :message-id message_id :source source})))
+           source_proof]}]
+  (let [source (case (caller-agent)
+                 "codex" (codex-binding/claim-source!
+                           {:source-proof source_proof
+                            :target target
+                            :message-id message_id
+                            :message message})
+                 ;; Claude exposes its session identity to the MCP child.
+                 ;; Unknown/manual callers retain the explicit operator path.
+                 nil)]
+    (tool-result
+      (control/send-message! {:target target :message message
+                              :message-id message_id :source source}))))
 
 (def tools
   [(vs/make-tool-from-var #'list-sessions)

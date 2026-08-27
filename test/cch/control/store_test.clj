@@ -41,3 +41,35 @@
         (is (= "abc123" (:content_sha256 row)))
         (is (not-any? #(re-find #"(?i)message|content" (name %))
                       (remove #{:message_id :content_sha256} (keys row))))))))
+
+(deftest codex-bindings-are-envelope-bound-and-one-time
+  (with-temp-store
+    (fn [_]
+      (let [binding {:tool-use-id "tool-call-1"
+                     :session-id "thread-1"
+                     :target "claude:session-1"
+                     :message-id "message-1"
+                     :message "Synthetic ping"}]
+        (store/record-codex-binding! binding)
+        (is (nil? (store/claim-codex-binding!
+                    {:tool-use-id "tool-call-1"
+                     :target "claude:session-1"
+                     :message-id "message-1"
+                     :message "Different content"})))
+        (is (= "codex:thread-1"
+               (store/claim-codex-binding!
+                 {:tool-use-id "tool-call-1"
+                  :target "claude:session-1"
+                  :message-id "message-1"
+                  :message "Synthetic ping"})))
+        (is (nil? (store/claim-codex-binding!
+                    {:tool-use-id "tool-call-1"
+                     :target "claude:session-1"
+                     :message-id "message-1"
+                     :message "Synthetic ping"})))
+        (is (= :duplicate-codex-binding
+               (try
+                 (store/record-codex-binding! binding)
+                 nil
+                 (catch clojure.lang.ExceptionInfo error
+                   (:type (ex-data error))))))))))

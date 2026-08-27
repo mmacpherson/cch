@@ -4,9 +4,7 @@
             [cch.control.codex :as codex]
             [cch.control.store :as store]
             [clojure.string :as str])
-  (:import [java.math BigInteger]
-           [java.nio.charset StandardCharsets]
-           [java.security MessageDigest]
+  (:import [java.nio.charset StandardCharsets]
            [java.util UUID]))
 
 (def ^:const max-message-bytes (* 32 1024))
@@ -32,11 +30,6 @@
 
 (defn get-session [route-id]
   (some #(when (= route-id (:id %)) %) (:sessions (list-sessions))))
-
-(defn- sha256 [s]
-  (let [digest (.digest (MessageDigest/getInstance "SHA-256")
-                        (.getBytes ^String s StandardCharsets/UTF_8))]
-    (format "%064x" (BigInteger. 1 digest))))
 
 (defn inferred-source []
   (cond
@@ -75,7 +68,7 @@
                     {:type :message-too-large :max-bytes max-message-bytes})))
   (let [message-id (or message-id (str (UUID/randomUUID)))
         source (or (not-empty source) (inferred-source))
-        content-sha256 (sha256 message)]
+        content-sha256 (store/content-digest message)]
     (when-not (valid-envelope-label? message-id)
       (throw (ex-info "message_id must be 1-512 characters without control characters"
                       {:type :invalid-message})))

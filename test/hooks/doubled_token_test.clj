@@ -139,8 +139,8 @@
 (deftest check-edit-ignores-pre-existing-matches
   (testing "a match already in the file is not the edit's fault"
     (is (nil? (dt/check-edit "/tmp/x.md"
-                             "see sample-project here"
-                             "see sample-project there")))))
+                             "see Release-3-3-26 here"
+                             "see Release-3-3-26 there")))))
 
 (deftest check-edit-flags-introduced-artifact
   (let [r (dt/check-edit "/tmp/x.py" "get_b2_client()" "get_b2_b2_client()")]

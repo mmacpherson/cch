@@ -1,7 +1,6 @@
 (ns cch.agents.codex-test
   (:require [clojure.test :refer [deftest is testing]]
             [cch.agents.codex :as codex]
-            [cli.codex-settings :as cs]
             [babashka.fs :as fs]
             [clojure.string :as str]))
 
@@ -14,8 +13,8 @@
          (codex/dispatch-command "PreToolUse"))))
 
 (deftest dispatch-command-respects-host-port
-  (is (= "curl -s -X POST -H 'X-CCH-Agent: codex' --data-binary @- http://10.0.0.1:9999/dispatch/SessionStart"
-         (codex/dispatch-command "SessionStart" :host "10.0.0.1" :port 9999))))
+  (is (= "curl -s -X POST -H 'X-CCH-Agent: codex' --data-binary @- http://192.0.2.1:9999/dispatch/SessionStart"
+         (codex/dispatch-command "SessionStart" :host "192.0.2.1" :port 9999))))
 
 (deftest dispatch-command-sets-x-cch-agent-header
   (testing "every dispatch curl carries an X-CCH-Agent: codex header so the dispatcher can tag events"

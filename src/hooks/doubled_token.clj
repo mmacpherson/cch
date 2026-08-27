@@ -111,7 +111,7 @@
   whatever the edit changes. Measured over 741 real blocks across 103
   files: every one was followed by a byte-identical retry that
   succeeded, so nothing was being prevented and each block cost a turn.
-  The worst example was a date, `sample-project`, blocking 42 edits to a
+  The worst example was a date, `Release-3-3-26`, blocking 42 edits to a
   document it had nothing to do with.
 
   Comparing new against old restores the original intent — catching a

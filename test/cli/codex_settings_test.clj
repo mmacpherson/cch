@@ -14,7 +14,7 @@
     :timeout 30}])
 
 (deftest resolve-codex-home-honours-env
-  (testing "CODEX_HOME wins — runner-a relocates it to ~/.config/codex, and
+  (testing "CODEX_HOME wins — installations may relocate it, and
             writing to ~/.codex instead fails silently"
     (is (= "/home/u/.config/codex"
            (cs/resolve-codex-home "/home/u/.config/codex" "/home/u"))))

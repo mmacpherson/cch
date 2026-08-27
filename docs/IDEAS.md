@@ -8,11 +8,15 @@ Structure: hooks grouped by the Green-Belt curriculum modules they'd support (si
 
 ## Context: the curriculum as a reference point
 
-There's a Green-Belt curriculum at `~/projects/example-worktrees/claude-green-belt/projects/claude-code-study/green-belt-curriculum.md` — a four-module syllabus for advancing from Blue (structured workflows, delegation) to Green (*the system catches mistakes before you do*).
+The motivating curriculum is a four-module syllabus for advancing from
+structured workflows and delegation to systems that catch mistakes before the
+operator does. Its private source path is intentionally omitted here.
 
-**Provenance matters:** the curriculum was Claude-generated at the operator's request, drawing on his `/insights` friction-event data (56/mo wrong-approach, 48/mo buggy-code, etc.). It's a **hypothesis from the session logs**, not an independent human prescription. That has two consequences:
+**Provenance matters:** the curriculum was agent-generated from private,
+aggregate friction-event data. It is a **hypothesis from session logs**, not an
+independent human prescription. That has two consequences:
 
-1. The curriculum's specific exercises are data-grounded but not binding — Mike may disagree with the diagnosis or the recommended order.
+1. The curriculum's specific exercises are data-grounded but not binding — an operator may disagree with the diagnosis or the recommended order.
 2. **The curriculum itself is an artifact of a loop that cch is well-positioned to accelerate.** `/insights` reads session data → Claude proposes a curriculum → user practices → metrics shift → next `/insights` produces an updated curriculum. cch's event-log is the raw material for that loop. The highest-leverage cch feature might be the one that makes the loop cheaper, not the ones that ship individual curriculum exercises.
 
 With that reframing: the hook ideas below are *candidates* to weigh against one's own priors. The curriculum is a useful cross-check, not a checklist. cch shipping an exercise doesn't replace the curriculum's pedagogical goal — the user still needs to learn when to reach for each primitive — but it does mean the primitive exists instead of having to be hand-built.
@@ -22,11 +26,9 @@ Every idea below is tagged:
 - **(SUPPORTS)** infrastructure a curriculum exercise builds on top of, or
 - **(ORTHOGONAL)** outside the curriculum's scope but still useful.
 
-Baseline metrics (from `/insights`, April 2026):
-- 56/mo wrong-approach interventions
-- 48/mo buggy-code friction
-- 10/mo excessive-changes friction
-- Frequent context-recovery across sessions
+Useful baseline categories include wrong-approach interventions, buggy-code
+friction, excessive changes, and context recovery across sessions. Actual
+operator measurements remain private.
 
 Goal: prefer hooks whose shipment measurably moves those numbers down.
 
@@ -40,7 +42,11 @@ Curriculum target: reject mistakes before they appear in review.
 Exactly this module's first exercise. Already in the registry.
 
 ### `drift-detection` · (IS Exercise 1b) · **new hook**
-PreToolUse · matcher `Bash` · `if: "Bash(uv run lyla services deploy *)"` (or similar deploy-shaped patterns). Before the deploy runs, diff the repo template against the deployed file on the target host; return an `ask` decision with "stale since 2026-04-05 (3 days, commit 1744db09)" if they diverge. Exactly the stale-`acquire-pdf.sh` scenario that silently broke classification.
+PreToolUse · matcher `Bash` · an `if` expression matching a deploy-shaped
+command. Before the deploy runs, diff the repository template against the
+deployed file on the target host; return an `ask` decision with the age and
+source revision when they diverge. This catches stale deployment assets before
+they silently break downstream behavior.
 
 Implementation sketch:
 ```clojure
@@ -57,7 +63,7 @@ Implementation sketch:
 ### `test-gate` · (IS Exercise 1c) · **new hook**
 PostToolUse · `Edit|Write` · async · runs `ruff check` (or project's chosen linter via `.cch-config.yaml`) on just the files touched in this session and feeds results as context to the next turn. Difference from the project's existing git pre-commit: this runs *during* the session, so Claude self-corrects in flow instead of the user seeing a commit-time failure and re-prompting.
 
-Directly addresses the 48 buggy-code friction events.
+Directly addresses buggy-code friction.
 
 ### `protect-files` · (SUPPORTS Module 1) · **new hook**
 PreToolUse · `Edit|Write` · hard-deny for `.env*`, `**/secrets/**`, `~/.ssh/*`, SOPS-encrypted files. Not a curriculum exercise, but it's the "dumb-easy" guardrail every project benefits from. Ship first in any guardrail batch.
@@ -77,7 +83,7 @@ Curriculum target: encode *judgment*, not procedure.
 These are **skills**, not hooks — cch hooks don't replace them but provide the substrate.
 
 ### `session-primer` · (SUPPORTS Exercise 2c) · **new hook**
-SessionStart · inject `additionalContext`: current git status, last N commits on this branch, open beads ready queue, recent `cch log` highlights scoped to this cwd, the project's CLAUDE.md architecture section (first 2KB). Architecture-first `/implement` gets the architecture section for free. Directly supports reducing the 56/mo wrong-approach count — Claude sees the architecture before it acts.
+SessionStart · inject `additionalContext`: current git status, last N commits on this branch, open beads ready queue, recent `cch log` highlights scoped to this cwd, the project's CLAUDE.md architecture section (first 2KB). Architecture-first `/implement` gets the architecture section for free. This reduces wrong-approach friction by showing the architecture before the agent acts.
 
 ### `prompt-expander` · (SUPPORTS Module 2 broadly) · **new hook**
 UserPromptSubmit · config-defined `@alias` expansion (file reads, shell commands, dated-file "most recent" resolution). Makes prompts self-documenting: *"review @last-session against @plan and draft @next-week"* becomes shareable and automatable. Skills consume fewer tokens because prompts carry context.
@@ -96,7 +102,7 @@ This is where cch's value proposition sharpens most. The curriculum prescribes a
 ### `contract-verify` · (IS Exercise 3a/3b) · **new CLI + hook pair**
 - **CLI:** `cch verify` reads `.cch-contracts/*.yml` in the current project, runs each invariant (shell check or hook call), reports pass/fail with diagnostics.
 - **Hook (SessionStart or scheduled):** runs the same verification automatically. On failure, injects a context message or sends a notification via an existing system (`notify-send`, `ntfy`).
-- **Storage:** verification results land in `cch`'s SQLite log (new `contract_runs` table) — so `cch log --contract=scanning-pipeline` gives you a history.
+- **Storage:** verification results land in `cch`'s SQLite log (new `contract_runs` table) — so `cch log --contract=example-service` gives you a history.
 
 The single biggest cch feature that would shift a user to Green: a contract language that composes primitives (shell checks, hook results, contract nesting), with persistent history and a native CLI.
 
@@ -118,7 +124,7 @@ Curriculum target: work survives session boundaries.
 SessionEnd · writes `.cch-handoffs/YYYY-MM-DDTHH-MM.md` (or `.claude-handoff.yml` per the curriculum's exact filename). Structure per the curriculum:
 ```yaml
 session_date: 2026-04-08
-branch: sample-infrastructure
+branch: feature/control-plane
 what_we_did: [...]
 whats_left: [...]
 decisions_made: [...]

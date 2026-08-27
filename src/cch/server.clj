@@ -153,7 +153,7 @@
   "Short human-readable label for a worktree root path. Usually the
   basename; for paths whose parent directory name contains \"worktrees\",
   includes the parent too so linked worktrees stay distinguishable from
-  the main repo (e.g. dc-worktrees/gondola-ingest)."
+  the main repo (for example, worktrees/feature-branch)."
   [path]
   (let [segs (remove str/blank? (str/split path #"/"))
         last-two (take-last 2 segs)

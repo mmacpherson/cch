@@ -21,8 +21,9 @@ cch control install
 ```
 
 The command installs one global Claude registration hook, registers the same
-local MCP server with Claude and Codex, and, on Linux, installs and starts a
-systemd user service for the package-managed Codex binary:
+local MCP server with Claude and Codex, installs a narrowly matched Codex
+`PreToolUse` caller-binding hook, and, on Linux, installs and starts a systemd
+user service for the package-managed Codex binary:
 
 ```text
 codex app-server --listen unix://
@@ -49,6 +50,11 @@ There is no pairing or provider login per start. A bare `codex` currently owns
 its own in-process runtime and is not discoverable through the shared daemon.
 Whether a separate command or shell abbreviation is acceptable is part of the
 POC go/no-go decision; cch does not install a `codex` PATH shim.
+
+Codex asks once whether to trust newly installed hooks when a session first
+sees the configuration change. That is configuration trust, not per-agent cch
+pairing. Each `send_message` still displays Codex's ordinary MCP approval unless
+the operator separately chooses a broader native Codex permission.
 
 Claude Code must be version 2.1.224 or newer for native cross-session messaging.
 Claude or Codex Remote Control may be enabled independently after the POC; cch
@@ -83,18 +89,21 @@ The same-id retry returned `duplicate`, restarting the supervised app-server
 and reconnecting both Codex clients worked, and delivery to a stopped Claude
 session failed as `stale` instead of silently queueing.
 
-The exercise found and fixed an environment-boundary bug: provider CLIs do not
-necessarily pass the service's `CODEX_HOME` to child MCP processes. `control
-install` now reconciles both cch-owned MCP registrations with the resolved
-value.
+The exercise found and fixed two integration boundaries. Provider CLIs do not
+necessarily pass the service's `CODEX_HOME` to child MCP processes, so `control
+install` reconciles both cch-owned MCP registrations with the resolved value.
+Codex also does not expose its native thread id directly to the MCP child. The
+Codex `PreToolUse` hook does expose both the native session id and tool-use id,
+so cch records a short-lived one-time binding and overwrites a reserved
+`source_proof` argument before Codex shows its normal MCP permission prompt.
+The MCP server atomically consumes that proof and rejects a missing,
+mismatched, expired, or replayed proof rather than attributing it to
+`operator`.
 
-One local gate remains open. Claude-originated calls carry the correct Claude
-route because Claude exposes caller identity to the MCP child process. The
-tested Codex client did not expose its thread id there, so an omitted `source`
-currently falls back to `operator`. Cross-agent delivery works, but trustworthy
-Codex caller attribution needs a supported binding mechanism before the local
-POC is complete. The requirement to launch Codex with `--remote unix://` also
-remains a product-UX decision.
+Two simultaneous Codex clients then sent messages in both directions. Each
+destination displayed the other client's native route as its source without
+either model supplying a trusted source claim. The remaining local question is
+product UX: Codex must currently be launched with `--remote unix://`.
 
 ## Security and privacy boundary
 
@@ -103,20 +112,26 @@ remains a product-UX decision.
 - Provider-native approval prompts remain in the originating CLI. In the live
   matrix, approving cch tool use authorized only the plain-text tool call; no
   approval response was exposed to or forwarded by cch.
+- Codex caller bindings contain a native route, destination, optional message
+  id, body digest, and timestamps. They expire, are consumed once, and never
+  store the message body or provider credentials.
+- Attribution covers calls through the registered cch MCP path; it is not an
+  OS security boundary against a same-user process deliberately invoking
+  operator CLI commands. Native tool approvals remain the authorization layer.
 - Claude inbox tokens remain in the owner-readable local `control.db`. That
   operational database is separate from federated hook-event history; tokens
   are omitted from listing APIs and must never be sent to a future broker.
 - Message bodies and transcript previews are not persisted by cch. Delivery
   deduplication stores only a SHA-256 digest and routing metadata.
-- No hostnames, user identities, private repository names, OAuth client details,
-  session transcripts, or real route IDs belong in this public repository.
+- No private hostnames, private user identities, private repository names,
+  OAuth client details, session transcripts, or real route IDs belong in this
+  public repository.
 
 ## Gate before hosted work
 
-The local POC is successful only after all three direction pairs work with
-trustworthy source attribution, idempotent retries, clear stale-session
-failures, and no permission relay. Delivery, retry, stale-session, restart, and
-permission-boundary behavior are now proven; Codex caller attribution and the
-non-default launch UX remain open. The next gate repeats the test across two
-machines. Postgres, Google OIDC, the hosted switchboard, and federation
-migration remain downstream of those results.
+The local POC has passed its technical gate: all three direction pairs work
+with trustworthy source attribution, idempotent retries, clear stale-session
+failures, restart recovery, and no permission relay. The non-default Codex
+launch UX remains a product decision, not a routing uncertainty. The next gate
+repeats the test across two machines. Postgres, Google OIDC, the hosted
+switchboard, and federation migration remain downstream of those results.
