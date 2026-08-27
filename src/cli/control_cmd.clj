@@ -126,6 +126,18 @@
             (println "  " path)
             (println "Codex Remote Control remains disabled for this POC."))
 
+          :started
+          (println "Codex app-server: existing local systemd user service started")
+
+          :unchanged
+          (println "Codex app-server: active local systemd user service left untouched")
+
+          :updated-restart-required
+          (do
+            (println "Codex app-server: unit updated; active service left untouched")
+            (println "Restart it later, when no Codex clients are attached:")
+            (println "  systemctl --user restart" codex-service/service-name))
+
           :unsupported
           (do
             (println "Codex app-server: automatic supervision currently requires Linux/systemd.")

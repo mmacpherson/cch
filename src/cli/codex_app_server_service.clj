@@ -91,8 +91,26 @@
                        :command argv
                        :exit exit})))))
 
+(defn- command-succeeds? [run-command argv]
+  (zero? (:exit (run-command argv))))
+
+(defn- write-unit! [path contents]
+  (let [directory (fs/parent path)]
+    (fs/create-dirs directory)
+    (let [temporary (str (fs/create-temp-file
+                           {:dir directory :prefix ".cch-codex-app-server-"}))]
+      (try
+        (spit temporary contents)
+        (fs/move temporary path {:replace-existing true})
+        (finally
+          (fs/delete-if-exists temporary))))))
+
 (defn install!
-  "Write, enable, and restart the systemd user service.
+  "Write, enable, and start the systemd user service without disrupting it.
+
+  An already-active service is never implicitly restarted. If its unit changes,
+  the new definition is installed and reported as requiring a deliberate later
+  restart; attached Codex clients keep their current app-server connection.
 
   The optional environment map makes all host/process boundaries testable.
   Returns :unsupported outside Linux instead of changing another platform."
@@ -113,15 +131,27 @@
            systemctl-bin (or (resolve-command "systemctl" path)
                              (throw (ex-info "Cannot install Codex app-server service: systemctl is not on PATH"
                                              {:type :systemctl-unavailable})))
-           unit-path (service-path home)]
-       (fs/create-dirs (fs/parent unit-path))
-       (spit unit-path (render-unit codex-bin codex-home path))
-       (doseq [args [["--user" "daemon-reload"]
-                     ["--user" "enable" service-name]
-                     ["--user" "restart" service-name]]]
-         (checked-command! run-command (into [systemctl-bin] args)))
+           unit-path (service-path home)
+           unit (render-unit codex-bin codex-home path)
+           changed? (not= unit (when (fs/exists? unit-path) (slurp unit-path)))
+           systemctl #(into [systemctl-bin "--user"] %)
+           active? (command-succeeds?
+                     run-command (systemctl ["is-active" "--quiet" service-name]))
+           enabled? (command-succeeds?
+                      run-command (systemctl ["is-enabled" "--quiet" service-name]))]
+       (when changed?
+         (write-unit! unit-path unit)
+         (checked-command! run-command (systemctl ["daemon-reload"])))
+       (when-not enabled?
+         (checked-command! run-command (systemctl ["enable" service-name])))
+       (when-not active?
+         (checked-command! run-command (systemctl ["start" service-name])))
        (wait-ready (socket-path codex-home))
-       {:status :installed
+       {:status (cond
+                  (and active? changed?) :updated-restart-required
+                  active? :unchanged
+                  changed? :installed
+                  :else :started)
         :path unit-path
         :service service-name
         :codex-bin codex-bin
