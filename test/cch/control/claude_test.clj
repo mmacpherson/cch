@@ -58,6 +58,35 @@
       (finally
         (fs/delete-tree dir)))))
 
+(deftest finds-existing-session-transcript-from-native-registry
+  (let [dir (str (fs/create-temp-dir {:prefix "cch-claude-existing-"}))
+        transcript-dir (str dir "/projects/-synthetic-project")
+        transcript (str transcript-dir "/existing-session.jsonl")
+        socket (str dir "/456.sock")]
+    (try
+      (fs/create-dirs transcript-dir)
+      (spit transcript
+            (str (json/generate-string
+                   {:type "system" :subtype "bridge_status"
+                    :url "https://claude.ai/code/session_existing123"})
+                 "\n"))
+      (spit socket "")
+      (binding [claude/*claude-config-dir* dir]
+        (with-redefs [store/claude-sessions
+                      (constantly [{:route_id "claude:existing-session"
+                                    :native_id "existing-session"
+                                    :cwd "/synthetic/project"
+                                    :socket_path socket}])
+                      store/set-claude-native-url! (fn [_ value] value)
+                      claude/native-sessions
+                      (constantly [{:sessionId "existing-session"
+                                    :cwd "/synthetic/project"
+                                    :status "idle"}])]
+          (is (= "https://claude.ai/code/session_existing123"
+                 (:native-url (first (claude/sessions)))))))
+      (finally
+        (fs/delete-tree dir)))))
+
 (deftest send-emits-only-auth-and-user-frames
   (let [dir (str (fs/create-temp-dir {:prefix "cch-claude-uds-"}))
         socket-path (str dir "/inbox.sock")

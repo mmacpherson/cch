@@ -13,6 +13,22 @@
 (def ^:const minimum-version "2.1.224")
 
 (defonce ^:private transcript-scans (atom {}))
+(def ^:dynamic *claude-config-dir* nil)
+
+(defn- claude-config-dir []
+  (or *claude-config-dir*
+      (System/getenv "CLAUDE_CONFIG_DIR")
+      (str (System/getProperty "user.home") "/.claude")))
+
+(defn- default-transcript-path [cwd native-id]
+  (when (and (not (str/blank? cwd))
+             (string? native-id)
+             (re-matches #"[A-Za-z0-9-]{8,128}" native-id))
+    (let [project-dir (str/replace cwd #"[/\\]" "-")
+          candidate (str (claude-config-dir) "/projects/" project-dir
+                         "/" native-id ".jsonl")]
+      (when (fs/regular-file? candidate)
+        candidate))))
 
 (defn- valid-remote-control-url [value]
   (when (and (string? value)
@@ -112,8 +128,11 @@
                    native_url updated_at]}]
         (let [live (get live-by-id native_id)
               socket-live? (and socket_path (fs/exists? socket_path))
+              transcript-path (or transcript_path
+                                  (default-transcript-path
+                                    (or (:cwd live) cwd) native_id))
               native-url (when live
-                           (scan-native-url! route_id transcript_path native_url))]
+                           (scan-native-url! route_id transcript-path native_url))]
           (cond->
             {:id route_id
              :agent "claude"
