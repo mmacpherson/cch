@@ -7,6 +7,7 @@
   All mutation is serialized on the Broker value so enqueue, poll,
   acknowledgement, and duplicate detection are atomic."
   (:require [cch.control.broker-api :as api]
+            [cch.control.naming :as naming]
             [cch.control.store :as store]
             [clojure.string :as str])
   (:import [java.net URI]
@@ -35,6 +36,7 @@
    (->Broker (atom {:runner-tokens runner-tokens
                     :runners {}
                     :routes {}
+                    :aliases {}
                     :messages {}})
              now-fn
              {:lease-ms lease-ms
@@ -194,14 +196,59 @@
   a hostname."
   [^Broker broker]
   (expire! broker)
-  (->> (:routes @(:state broker))
-       vals
-       (map #(dissoc % :expires-at))
-       (sort-by :id)
-       vec))
+  (let [state @(:state broker)
+        aliases (:aliases state)]
+    (->> (:routes state)
+         vals
+         (map (fn [session]
+                (let [route-id (:id session)
+                      alias-record (get aliases route-id)]
+                  (-> (cond-> (dissoc session :expires-at)
+                        (= (:runner-id session) (:runner-id alias-record))
+                        (assoc :alias (:alias alias-record)))
+                      naming/present-session))))
+         (sort-by :id)
+         vec)))
 
 (defn get-session [^Broker broker route-id]
   (some #(when (= route-id (:id %)) %) (sessions broker)))
+
+(defn- set-alias-as!
+  [^Broker broker {:keys [route-id alias runner-id require-owned-route?]}]
+  (let [alias (naming/normalize-alias alias)]
+    (locking broker
+      (let [state (expire-state @(:state broker) (now broker)
+                                (get-in broker [:options :max-attempts]))
+            route (get-in state [:routes route-id])]
+        (when-not route
+          (throw (ex-info "Session is not currently available"
+                          {:type :unknown-session :target route-id})))
+        (when (and require-owned-route?
+                   (not= runner-id (:runner-id route)))
+          (throw (ex-info "Session is not leased by this runner"
+                          {:type :forbidden})))
+        (let [next-state (if alias
+                           (assoc-in state [:aliases route-id]
+                                     {:runner-id (:runner-id route)
+                                      :alias alias})
+                           (update state :aliases dissoc route-id))]
+          (reset! (:state broker) next-state)
+          (naming/present-session
+            (cond-> (dissoc route :expires-at)
+              alias (assoc :alias alias))))))))
+
+(defn set-session-alias!
+  "Set presentation metadata for a route leased by the authenticated runner."
+  [^Broker broker {:keys [runner-id token] :as request}]
+  (authorize! broker runner-id token)
+  (set-alias-as! broker (assoc request
+                               :runner-id runner-id
+                               :require-owned-route? true)))
+
+(defn set-operator-session-alias!
+  "Set presentation metadata through the separately authenticated web app."
+  [^Broker broker request]
+  (set-alias-as! broker (assoc request :require-owned-route? false)))
 
 (defn- enqueue-as!
   [^Broker broker
@@ -382,6 +429,10 @@
     (register! b request))
   (active-sessions [b]
     (sessions b))
+  (set-session-alias! [b request]
+    (set-session-alias! b request))
+  (set-operator-session-alias! [b request]
+    (set-operator-session-alias! b request))
   (enqueue-message! [b request]
     (enqueue! b request))
   (enqueue-operator-message! [b request]

@@ -112,7 +112,7 @@
     (str codex-home "/config.toml")
     codex-binding-block
     [{:event "PreToolUse"
-      :matcher codex-binding/tool-name
+      :matcher codex-binding/tool-matcher
       :command (str (shell-quote cch-bin) " control bind-codex-source")
       :timeout 30}]))
 
@@ -186,7 +186,7 @@
       path (str (shell-quote cch-bin) " control register-claude"))
     (settings/add-control-mcp-permissions! path)
     (println "Installed automatic Claude session registration in" path)
-    (println "Pre-authorized only cch's three native routing tools for Claude")
+    (println "Pre-authorized only cch's four native control tools for Claude")
     (doseq [agent [:claude :codex]
             :let [status (install-mcp! agent codex-home cch-bin pairing-path
                                        revision)]]

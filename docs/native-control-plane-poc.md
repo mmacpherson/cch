@@ -12,8 +12,8 @@ The POC does not wrap terminals or launch provider agent sessions. Claude
 sessions publish their documented per-session inbox to a separate local SQLite
 `control.db` from an asynchronous `SessionStart` hook, so registration does not
 delay agent startup. Codex sessions are discovered and addressed through the
-shared app-server daemon. A PluMCP stdio server exposes only three operations:
-`list_sessions`, `get_session`, and `send_message`.
+shared app-server daemon. A PluMCP stdio server exposes only four operations:
+`list_sessions`, `get_session`, `send_message`, and `set_session_alias`.
 
 ## One-time setup
 
@@ -55,10 +55,11 @@ POC go/no-go decision; cch does not install a `codex` PATH shim.
 
 Codex asks once whether to trust newly installed hooks when a session first
 sees the configuration change. That is configuration trust, not per-agent cch
-pairing. The installer allowlists exactly `list_sessions`, `get_session`, and
-`send_message` on Codex's `cch` MCP server and grants exactly the corresponding
-three Claude permission rules. It does not use a wildcard or change either
-provider's global approval policy, auto mode, or permissions for other tools.
+pairing. The installer allowlists exactly `list_sessions`, `get_session`,
+`send_message`, and `set_session_alias` on Codex's `cch` MCP server and grants
+exactly the corresponding four Claude permission rules. It does not use a
+wildcard or change either provider's global approval policy, auto mode, or
+permissions for other tools.
 
 ### Refreshing active sessions after a cch upgrade
 
@@ -213,6 +214,17 @@ Control status but no per-thread URL in its typed app-server protocol, so Codex
 sessions intentionally have no native action yet. cch never reads or federates
 transcript content beyond that provider-authored bridge event.
 
+Every route also receives a stable mnemonic derived only from its opaque route
+id, such as `quiet-otter-a31f`. An operator or the owning agent can set a short
+explicit alias; the UI retains the mnemonic beside it so duplicate aliases stay
+distinguishable, and routing continues to use the route id. Aliases are bounded,
+escaped presentation metadata. They are broker-visible by design, so callers
+are warned not to use secrets, paths, repository or client names, or other
+private context. Provider titles, prompts, cwd, and transcript content are
+never inferred into a name. Runner-authenticated updates must target a route
+currently leased by that runner; Codex self-renames additionally use the same
+one-time native-session hook binding as agent-originated messages.
+
 The runner API and human UI use separate listeners. Machines reach only the
 runner listener through tailnet-private Tailscale Serve. A stable human-facing
 hostname reaches only the UI listener through an outbound Cloudflare Tunnel,
@@ -244,8 +256,10 @@ email-policy checks. cch independently validates the assertion signature
 against the pinned Access issuer's keys, plus issuer, audience, time claims,
 subject, and the exact normalized-email allowlist. Assertion expiry is the
 browser session boundary. Routing and logout forms additionally require an
-HMAC-signed token bound to that Access session and an exact same-origin
-`Origin` header. The Access assertion itself is never rendered or persisted.
+HMAC-signed token bound to the stable verified Access identity and application.
+Form provenance requires either the exact configured `Origin`, or the browser's
+`Sec-Fetch-Site: same-origin` signal together with the exact configured host.
+The Access assertion itself is never rendered or persisted.
 
 Manual messages have the fixed source `operator`, receive a fresh id, and use
 the same transient body and bounded delivery policy as agent-originated text.
@@ -286,6 +300,10 @@ any of them to call `list_sessions`, then send a synthetic message to another
 route. The destination receives text prefixed with its claimed source route and
 stable message id. Repeat the call with the same `message_id`; it returns
 `duplicate` without delivering again.
+
+Ask one agent to call `set_session_alias` with a synthetic name. Only that
+agent's route changes; list output and the switchboard show the alias alongside
+its stable mnemonic. An empty alias clears it.
 
 The CLI offers the same narrow surface for diagnosis:
 

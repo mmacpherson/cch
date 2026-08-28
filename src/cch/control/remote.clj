@@ -151,6 +151,13 @@
 (defn sessions [config]
   (:sessions (request-json! config :get "/v1/sessions" nil)))
 
+(defn set-session-alias! [config route-id alias]
+  (:session
+    (request-json! config :post "/v1/sessions/alias"
+                   {:runner-id (:runner-id config)
+                    :route-id route-id
+                    :alias alias})))
+
 (defn enqueue! [config envelope]
   (request-json! config :post "/v1/messages"
                  (assoc envelope :runner-id (:runner-id config))))

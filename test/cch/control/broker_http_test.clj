@@ -39,6 +39,24 @@
                "claude:10000000-0000-0000-0000-00000000000b"}
              (set (map :id (remote/sessions a)))))
       (is (every? #(nil? (:cwd %)) (remote/sessions a)))
+      (is (= "Build pair"
+             (:alias
+               (remote/set-session-alias!
+                 a "codex:10000000-0000-0000-0000-00000000000a"
+                 "Build pair"))))
+      (is (= "Build pair"
+             (:alias
+               (some #(when (= "codex:10000000-0000-0000-0000-00000000000a"
+                               (:id %))
+                        %)
+                     (remote/sessions runner-b)))))
+      (is (= :forbidden
+             (try
+               (remote/set-session-alias!
+                 runner-b "codex:10000000-0000-0000-0000-00000000000a"
+                 "Forged")
+               (catch clojure.lang.ExceptionInfo error
+                 (:type (ex-data error))))))
       (is (= "queued"
              (:status
                (remote/enqueue! a

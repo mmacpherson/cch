@@ -38,6 +38,10 @@
    (str "CREATE TABLE IF NOT EXISTS control_codex_bindings ("
         "tool_use_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
         "message_id TEXT, content_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL,"
+        "consumed_at INTEGER)")
+   (str "CREATE TABLE IF NOT EXISTS control_codex_alias_bindings ("
+        "tool_use_id TEXT PRIMARY KEY, source TEXT NOT NULL,"
+        "alias_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL,"
         "consumed_at INTEGER)")])
 
 (defonce ^:private ensured-paths (atom #{}))
@@ -190,4 +194,42 @@
         (first
           (execute!
             ["SELECT source FROM control_codex_bindings WHERE tool_use_id=?"
+             tool-use-id]))))))
+
+(defn record-codex-alias-binding!
+  "Record one trusted Codex observation for a self-alias MCP call. Alias text
+  is represented only by its digest in the one-time local proof record."
+  [{:keys [tool-use-id session-id alias]}]
+  (let [now (System/currentTimeMillis)]
+    (execute! ["DELETE FROM control_codex_alias_bindings WHERE created_at<?"
+               (- now (* 24 60 60 1000))])
+    (let [result (first
+                   (execute!
+                     [(str "INSERT OR IGNORE INTO control_codex_alias_bindings "
+                           "(tool_use_id,source,alias_sha256,created_at,consumed_at) "
+                           "VALUES (?,?,?,?,NULL)")
+                      tool-use-id (str "codex:" session-id)
+                      (content-digest (or alias "")) now]))]
+      (if (= 1 (:next.jdbc/update-count result))
+        tool-use-id
+        (throw (ex-info "Codex alias binding already exists"
+                        {:type :duplicate-codex-binding}))))))
+
+(defn claim-codex-alias-binding!
+  "Consume a recent alias proof and return its authoritative Codex route."
+  [{:keys [tool-use-id alias max-age-ms]
+    :or {max-age-ms (* 30 60 1000)}}]
+  (let [now (System/currentTimeMillis)
+        result (first
+                 (execute!
+                   [(str "UPDATE control_codex_alias_bindings SET consumed_at=? "
+                         "WHERE tool_use_id=? AND alias_sha256=? "
+                         "AND consumed_at IS NULL AND created_at>=?")
+                    now tool-use-id (content-digest (or alias ""))
+                    (- now max-age-ms)]))]
+    (when (= 1 (:next.jdbc/update-count result))
+      (:source
+        (first
+          (execute!
+            ["SELECT source FROM control_codex_alias_bindings WHERE tool_use_id=?"
              tool-use-id]))))))

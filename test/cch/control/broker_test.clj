@@ -40,7 +40,12 @@
             {:id "codex:00000000-0000-0000-0000-00000000000b"
              :agent "codex" :status "idle" :available true
              :runner-id "runner-b"}]
-           (broker/sessions b)))
+           (mapv #(dissoc % :mnemonic :display-name) (broker/sessions b))))
+    (is (every? #(re-matches #"[a-z]+-[a-z]+-[0-9a-f]{4}"
+                             (:mnemonic %))
+                (broker/sessions b)))
+    (is (every? #(= (:mnemonic %) (:display-name %))
+                (broker/sessions b)))
     (is (nil? (:cwd (first (broker/sessions b)))))
     (is (nil? (:native-url (last (broker/sessions b))))
         "generic or unrecognized provider links are discarded")
@@ -49,6 +54,52 @@
              (broker/register! b {:runner-id "runner-a" :token "wrong"
                                   :sessions []})
              (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
+
+(deftest aliases-are-presentation-only-and-owner-bound
+  (let [b (broker/new-broker runner-tokens)
+        route-id "codex:00000000-0000-0000-0000-00000000000a"]
+    (register-pair! b)
+    (let [renamed (broker/set-session-alias!
+                    b {:runner-id "runner-a" :token "synthetic-token-a"
+                       :route-id route-id :alias "  Build pair  "})]
+      (is (= route-id (:id renamed)))
+      (is (= "Build pair" (:alias renamed)))
+      (is (= (str "Build pair · " (:mnemonic renamed))
+             (:display-name renamed))))
+    (is (= :forbidden
+           (try
+             (broker/set-session-alias!
+               b {:runner-id "runner-b" :token "synthetic-token-b"
+                  :route-id route-id :alias "Forged"})
+             (catch clojure.lang.ExceptionInfo error
+               (:type (ex-data error))))))
+    (is (= "Operator name"
+           (:alias
+             (broker/set-operator-session-alias!
+               b {:route-id route-id :alias "Operator name"}))))
+    (is (= route-id (:id (first (filter #(= route-id (:id %))
+                                        (broker/sessions b))))))
+    (is (nil? (:alias
+                (broker/set-session-alias!
+                  b {:runner-id "runner-a" :token "synthetic-token-a"
+                     :route-id route-id :alias ""}))))))
+
+(deftest expired-route-aliases-do-not-cross-runner-ownership
+  (let [clock (atom 1000)
+        b (broker/new-broker runner-tokens
+                             {:now-fn #(deref clock) :lease-ms 1000})
+        route-id "codex:00000000-0000-0000-0000-00000000000a"]
+    (broker/register! b {:runner-id "runner-a" :token "synthetic-token-a"
+                         :sessions runner-a-sessions})
+    (broker/set-session-alias!
+      b {:runner-id "runner-a" :token "synthetic-token-a"
+         :route-id route-id :alias "Old owner"})
+    (swap! clock + 1001)
+    (broker/register!
+      b {:runner-id "runner-b" :token "synthetic-token-b"
+         :sessions [{:id route-id :agent "codex" :status "idle"
+                     :available true}]})
+    (is (nil? (:alias (first (broker/sessions b)))))))
 
 (deftest messages-cross-both-directions-and-deduplicate
   (let [b (broker/new-broker runner-tokens)

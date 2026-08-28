@@ -158,7 +158,8 @@
         (is (= ["Read"
                 "mcp__cch__list_sessions"
                 "mcp__cch__get_session"
-                "mcp__cch__send_message"]
+                "mcp__cch__send_message"
+                "mcp__cch__set_session_alias"]
                (:allow permissions)))
         (is (= "auto" (:defaultMode permissions))
             "the user's Claude permission mode is untouched")

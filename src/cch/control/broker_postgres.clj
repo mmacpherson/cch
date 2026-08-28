@@ -7,6 +7,7 @@
   reuse of a message id."
   (:require [cch.control.broker :as memory]
             [cch.control.broker-api :as api]
+            [cch.control.naming :as naming]
             [cch.control.store :as store]
             [clojure.string :as str]
             [next.jdbc :as jdbc]
@@ -80,6 +81,17 @@
   [(str "ALTER TABLE " (table schema "sessions")
         " ADD COLUMN IF NOT EXISTS native_url text")])
 
+(defn migration-3-statements
+  "Create bounded presentation metadata independently of ephemeral leases."
+  [schema]
+  [(str "CREATE TABLE IF NOT EXISTS " (table (schema-name schema)
+                                                "session_aliases") " ("
+        "route_id text PRIMARY KEY,"
+        "runner_id text NOT NULL,"
+        "alias text NOT NULL CHECK (char_length(alias) BETWEEN 1 AND "
+        naming/max-alias-length "),"
+        "updated_at timestamptz NOT NULL)")])
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -120,7 +132,11 @@
         (when-not (contains? applied 2)
           (doseq [statement (migration-2-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (2)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (2)")]))
+        (when-not (contains? applied 3)
+          (doseq [statement (migration-3-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (3)")]))))
     true))
 
 (defn datasource
@@ -202,10 +218,12 @@
     (swap! (:bodies broker) #(apply dissoc % message-ids))))
 
 (defn- row->session
-  [{:keys [route_id runner_id agent native_status available native_url]}]
-  (cond-> {:id route_id :runner-id runner_id :agent agent
-           :status native_status :available available}
-    native_url (assoc :native-url native_url)))
+  [{:keys [route_id runner_id agent native_status available native_url alias]}]
+  (naming/present-session
+    (cond-> {:id route_id :runner-id runner_id :agent agent
+             :status native_status :available available}
+      native_url (assoc :native-url native_url)
+      alias (assoc :alias alias))))
 
 (defn- row->metadata
   [{:keys [message_id source_route target_route status attempts created_at
@@ -281,18 +299,67 @@
 (defn- sessions [^PostgresBroker broker]
   (let [timestamp-value (now broker)
         routes (table (:schema broker) "sessions")
+        aliases (table (:schema broker) "session_aliases")
         {:keys [value discard]}
         (transact
           (:datasource broker)
           (fn [tx]
             {:discard (expire-metadata! broker tx timestamp-value)
              :value (mapv row->session
-                          (rows tx [(str "SELECT route_id,runner_id,agent,"
-                                         "native_status,available,native_url FROM " routes
-                                         " WHERE lease_expires_at>? ORDER BY route_id")
+                          (rows tx [(str "SELECT r.route_id,r.runner_id,r.agent,"
+                                         "r.native_status,r.available,r.native_url,a.alias FROM "
+                                         routes " r LEFT JOIN " aliases
+                                         " a ON a.route_id=r.route_id"
+                                         " AND a.runner_id=r.runner_id"
+                                         " WHERE r.lease_expires_at>? ORDER BY r.route_id")
                                     (timestamp timestamp-value)]))}))]
     (discard-bodies! broker discard)
     value))
+
+(defn- set-alias-as!
+  [^PostgresBroker broker
+   {:keys [route-id alias runner-id require-owned-route?]}]
+  (let [alias (naming/normalize-alias alias)
+        timestamp-value (now broker)
+        routes (table (:schema broker) "sessions")
+        aliases (table (:schema broker) "session_aliases")]
+    (transact
+      (:datasource broker)
+      (fn [tx]
+        (let [route (row tx [(str "SELECT runner_id FROM " routes
+                                  " WHERE route_id=? AND lease_expires_at>?")
+                             route-id (timestamp timestamp-value)])]
+          (when-not route
+            (throw (ex-info "Session is not currently available"
+                            {:type :unknown-session :target route-id})))
+          (when (and require-owned-route?
+                     (not= runner-id (:runner_id route)))
+            (throw (ex-info "Session is not leased by this runner"
+                            {:type :forbidden})))
+          (if alias
+            (jdbc/execute!
+              tx [(str "INSERT INTO " aliases
+                       " (route_id,runner_id,alias,updated_at) VALUES (?,?,?,?)"
+                       " ON CONFLICT (route_id) DO UPDATE SET"
+                       " runner_id=EXCLUDED.runner_id,alias=EXCLUDED.alias,"
+                       "updated_at=EXCLUDED.updated_at")
+                  route-id (:runner_id route) alias
+                  (timestamp timestamp-value)])
+            (jdbc/execute! tx [(str "DELETE FROM " aliases " WHERE route_id=?")
+                               route-id]))
+          (naming/present-session
+            (cond-> {:id route-id :runner-id (:runner_id route)}
+              alias (assoc :alias alias))))))))
+
+(defn- set-session-alias!
+  [^PostgresBroker broker {:keys [runner-id token] :as request}]
+  (authorize! broker runner-id token)
+  (set-alias-as! broker (assoc request
+                               :runner-id runner-id
+                               :require-owned-route? true)))
+
+(defn- set-operator-session-alias! [^PostgresBroker broker request]
+  (set-alias-as! broker (assoc request :require-owned-route? false)))
 
 (defn- validate-envelope!
   [{:keys [source target message message-id]}]
@@ -620,6 +687,10 @@
     (register! broker request))
   (active-sessions [broker]
     (sessions broker))
+  (set-session-alias! [broker request]
+    (set-session-alias! broker request))
+  (set-operator-session-alias! [broker request]
+    (set-operator-session-alias! broker request))
   (enqueue-message! [broker request]
     (enqueue! broker request))
   (enqueue-operator-message! [broker request]

@@ -116,6 +116,35 @@
              (catch clojure.lang.ExceptionInfo error
                (:type (ex-data error))))))))
 
+(deftest native-agents-can-alias-only-their-hook-bound-session
+  (let [requests (atom [])]
+    (with-redefs [mcp/caller-agent (constantly "claude")
+                  control/inferred-source (constantly "claude:session-1")
+                  control/set-session-alias!
+                  #(do (swap! requests conj %)
+                       (assoc % :status "renamed"))]
+      (mcp/set-session-alias {:alias "Review pair"})
+      (is (= [{:route-id "claude:session-1" :alias "Review pair"}]
+             @requests))
+      (is (= :unsupported-control-input
+             (try
+               (mcp/set-session-alias {:alias "Forged"
+                                       :target "codex:thread-2"})
+               (catch clojure.lang.ExceptionInfo error
+                 (:type (ex-data error)))))))
+    (with-redefs [mcp/caller-agent (constantly "codex")
+                  codex-binding/claim-alias-source!
+                  (fn [request]
+                    (is (= {:source-proof "proof-2" :alias "Audit"}
+                           request))
+                    "codex:thread-2")
+                  control/set-session-alias!
+                  #(do (swap! requests conj %)
+                       (assoc % :status "renamed"))]
+      (mcp/set-session-alias {:alias "Audit" :source_proof "proof-2"})
+      (is (= {:route-id "codex:thread-2" :alias "Audit"}
+             (last @requests))))))
+
 (deftest generic-message-tool-rejects-control-and-credential-fields
   (with-redefs [mcp/caller-agent (constantly "claude")]
     (doseq [field [:approval :permission :credentials :command :raw_frame]]

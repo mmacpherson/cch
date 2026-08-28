@@ -34,6 +34,7 @@
     :forbidden 403
     :unknown-session 404
     :unknown-message 404
+    :invalid-alias 422
     :route-conflict 409
     :message-id-conflict 409
     :runner-not-registered 409
@@ -60,6 +61,13 @@
         (let [{:keys [runner-id token]} (credentials request {})]
           (broker/authorize-runner! b runner-id token)
           (json-response 200 {:sessions (broker/active-sessions b)}))
+
+        (and (= :post request-method) (= "/v1/sessions/alias" uri))
+        (let [payload (read-json request)]
+          (json-response 200
+                         {:session
+                          (broker/set-session-alias!
+                            b (merge payload (credentials request payload)))}))
 
         (and (= :post request-method) (= "/v1/messages" uri))
         (let [payload (read-json request)]

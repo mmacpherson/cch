@@ -60,12 +60,14 @@
                     [{:name "cch"
                       :tools {:list_sessions {}
                               :get_session {}
-                              :send_message {}}}])]
+                              :send_message {}
+                              :set_session_alias {}}}])]
     (binding [codex/*connect!* (constantly transport)]
       (is (= {:agent "codex"
               :server "cch"
               :status "refreshed"
-              :tools '("get_session" "list_sessions" "send_message")}
+              :tools '("get_session" "list_sessions" "send_message"
+                       "set_session_alias")}
              (codex/refresh-mcp!))))
     (is (= [{:id 1
              :method "initialize"
@@ -87,6 +89,7 @@
               :tools {:list_sessions {}
                       :get_session {}
                       :send_message {}
+                      :set_session_alias {}
                       :unexpected_tool {}}}]
             #"unexpected tools are present: unexpected_tool"]]]
     (binding [codex/*connect!* (constantly (refresh-transport servers))]

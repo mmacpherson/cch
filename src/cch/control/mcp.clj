@@ -30,9 +30,9 @@
        (= "runtime" (name key))))
 
 (defn- reject-duplicate-aliases!
-  [arguments aliases label]
+  [tool-name arguments aliases label]
   (when (< 1 (count (filter #(contains? arguments %) aliases)))
-    (throw (ex-info (str "send_message accepts exactly one " label " field")
+    (throw (ex-info (str tool-name " accepts exactly one " label " field")
                     {:type :unsupported-control-input
                      :fields (mapv name aliases)}))))
 
@@ -44,7 +44,6 @@
   (let [unsupported (seq (remove #(or (contains? send-message-keys %)
                                        (runtime-key? %))
                                  (keys arguments)))
-        target (:target arguments)
         route (:route arguments)]
     (when unsupported
       (throw (ex-info (str "send_message accepts only its documented text envelope; "
@@ -52,9 +51,12 @@
                            (str/join ", " (sort (map name unsupported))))
                       {:type :unsupported-control-input
                        :fields (vec (sort (map name unsupported)))})))
-    (reject-duplicate-aliases! arguments [:target :route] "destination")
-    (reject-duplicate-aliases! arguments [:message_id :message-id] "message id")
-    (reject-duplicate-aliases! arguments [:source_proof :source-proof] "source proof")
+    (reject-duplicate-aliases! "send_message" arguments
+                               [:target :route] "destination")
+    (reject-duplicate-aliases! "send_message" arguments
+                               [:message_id :message-id] "message id")
+    (reject-duplicate-aliases! "send_message" arguments
+                               [:source_proof :source-proof] "source proof")
     (when (and (not= "codex" caller)
                (some #(contains? arguments %) [:source_proof :source-proof]))
       (throw (ex-info "source_proof is reserved for the trusted Codex hook"
@@ -66,6 +68,29 @@
       route (assoc :target route)
       (contains? arguments :message-id)
       (assoc :message_id (:message-id arguments))
+      (contains? arguments :source-proof)
+      (assoc :source_proof (:source-proof arguments)))))
+
+(defn- validate-alias-arguments! [arguments caller]
+  (let [supported #{:alias :source_proof :source-proof}
+        unsupported (seq (remove #(or (contains? supported %)
+                                       (runtime-key? %))
+                                 (keys arguments)))]
+    (when unsupported
+      (throw (ex-info
+               (str "set_session_alias accepts only alias; unsupported fields: "
+                    (str/join ", " (sort (map name unsupported))))
+               {:type :unsupported-control-input
+                :fields (vec (sort (map name unsupported)))})))
+    (reject-duplicate-aliases! "set_session_alias" arguments
+                               [:source_proof :source-proof] "source proof")
+    (when (and (not= "codex" caller)
+               (some #(contains? arguments %) [:source_proof :source-proof]))
+      (throw (ex-info "source_proof is reserved for the trusted Codex hook"
+                      {:type :unsupported-control-input
+                       :fields ["source_proof"]})))
+    (cond-> (apply dissoc arguments :source-proof
+                   (filter runtime-key? (keys arguments)))
       (contains? arguments :source-proof)
       (assoc :source_proof (:source-proof arguments)))))
 
@@ -84,6 +109,7 @@
            session_id]}]
   (tool-result {:session (control/get-session session_id)}))
 
+#_{:clj-kondo/ignore [:unused-binding]}
 (defn ^{:mcp-name "send_message" :mcp-type :tool}
   send-message
   "Send plain text to a native agent inbox. This API cannot carry approval,
@@ -115,15 +141,41 @@
       (control/send-message! {:target target :message message
                               :message-id message_id :source source}))))
 
+#_{:clj-kondo/ignore [:unused-binding]}
+(defn ^{:mcp-name "set_session_alias" :mcp-type :tool}
+  set-session-alias
+  "Set or clear a short broker-visible alias for your current session. This is
+  presentation metadata only; never use secrets, filesystem paths, repository
+  names, client names, or other private context. Pass an empty string to clear."
+  [{:keys [^{:doc "Short broker-visible alias; empty text clears it"
+             :type "string"}
+           alias
+           ^{:doc "Reserved Codex hook proof; callers must not supply this field"
+             :type "string" :required? false}
+           source_proof]
+    :as arguments}]
+  (let [caller (caller-agent)
+        arguments (validate-alias-arguments! arguments caller)
+        {:keys [alias source_proof]} arguments
+        route-id (case caller
+                   "codex" (codex-binding/claim-alias-source!
+                             {:source-proof source_proof :alias alias})
+                   "claude" (control/inferred-source)
+                   (throw (ex-info "Session aliases require a native agent caller"
+                                   {:type :unbound-session-source})))]
+    (tool-result (control/set-session-alias! {:route-id route-id
+                                              :alias alias}))))
+
 (def tools
   [(vs/make-tool-from-var #'list-sessions)
    (vs/make-tool-from-var #'get-session)
-   (vs/make-tool-from-var #'send-message)])
+   (vs/make-tool-from-var #'send-message)
+   (vs/make-tool-from-var #'set-session-alias)])
 
 (def server-options
   (ss/make-server-options
     {:primitives {:tools tools}
-     :info (es/make-info "cch native control plane" "0.1.0"
+     :info (es/make-info "cch native control plane" "0.2.0"
                          "Local native Claude/Codex session routing")}))
 
 (defn -main [& _]

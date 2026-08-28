@@ -193,10 +193,11 @@
   list explicit: a server wildcard would silently authorize future tools."
   ["mcp__cch__list_sessions"
    "mcp__cch__get_session"
-   "mcp__cch__send_message"])
+   "mcp__cch__send_message"
+   "mcp__cch__set_session_alias"])
 
 (defn add-control-mcp-permissions!
-  "Pre-authorize only cch's three narrow MCP tools. Existing permission rules
+  "Pre-authorize only cch's four narrow MCP tools. Existing permission rules
   and Claude's selected permission mode are preserved; reinstall is
   idempotent."
   [settings-path]

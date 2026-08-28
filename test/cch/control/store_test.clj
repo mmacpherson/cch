@@ -2,7 +2,8 @@
   (:require [babashka.fs :as fs]
             [cch.control.store :as store]
             [clojure.test :refer [deftest is]]
-            [next.jdbc :as jdbc]))
+            [next.jdbc :as jdbc]
+            [next.jdbc.result-set :as rs]))
 
 (defn- with-temp-store [f]
   (let [dir (str (fs/create-temp-dir {:prefix "cch-control-store-"}))
@@ -97,3 +98,26 @@
                  nil
                  (catch clojure.lang.ExceptionInfo error
                    (:type (ex-data error))))))))))
+
+(deftest codex-alias-bindings-store-only-a-digest-and-are-one-time
+  (with-temp-store
+    (fn [path]
+      (let [binding {:tool-use-id "alias-call-1"
+                     :session-id "thread-1"
+                     :alias "Review pair"}]
+        (store/record-codex-alias-binding! binding)
+        (let [row (first
+                    (jdbc/execute!
+                      {:dbtype "sqlite" :dbname path}
+                      ["SELECT * FROM control_codex_alias_bindings WHERE tool_use_id=?"
+                       "alias-call-1"]
+                      {:builder-fn rs/as-unqualified-maps}))]
+          (is (not (some #{"Review pair"} (vals row))))
+          (is (= (store/content-digest "Review pair") (:alias_sha256 row))))
+        (is (nil? (store/claim-codex-alias-binding!
+                    {:tool-use-id "alias-call-1" :alias "Changed"})))
+        (is (= "codex:thread-1"
+               (store/claim-codex-alias-binding!
+                 {:tool-use-id "alias-call-1" :alias "Review pair"})))
+        (is (nil? (store/claim-codex-alias-binding!
+                    {:tool-use-id "alias-call-1" :alias "Review pair"})))))))

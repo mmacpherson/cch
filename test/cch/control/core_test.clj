@@ -137,3 +137,34 @@
               {:target target :source "operator"
                :message "Remote synthetic ping" :message-id "remote-message"}]
              @enqueued)))))
+
+(deftest self-aliasing-requires-a-local-route-and-paired-owner
+  (let [route-id "claude:30000000-0000-0000-0000-00000000000c"
+        renamed (atom nil)]
+    (with-redefs [claude/sessions
+                  (constantly [{:id route-id :agent "claude"
+                                :status "working" :available true
+                                :name "Private inferred title"}])
+                  codex/sessions (constantly [])
+                  remote/config
+                  (constantly {:url "https://broker.invalid"
+                               :runner-id "runner-a" :token "synthetic"})
+                  remote/set-session-alias!
+                  (fn [_ route alias]
+                    (reset! renamed [route alias])
+                    {:id route :alias alias})]
+      (let [local (first (:sessions (control/list-local-sessions)))]
+        (is (string? (:mnemonic local)))
+        (is (= (:mnemonic local) (:display-name local)))
+        (is (nil? (:alias local)))
+        (is (not= "Private inferred title" (:display-name local))))
+      (is (= {:id route-id :alias "Review pair"}
+             (control/set-session-alias! {:route-id route-id
+                                          :alias "Review pair"})))
+      (is (= [route-id "Review pair"] @renamed))
+      (is (= :unknown-session
+             (try
+               (control/set-session-alias! {:route-id "codex:other"
+                                            :alias "Forged"})
+               (catch clojure.lang.ExceptionInfo error
+                 (:type (ex-data error)))))))))

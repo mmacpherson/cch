@@ -55,6 +55,25 @@
       (is (not (contains? updated :runtime)))
       (is (= "tool-call-1" (:source_proof updated))))))
 
+(deftest alias-hook-binds-the-current-codex-session-and-value
+  (let [recorded (atom nil)
+        payload (-> synthetic-payload
+                    (assoc :tool_name "mcp__cch__set_session_alias")
+                    (assoc :tool_use_id "alias-call-1")
+                    (assoc :tool_input {:alias "Review pair"
+                                        :source_proof "untrusted"
+                                        :runtime {:internal true}}))]
+    (with-redefs [store/record-codex-alias-binding!
+                  #(reset! recorded %)]
+      (let [updated (get-in (binding/bind! payload)
+                            [:hookSpecificOutput :updatedInput])]
+        (is (= {:tool-use-id "alias-call-1"
+                :session-id "thread-1"
+                :alias "Review pair"}
+               @recorded))
+        (is (= {:alias "Review pair" :source_proof "alias-call-1"}
+               updated))))))
+
 (deftest unexpected-hook-shapes-fail-closed
   (doseq [payload [(assoc synthetic-payload :hook_event_name "PostToolUse")
                    (assoc synthetic-payload :tool_name "mcp__other__tool")
@@ -74,5 +93,21 @@
                                      :target "claude:session-1"
                                      :message-id "message-1"
                                      :message "Synthetic ping"})
+             (catch clojure.lang.ExceptionInfo error
+               (:type (ex-data error))))))))
+
+(deftest alias-proof-is-payload-bound-and-fails-clearly
+  (with-redefs [store/claim-codex-alias-binding!
+                (fn [request]
+                  (when (= {:tool-use-id "alias-proof" :alias "Audit"}
+                           request)
+                    "codex:thread-1"))]
+    (is (= "codex:thread-1"
+           (binding/claim-alias-source! {:source-proof "alias-proof"
+                                         :alias "Audit"})))
+    (is (= :unbound-codex-source
+           (try
+             (binding/claim-alias-source! {:source-proof "alias-proof"
+                                           :alias "Changed"})
              (catch clojure.lang.ExceptionInfo error
                (:type (ex-data error))))))))

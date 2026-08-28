@@ -1,6 +1,7 @@
 (ns cch.control.switchboard-test
   (:require [cch.control.broker :as broker]
             [cch.control.broker-http :as broker-http]
+            [cch.control.naming :as naming]
             [cch.control.switchboard :as switchboard]
             [cch.control.web-auth :as auth]
             [clojure.string :as str]
@@ -81,6 +82,9 @@
             page (:body response)]
         (is (= 200 (:status response)))
         (is (str/includes? page target))
+        (is (str/includes? page (naming/mnemonic target)))
+        (is (str/includes? page "Optional broker-visible name"))
+        (is (str/includes? page "routing still uses the opaque route id"))
         (is (str/includes? page "Needs you"))
         (is (str/includes? page "Open this Claude session"))
         (is (str/includes? page
@@ -93,6 +97,38 @@
         (is (= "no-store" (get-in response [:headers "Cache-Control"])))
         (is (str/includes? (get-in response [:headers "Content-Security-Policy"])
                            "frame-ancestors 'none'"))))))
+
+(deftest authenticated-operator-can-set-and-clear-a-bounded-alias
+  (authenticated
+    (fn []
+      (let [b (registered-broker)
+            handler (switchboard/handler b config)
+            csrf (auth/csrf-token config access-identity)
+            renamed (handler
+                      (form-request
+                        "/sessions/alias"
+                        (str "csrf=" csrf "&target=" target
+                             "&alias=Review+%3Cpair%3E")))]
+        (is (= 303 (:status renamed)))
+        (is (= "Review <pair>"
+               (:alias (first (broker/sessions b)))))
+        (let [page (:body (handler (access-request :get "/")))]
+          (is (str/includes? page "Review &lt;pair&gt;"))
+          (is (not (str/includes? page "Review <pair>"))))
+        (is (= 422
+               (:status
+                 (handler
+                   (form-request
+                     "/sessions/alias"
+                     (str "csrf=" csrf "&target=" target
+                          "&alias=forged%0Aname"))))))
+        (is (= 303
+               (:status
+                 (handler
+                   (form-request
+                     "/sessions/alias"
+                     (str "csrf=" csrf "&target=" target "&alias="))))))
+        (is (nil? (:alias (first (broker/sessions b)))))))))
 
 (deftest valid-csrf-routes-transient-operator-text-and-reports-delivery
   (authenticated

@@ -50,7 +50,8 @@
                       "CCH_MCP_CALLER" "codex"}})]
     (is (str/includes? text "[mcp_servers.cch]"))
     (is (str/includes? text
-                       "enabled_tools = [\"list_sessions\", \"get_session\", \"send_message\"]"))
+                       (str "enabled_tools = [\"list_sessions\", \"get_session\", "
+                            "\"send_message\", \"set_session_alias\"]")))
     (is (str/includes? text "default_tools_approval_mode = \"approve\""))
     (is (str/includes? text "required = true"))
     (is (not (str/includes? text "approval_policy"))

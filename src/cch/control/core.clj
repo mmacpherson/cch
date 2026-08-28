@@ -2,6 +2,7 @@
   "Agent-agnostic session directory and safe text-message router."
   (:require [cch.control.claude :as claude]
             [cch.control.codex :as codex]
+            [cch.control.naming :as naming]
             [cch.control.remote :as remote]
             [cch.control.store :as store]
             [clojure.string :as str])
@@ -26,7 +27,8 @@
   []
   (let [claude-result (safe-call "claude" claude/sessions)
         codex-result  (safe-call "codex" codex/sessions)]
-    {:sessions (vec (concat (:sessions claude-result) (:sessions codex-result)))
+    {:sessions (->> (concat (:sessions claude-result) (:sessions codex-result))
+                    (mapv naming/present-session))
      :errors (vec (keep :error [claude-result codex-result]))}))
 
 (defn- remote-presence []
@@ -58,6 +60,21 @@
 
 (defn get-session [route-id]
   (some #(when (= route-id (:id %)) %) (:sessions (list-sessions))))
+
+(defn set-session-alias!
+  "Set a broker-visible presentation alias for one machine-local route. The
+  paired broker independently verifies that this runner owns the active route."
+  [{:keys [route-id alias]}]
+  (let [alias (naming/normalize-alias alias)
+        local-ids (set (map :id (:sessions (list-local-sessions))))
+        config (remote/config)]
+    (when-not (contains? local-ids route-id)
+      (throw (ex-info "Only the current machine's active sessions can rename themselves"
+                      {:type :unknown-session :target route-id})))
+    (when-not config
+      (throw (ex-info "Session aliases require a paired control runner"
+                      {:type :runner-not-paired})))
+    (remote/set-session-alias! config route-id alias)))
 
 (defn inferred-source []
   (cond

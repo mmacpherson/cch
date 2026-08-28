@@ -11,10 +11,13 @@
    "runner-b" "synthetic-token-b"})
 
 (deftest migration-schema-contains-metadata-but-no-hosted-message-content
-  (let [ddl (str/join "\n" (postgres/migration-statements "cch_control"))]
+  (let [ddl (str/join "\n" (concat
+                              (postgres/migration-statements "cch_control")
+                              (postgres/migration-3-statements "cch_control")))]
     (is (str/includes? ddl "content_sha256"))
     (is (str/includes? ddl "lease_expires_at"))
     (is (str/includes? ddl "awaiting-replay"))
+    (is (str/includes? ddl "session_aliases"))
     (is (not (re-find #"(?i)\\b(body|token|credential|transcript)\\b" ddl))
         "provider credentials, transcripts, and message bodies have no columns")))
 
@@ -81,6 +84,20 @@
                  (:native-url (some #(when (= target (:id %)) %)
                                     (api/active-sessions b1)))))
           (is (every? #(nil? (:cwd %)) (api/active-sessions b1)))
+          (is (= "Build pair"
+                 (:alias
+                   (api/set-session-alias!
+                     b1 {:runner-id "runner-a" :token "synthetic-token-a"
+                         :route-id source :alias "Build pair"}))))
+          (is (= :forbidden
+                 (try
+                   (api/set-session-alias!
+                     b1 {:runner-id "runner-b" :token "synthetic-token-b"
+                         :route-id source :alias "Forged"})
+                   (catch clojure.lang.ExceptionInfo error
+                     (:type (ex-data error))))))
+          (api/set-operator-session-alias!
+            b1 {:route-id target :alias "Review pair"})
 
           (is (= "queued"
                  (:status
@@ -133,6 +150,9 @@
                                          :ack-timeout-ms 100
                                          :max-attempts 3})]
             (swap! brokers conj b2)
+            (is (= {source "Build pair" target "Review pair"}
+                   (into {} (map (juxt :id :alias)
+                                 (api/active-sessions b2)))))
             (is (empty? (:messages
                           (api/poll-messages!
                             b2 {:runner-id "runner-b"
@@ -185,7 +205,8 @@
                          b2 {:runner-id "runner-b" :token "synthetic-token-b"
                              :sessions [{:id target :agent "claude"
                                          :status "working" :available true}]}))))
-              (is (= [target] (mapv :id (api/active-sessions b2))))))
+              (is (= [target] (mapv :id (api/active-sessions b2))))
+              (is (= "Review pair" (:alias (first (api/active-sessions b2)))))))
 
           (testing "schema and migrations serialize without content columns"
             (let [results (doall (map deref
@@ -203,7 +224,7 @@
                                    "\".schema_migrations")]
                              {:builder-fn rs/as-unqualified-lower-maps})]
               (is (every? true? results))
-              (is (= 2 (:count versions)))
+              (is (= 3 (:count versions)))
               (is (not-any? #{"body" "token" "credential" "transcript"}
                             (map :column_name columns))))))
         (finally

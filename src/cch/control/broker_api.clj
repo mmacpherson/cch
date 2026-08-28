@@ -5,6 +5,8 @@
   (authorize-runner! [broker runner-id token])
   (register-runner! [broker request])
   (active-sessions [broker])
+  (set-session-alias! [broker request])
+  (set-operator-session-alias! [broker request])
   (enqueue-message! [broker request])
   (enqueue-operator-message! [broker request])
   (poll-messages! [broker request])

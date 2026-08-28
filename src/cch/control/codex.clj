@@ -131,7 +131,7 @@
   (call-with-client sessions-with-client))
 
 (def ^:private cch-tool-names
-  #{"list_sessions" "get_session" "send_message"})
+  #{"list_sessions" "get_session" "send_message" "set_session_alias"})
 
 (defn refresh-mcp!
   "Ask the shared Codex app-server to reload its MCP runtimes, then verify that

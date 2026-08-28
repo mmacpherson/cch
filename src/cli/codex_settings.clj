@@ -99,7 +99,7 @@
 (def control-mcp-tools
   "Exact raw MCP tool names exposed to Codex. This is deliberately not a
   wildcard so adding a future cch tool cannot grant it ambient authority."
-  ["list_sessions" "get_session" "send_message"])
+  ["list_sessions" "get_session" "send_message" "set_session_alias"])
 
 (defn render-control-mcp-block
   "Render the complete cch-owned Codex MCP server configuration. Approval is
