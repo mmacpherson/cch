@@ -86,7 +86,7 @@
         (is (str/includes? page
                            "https://claude.ai/code/session_synthetic123"))
         (is (not (str/includes? page "href=\"https://claude.ai/code\"")))
-        (is (str/includes? page "provider advertises an exact session URL"))
+        (is (not (str/includes? page "Native authority")))
         (is (not (str/includes? page "/private/not-federated")))
         (is (not (str/includes? page "Private session label")))
         (is (not (str/includes? page assertion)))

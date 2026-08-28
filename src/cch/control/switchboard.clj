@@ -162,11 +162,7 @@
                         :maxlength 8000
                         :placeholder "Ask this agent to inspect, review, or continue…"}]]]
           [:div.actions [:button {:type "submit"} "Send message"]]]
-         [:p.muted "A session must be active before a message can be routed."])]
-      [:section.panel
-       [:h2 "Native authority"]
-       [:p.muted
-        "When a provider advertises an exact session URL, open it here for transcripts, approvals, terminal control, and rich session history. This switchboard intentionally does not copy them."]])))
+         [:p.muted "A session must be active before a message can be routed."])])))
 
 (defn- error-page [status title message]
   (response status (page title nil [:section.panel [:h2 title] [:p message]])))
