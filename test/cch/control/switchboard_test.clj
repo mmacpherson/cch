@@ -5,7 +5,7 @@
             [cch.control.web-auth :as auth]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]])
-  (:import [java.io ByteArrayInputStream]
+  (:import [java.io ByteArrayInputStream StringWriter]
            [java.nio.charset StandardCharsets]))
 
 (def config
@@ -153,13 +153,22 @@
             csrf (auth/csrf-token config access-identity)
             base (form-request "/messages"
                                (str "csrf=" csrf "&target=" target
-                                    "&message=Synthetic+request"))]
-        (doseq [request [(assoc-in base [:headers "origin"]
+                                    "&message=Synthetic+request"))
+            diagnostic-output (StringWriter.)
+            _ (binding [*err* diagnostic-output]
+                (doseq [request
+                        [(assoc-in base [:headers "origin"]
                                    "https://other.invalid")
                          (assoc base :body
-                                (body (str "csrf=wrong&target=" target
-                                           "&message=Synthetic+request")))]]
-          (is (= 403 (:status (handler request)))))
+                                (body
+                                  (str "csrf=wrong&target=" target
+                                       "&message=Synthetic+request")))]]
+                  (is (= 403 (:status (handler request))))))
+            diagnostics (str diagnostic-output)]
+        (is (str/includes? diagnostics "rejected form: origin"))
+        (is (str/includes? diagnostics "rejected form: token"))
+        (is (not (str/includes? diagnostics "https://other.invalid")))
+        (is (not (str/includes? diagnostics csrf)))
         (is (empty? (:messages (broker/poll! b {:runner-id "runner-a"
                                                 :token "synthetic-runner-token"}))))
         (is (= 422 (:status

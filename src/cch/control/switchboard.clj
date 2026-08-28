@@ -63,10 +63,19 @@
 
 (defn- csrf! [config request identity form]
   (when-not (= (:origin config) (get-in request [:headers "origin"]))
-    (throw (ex-info "Request origin is invalid" {:type :invalid-csrf})))
+    (throw (ex-info "Request origin is invalid"
+                    {:type :invalid-csrf :reason :origin})))
   (when-not (auth/csrf-valid? config identity (:csrf form))
-    (throw (ex-info "CSRF token is invalid" {:type :invalid-csrf})))
+    (throw (ex-info "CSRF token is invalid"
+                    {:type :invalid-csrf :reason :token})))
   true)
+
+(defn- log-form-rejection! [error]
+  (let [data (ex-data error)
+        reason (or (:reason data) (:type data) :unknown)]
+    (binding [*out* *err*]
+      (println (str "cch.control.switchboard: rejected form: "
+                    (name reason))))))
 
 (defn- attention [session]
   (case (str/lower-case (or (:status session) "unknown"))
@@ -211,8 +220,11 @@
                         "A valid Cloudflare Access session is required.")
 
             (:invalid-csrf :invalid-form)
-            (error-page 403 "Request rejected"
-                        "The form expired or did not originate from this switchboard.")
+            (do
+              (log-form-rejection! error)
+              (error-page
+                403 "Request rejected"
+                "The form expired or did not originate from this switchboard."))
 
             (:unknown-session :invalid-message :message-too-large
              :command-mode-not-allowed)
