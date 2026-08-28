@@ -15,7 +15,9 @@
             [cch.core :refer [defhook]]
             [cch.log :as log]
             [cheshire.core :as json]
-            [clojure.java.io :as io]))
+            [clojure.string :as str])
+  (:import [java.io ByteArrayOutputStream RandomAccessFile]
+           [java.nio.charset StandardCharsets]))
 
 (def ^:private claude-window-by-minutes
   "Map codex's `window_minutes` onto Claude Code's rate_limits key. Match
@@ -35,15 +37,6 @@
                       (catch Exception _ nil)))))
        vec))
 
-(defn- read-jsonl
-  "Read and parse all lines of a JSONL file. Returns nil when the path
-  is missing or unreadable."
-  [path]
-  (when (and path (fs/exists? path))
-    (try
-      (parse-jsonl-lines (slurp (io/file path)))
-      (catch Exception _ nil))))
-
 (defn latest-token-count
   "Most recent `event_msg`/`token_count` entry in a Codex rollout JSONL,
   or nil if none. Pure."
@@ -52,6 +45,83 @@
        (filter #(and (= "event_msg" (:type %))
                      (= "token_count" (get-in % [:payload :type]))))
        last))
+
+(def ^:private reverse-scan-chunk-bytes (* 64 1024))
+(def ^:private max-jsonl-line-bytes (* 1024 1024))
+
+(defn- reverse-bytes!
+  [^bytes bytes]
+  (loop [left 0
+         right (dec (alength bytes))]
+    (when (< left right)
+      (let [value (aget bytes left)]
+        (aset-byte bytes left (aget bytes right))
+        (aset-byte bytes right value)
+        (recur (inc left) (dec right)))))
+  bytes)
+
+(defn- token-count-line
+  "Parse a reverse-buffered JSONL line only when it could be a token-count
+  event. The string prefilter avoids constructing full JSON trees for the
+  overwhelmingly more common transcript records."
+  [^ByteArrayOutputStream reversed-line]
+  (when (pos? (.size reversed-line))
+    (let [line (String. ^bytes (reverse-bytes! (.toByteArray reversed-line))
+                        StandardCharsets/UTF_8)]
+      (when (and (str/includes? line "\"event_msg\"")
+                 (str/includes? line "\"token_count\""))
+        (try
+          (let [parsed (json/parse-string line true)]
+            (when (and (= "event_msg" (:type parsed))
+                       (= "token_count" (get-in parsed [:payload :type])))
+              parsed))
+          (catch Exception _ nil))))))
+
+(defn latest-token-count-in-file
+  "Find the newest valid token-count record by scanning a rollout backward.
+
+  Memory is bounded by one fixed read chunk plus at most 1 MiB for a JSONL
+  record. Oversized and malformed records are skipped. Taking the file length
+  once also makes a concurrently appended partial final record harmless: it is
+  skipped and the previous complete token-count record is returned."
+  [path]
+  (when (and path (fs/exists? path))
+    (try
+      (with-open [file (RandomAccessFile. (str path) "r")]
+        (loop [next-position (.length file)
+               chunk (byte-array 0)
+               index -1
+               reversed-line (ByteArrayOutputStream.)
+               oversized? false]
+          (cond
+            (>= index 0)
+            (let [value (aget ^bytes chunk index)]
+              (if (= 10 (bit-and value 0xff))
+                (if-let [match (when-not oversized?
+                                 (token-count-line reversed-line))]
+                  match
+                  (recur next-position chunk (dec index)
+                         (ByteArrayOutputStream.) false))
+                (let [store? (and (not oversized?)
+                                  (< (.size reversed-line)
+                                     max-jsonl-line-bytes))]
+                  (when store?
+                    (.write reversed-line (bit-and value 0xff)))
+                  (recur next-position chunk (dec index) reversed-line
+                         (or oversized? (not store?))))))
+
+            (pos? next-position)
+            (let [start (max 0 (- next-position reverse-scan-chunk-bytes))
+                  size (int (- next-position start))
+                  bytes (byte-array size)]
+              (.seek file start)
+              (.readFully file bytes)
+              (recur start bytes (dec size) reversed-line oversized?))
+
+            :else
+            (when-not oversized?
+              (token-count-line reversed-line)))))
+      (catch Exception _ nil))))
 
 (defn codex->claude-rate-limits
   "Convert codex's `rate_limits` map (primary/secondary keyed by
@@ -88,7 +158,8 @@
   {}
   [input]
   (when (= "codex" (:cch/agent input))
-    (let [lines (read-jsonl (:transcript_path input))]
-      (when-let [args (build-snapshot input lines)]
+    (when-let [token-count
+               (latest-token-count-in-file (:transcript_path input))]
+      (when-let [args (build-snapshot input [token-count])]
         (log/log-context-snapshot! args))))
   nil)

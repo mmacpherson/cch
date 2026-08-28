@@ -1,7 +1,11 @@
 (ns hooks.codex-usage-capture-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [cch.log :as log]
+            [clojure.test :refer [deftest is testing]]
             [cheshire.core :as json]
-            [hooks.codex-usage-capture :as h]))
+            [hooks.codex-usage-capture :as h])
+  (:import [java.io RandomAccessFile]
+           [java.nio.charset StandardCharsets]
+           [java.nio.file Files]))
 
 (def sample-token-count-line
   (json/generate-string
@@ -17,6 +21,20 @@
 
 (def sample-non-rate-line
   (json/generate-string {:type "response_item" :payload {:role "assistant"}}))
+
+(defn- token-count-line-with-percent [used-percent]
+  (-> (json/parse-string sample-token-count-line true)
+      (assoc-in [:payload :rate_limits :primary :used_percent] used-percent)
+      json/generate-string))
+
+(defn- with-temp-rollout [write-file! check-file!]
+  (let [path (Files/createTempFile "cch-codex-rollout-" ".jsonl"
+                                   (make-array java.nio.file.attribute.FileAttribute 0))]
+    (try
+      (write-file! path)
+      (check-file! (str path))
+      (finally
+        (Files/deleteIfExists path)))))
 
 (deftest parse-jsonl-handles-blank-and-corrupt-lines
   (let [content (str sample-token-count-line "\n"
@@ -38,6 +56,41 @@
 
 (deftest latest-token-count-returns-nil-when-absent
   (is (nil? (h/latest-token-count [{:type "response_item"}]))))
+
+(deftest reverse-file-scan-finds-newest-valid-token-count
+  (with-temp-rollout
+    (fn [path]
+      (spit (str path)
+            (str (token-count-line-with-percent 5.0) "\n"
+                 sample-non-rate-line "\r\n"
+                 (token-count-line-with-percent 12.0) "\n"
+                 "{ malformed trailing record")))
+    (fn [path]
+      (is (= 12.0
+             (get-in (h/latest-token-count-in-file path)
+                     [:payload :rate_limits :primary :used_percent]))))))
+
+(deftest reverse-file-scan-bounds-memory-for-oversized-trailing-record
+  (with-temp-rollout
+    (fn [path]
+      (with-open [file (RandomAccessFile. (str path) "rw")]
+        (let [token-line (.getBytes (str sample-token-count-line "\n")
+                                    StandardCharsets/UTF_8)]
+          (.write file token-line)
+          ;; A sparse, unterminated record much larger than the scanner's
+          ;; per-line cap exercises the same shape as a very large tool event.
+          (.setLength file (+ (.getFilePointer file) (* 8 1024 1024))))))
+    (fn [path]
+      (is (= "token_count"
+             (get-in (h/latest-token-count-in-file path) [:payload :type]))))))
+
+(deftest reverse-file-scan-handles-missing-and-empty-files
+  (is (nil? (h/latest-token-count-in-file nil)))
+  (is (nil? (h/latest-token-count-in-file "/path/that/does/not/exist")))
+  (with-temp-rollout
+    (fn [_path] nil)
+    (fn [path]
+      (is (nil? (h/latest-token-count-in-file path))))))
 
 (deftest codex->claude-rate-limits-maps-by-window-minutes
   (testing "primary (300m) → five_hour; secondary (10080m) → seven_day"
@@ -114,3 +167,17 @@
     ;; No exception, no logging. The hook returns nil regardless.
     (is (nil? (h/handler-fn {:cch/agent "claude-code"
                              :transcript_path "/nonexistent/path.jsonl"})))))
+
+(deftest codex-hook-logs-tail-snapshot-and-returns-neutral-response
+  (with-temp-rollout
+    (fn [path]
+      (spit (str path) (str sample-token-count-line "\n")))
+    (fn [path]
+      (let [logged (atom nil)]
+        (with-redefs [log/log-context-snapshot! #(reset! logged %)]
+          (is (nil? (h/handler-fn {:cch/agent "codex"
+                                   :session_id "session-1"
+                                   :model "gpt-test"
+                                   :transcript_path path})))
+          (is (= "session-1" (:session-id @logged)))
+          (is (= "codex" (:agent @logged))))))))
