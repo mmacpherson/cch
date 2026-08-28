@@ -125,6 +125,26 @@
           (is (str/includes? page "Message delivered"))
           (is (not (str/includes? page "Synthetic operator request"))))))))
 
+(deftest refreshed-access-assertion-does-not-expire-a-rendered-form
+  (let [b (registered-broker)
+        handler (switchboard/handler b config)
+        csrf (auth/csrf-token config access-identity)
+        refreshed-identity (assoc access-identity
+                                  :issued-at 1100000
+                                  :expires-at 2100000)]
+    (with-redefs [auth/authenticate! (fn [& _] refreshed-identity)]
+      (is (= 303
+             (:status
+               (handler
+                 (form-request
+                   "/messages"
+                   (str "csrf=" csrf "&target=" target
+                        "&message=Synthetic+request")))))))
+    (is (= "Synthetic request"
+           (-> (broker/poll! b {:runner-id "runner-a"
+                                :token "synthetic-runner-token"})
+               :messages first :body)))))
+
 (deftest routing-posts-require-origin-and-access-bound-csrf
   (authenticated
     (fn []

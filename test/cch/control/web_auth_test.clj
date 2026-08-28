@@ -143,15 +143,26 @@
                          {:headers {"cf-access-jwt-assertion" token}})))))
       (is (= 1 @fetches)))))
 
-(deftest csrf-is-signed-and-bound-to-the-access-session
+(deftest csrf-is-signed-and-bound-to-the-stable-access-identity
   (let [identity {:subject "synthetic-access-subject"
                   :email "operator@example.invalid"
                   :issued-at 3000000
                   :expires-at 3300000}
-        other (assoc identity :expires-at 3400000)
+        refreshed-assertion (assoc identity
+                                   :issued-at 3100000
+                                   :expires-at 3400000)
         token (auth/csrf-token config identity)]
     (is (auth/csrf-valid? config identity token))
+    (is (auth/csrf-valid? config refreshed-assertion token))
     (is (not (auth/csrf-valid? config identity (str token "changed"))))
-    (is (not (auth/csrf-valid? config other token)))
+    (is (not (auth/csrf-valid? config
+                               (assoc identity :subject "other-subject")
+                               token)))
+    (is (not (auth/csrf-valid? config
+                               (assoc identity :email "other@example.invalid")
+                               token)))
+    (is (not (auth/csrf-valid? (assoc config :audience "other-audience")
+                               identity
+                               token)))
     (is (= "https://control.invalid/cdn-cgi/access/logout"
            (auth/logout-location config)))))

@@ -215,13 +215,17 @@
                  "HmacSHA256"))
     (.doFinal mac (.getBytes ^String value StandardCharsets/UTF_8))))
 
-(defn- csrf-material [identity]
-  (str (:subject identity) "\u0000" (:email identity) "\u0000"
-       (:issued-at identity) "\u0000" (:expires-at identity)))
+(defn- csrf-material [config identity]
+  ;; Access authenticates every request, and may refresh its assertion between
+  ;; rendering and submitting a form. Bind the form to the stable verified
+  ;; identity and Access application rather than one assertion's lifetime.
+  (str "v2" "\u0000" (:issuer config) "\u0000" (:audience config) "\u0000"
+       (:subject identity) "\u0000" (:email identity)))
 
 (defn csrf-token [config identity]
   (.encodeToString base64url-encoder
-                   (hmac (:session-secret config) (csrf-material identity))))
+                   (hmac (:session-secret config)
+                         (csrf-material config identity))))
 
 (defn csrf-valid? [config identity value]
   (and (string? value)
