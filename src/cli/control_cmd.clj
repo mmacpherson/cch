@@ -306,20 +306,29 @@
         state (if database
                 (broker-postgres/new-broker tokens database)
                 (broker/new-broker tokens))
-        server (broker-http/start! state {:host host :port port
-                                          :web-config web-config})]
+        server (broker-http/start! state {:host host :port port})
+        web-server (try
+                     (when web-config
+                       (broker-http/start-web! state web-config))
+                     (catch Exception error
+                       ((:stop server) :timeout 100)
+                       (broker-api/close-broker! state)
+                       (throw error)))]
     (println (format "Control broker listening on http://%s:%d" host port))
     (println (if database
                "Postgres route directory and message metadata enabled."
                "Disposable in-memory route directory enabled."))
     (println "Terminate TLS with the private overlay; no provider credentials are accepted.")
-    (println (if web-config
-               "Google-protected human switchboard enabled."
-               "Human switchboard disabled; configure its Google OIDC environment to enable it."))
+    (if web-server
+      (println (format
+                 "Cloudflare Access switchboard listening separately on http://%s:%d."
+                 (:host web-server) (:port web-server)))
+      (println "Human switchboard disabled; configure its Cloudflare Access environment to enable it."))
     (println (format "%d paired runner credential(s) loaded from the environment."
                      (count tokens)))
     (wait-until-shutdown!
-      #(do ((:stop server) :timeout 100)
+      #(do (when web-server ((:stop web-server) :timeout 100))
+           ((:stop server) :timeout 100)
            (broker-api/close-broker! state)))))
 
 (defn- run-runner! [args]

@@ -197,7 +197,7 @@ Destination-side durable deduplication still prevents a replay from becoming a
 second native submission. Terminal metadata is retained for 24 hours by
 default and then removed, bounding the idempotency ledger.
 
-## Google-protected operator switchboard
+## Cloudflare Access-protected operator switchboard
 
 The broker can also serve a small, server-rendered switchboard at `/`. It shows
 only the sanitized active route directory: agent family, opaque route id,
@@ -208,40 +208,39 @@ not claimed to be per-session deep links because the supported Claude and Codex
 discovery APIs do not currently publish those URLs. cch does not scrape
 provider rollout or transcript files to manufacture them.
 
-Create a Google OAuth 2.0 client of type **Web application** and register this
-exact redirect URI, substituting the private Tailscale Serve origin used for
-the broker:
+The runner API and human UI use separate listeners. Machines reach only the
+runner listener through tailnet-private Tailscale Serve. A stable human-facing
+hostname reaches only the UI listener through an outbound Cloudflare Tunnel,
+with Google identity enforced by Cloudflare Access before the request reaches
+cch. Funnel and public origin ports are not required.
 
-```text
-https://control.example-tailnet.ts.net/auth/google/callback
-```
-
-Configure the broker through its private deployment environment. The example
-values below are deliberately synthetic; OAuth identity, operator addresses,
-and secrets must remain outside this public repository:
+Configure the UI listener through its private deployment environment. The
+example values below are deliberately synthetic; Access identity, operator
+addresses, audience tags, and secrets must remain outside this public
+repository:
 
 ```bash
-export CCH_CONTROL_WEB_ORIGIN='https://control.example-tailnet.ts.net'
-export CCH_CONTROL_GOOGLE_CLIENT_ID='replace-outside-source-control'
-export CCH_CONTROL_GOOGLE_CLIENT_SECRET='replace-outside-source-control'
-export CCH_CONTROL_GOOGLE_ALLOWED_EMAILS='operator@example.invalid'
+export CCH_CONTROL_WEB_ORIGIN='https://control.example.invalid'
+export CCH_CONTROL_CLOUDFLARE_ISSUER='https://example.cloudflareaccess.com'
+export CCH_CONTROL_CLOUDFLARE_AUDIENCE='replace-with-access-audience-tag'
+export CCH_CONTROL_WEB_ALLOWED_EMAILS='operator@example.invalid'
 export CCH_CONTROL_WEB_SESSION_SECRET='replace-with-at-least-32-random-characters'
-export CCH_CONTROL_WEB_SESSION_HOURS='8'  # optional; allowed range 1..24
+export CCH_CONTROL_WEB_HOST='0.0.0.0' # container listener; defaults to loopback
+export CCH_CONTROL_WEB_PORT='8788'    # optional; this is the default
 ```
 
 All five required values are fail-closed: a partial configuration prevents
-broker startup, while leaving all of them unset disables only the human webapp.
-The runner JSON API remains authenticated exclusively by runner bearer tokens;
-a Google browser cookie never authorizes a runner request, and runner tokens
-never authorize the browser UI.
+broker startup, while leaving all of them unset disables only the human UI.
+The runner JSON API remains physically absent from the web listener and is
+authenticated exclusively by runner bearer tokens on its tailnet listener.
 
-Sign-in uses Google's authorization-code flow with PKCE, `state`, and `nonce`.
-The broker validates the ID-token signature against Google's keys, plus issuer,
-audience, authorized party when applicable, time claims, verified email, and an
-exact normalized-email allowlist. Browser state is an HMAC-signed, `Secure`,
-`HttpOnly`, `SameSite=Lax`, `__Host-` cookie with bounded expiry. Routing and
-logout forms additionally require a session-bound CSRF token and an exact
-same-origin `Origin` header.
+Cloudflare Access injects a signed application assertion after its Google and
+email-policy checks. cch independently validates the assertion signature
+against the pinned Access issuer's keys, plus issuer, audience, time claims,
+subject, and the exact normalized-email allowlist. Assertion expiry is the
+browser session boundary. Routing and logout forms additionally require an
+HMAC-signed token bound to that Access session and an exact same-origin
+`Origin` header. The Access assertion itself is never rendered or persisted.
 
 Manual messages have the fixed source `operator`, receive a fresh id, and use
 the same transient body and bounded delivery policy as agent-originated text.
@@ -258,10 +257,11 @@ clj -T:build uber
 podman build -t cch-control:local -f Containerfile .
 ```
 
-Run the broker container on the private network that can resolve Postgres,
-publish its HTTP port to host loopback only, and place Tailscale Serve in front
-of that loopback listener. Serve provides tailnet-only HTTPS; Funnel is not
-required and should remain disabled.
+Run the broker container on the private network that can resolve Postgres and
+publish both listeners to host loopback only. Put Tailscale Serve in front of
+the runner listener and the outbound Cloudflare Tunnel in front of the UI
+listener. Serve provides tailnet-only machine transport; Cloudflare Access
+provides the human Google identity boundary; Funnel remains disabled.
 
 Run the sanitized capability check at any time:
 

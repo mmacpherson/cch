@@ -43,12 +43,10 @@
 (defn handler
   "Build the Ring handler for one Broker. Error responses expose stable types,
   never credentials, bodies, paths, or exception data."
-  ([b] (handler b nil))
-  ([b web-config]
-   (let [web-handler (when web-config (switchboard/handler b web-config))]
-    (fn [{:keys [request-method uri] :as request}]
-      (try
-        (cond
+  [b]
+  (fn [{:keys [request-method uri] :as request}]
+    (try
+      (cond
         (and (= :get request-method) (= "/health" uri))
         (json-response 200 (broker/broker-summary b))
 
@@ -90,28 +88,45 @@
             (json-response 404 {:type "unknown-message"
                                 :message "Unknown message"})))
 
-          web-handler
-          (or (web-handler request)
-              (json-response 404 {:type "not-found" :message "Not found"}))
+        :else
+        (json-response 404 {:type "not-found" :message "Not found"}))
+      (catch clojure.lang.ExceptionInfo error
+        (let [type (or (:type (ex-data error)) :invalid-request)]
+          (json-response (error-status type)
+                         {:type (name type) :message (.getMessage error)})))
+      (catch Exception _
+        (json-response 400 {:type "invalid-request"
+                            :message "Invalid request"})))))
 
-          :else
-          (json-response 404 {:type "not-found" :message "Not found"}))
-        (catch clojure.lang.ExceptionInfo error
-          (let [type (or (:type (ex-data error)) :invalid-request)]
-            (json-response (error-status type)
-                           {:type (name type) :message (.getMessage error)})))
-        (catch Exception _
-          (json-response 400 {:type "invalid-request"
-                              :message "Invalid request"})))))))
+(defn web-handler
+  "Build the physically separate human listener. Runner and health endpoints
+  are absent even when a request carries a valid Access assertion."
+  [b config]
+  (let [human (switchboard/handler b config)]
+    (fn [request]
+      (or (human request)
+          {:status 404
+           :headers {"Content-Type" "text/plain; charset=utf-8"
+                     "Cache-Control" "no-store"}
+           :body "Not found"}))))
 
 (defn start!
   "Start a broker listener. TLS is intentionally terminated by the private
   overlay/reverse proxy; the default listener is loopback-only."
-  [b {:keys [host port web-config] :or {host "127.0.0.1" port 8787}}]
-  (let [stop (httpkit/run-server (handler b web-config)
+  [b {:keys [host port] :or {host "127.0.0.1" port 8787}}]
+  (let [stop (httpkit/run-server (handler b)
                                  {:ip host :port port
                                   :max-body (* 64 1024)})]
     {:stop stop :host host :port port}))
+
+(defn start-web!
+  "Start the Cloudflare Tunnel-only human listener separately from the runner
+  API listener."
+  [b {:keys [listen-host listen-port] :as config}]
+  (let [stop (httpkit/run-server (web-handler b config)
+                                 {:ip listen-host :port listen-port
+                                  :max-body (* 16 1024)})]
+    {:stop stop :host listen-host :port listen-port}))
 
 (defn runner-tokens-from-env
   "Read the broker's pairing map from one environment value. The value is

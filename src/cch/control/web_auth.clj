@@ -1,50 +1,212 @@
 (ns cch.control.web-auth
-  "Google OIDC and short-lived signed browser sessions for the human control
-  switchboard. Runner pairing and provider credentials never pass through this
-  namespace."
+  "Cloudflare Access authentication and stateless CSRF protection for the
+  human switchboard. Runner pairing and provider credentials never pass
+  through this namespace."
   (:require [cch.control.broker :as broker]
-            [cheshire.core :as json]
             [clojure.string :as str])
   (:import [com.nimbusds.jose JWSAlgorithm]
            [com.nimbusds.jose.crypto RSASSAVerifier]
            [com.nimbusds.jose.jwk JWKSet RSAKey]
            [com.nimbusds.jwt SignedJWT]
-           [java.net URI URLEncoder]
-           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
-            HttpResponse$BodyHandlers]
+           [java.net URI]
+           [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
            [java.nio.charset StandardCharsets]
-           [java.security MessageDigest SecureRandom]
            [java.time Duration]
            [java.util Base64 Date]
            [javax.crypto Mac]
            [javax.crypto.spec SecretKeySpec]))
 
-(def ^:const login-ttl-ms (* 10 60 1000))
-(def ^:const default-session-ttl-ms (* 8 60 60 1000))
-(def ^:const max-session-ttl-ms (* 24 60 60 1000))
-(def ^:const transaction-cookie-name "__Host-cch_oidc")
-(def ^:const session-cookie-name "__Host-cch_session")
-
-(def ^:private authorization-endpoint
-  "https://accounts.google.com/o/oauth2/v2/auth")
-(def ^:private token-endpoint "https://oauth2.googleapis.com/token")
-(def ^:private jwks-endpoint "https://www.googleapis.com/oauth2/v3/certs")
-(def ^:private accepted-issuers
-  #{"https://accounts.google.com" "accounts.google.com"})
-(def ^:private secure-random (SecureRandom.))
+(def ^:const jwks-cache-ttl-ms (* 5 60 1000))
+(def ^:private clock-skew-ms 60000)
 (def ^:private base64url-encoder (.withoutPadding (Base64/getUrlEncoder)))
-(def ^:private base64url-decoder (Base64/getUrlDecoder))
-
+(defonce ^:private jwks-cache (atom {}))
 (def ^:dynamic *now-ms* #(System/currentTimeMillis))
 
-(defn- random-token [byte-count]
-  (let [value (byte-array byte-count)]
-    (.nextBytes secure-random value)
-    (.encodeToString base64url-encoder value)))
+(defn- normalized-emails [raw]
+  (->> (str/split (or raw "") #",")
+       (map #(-> % str/trim str/lower-case))
+       (remove str/blank?)
+       set))
 
-(defn- sha256 [value]
-  (.digest (MessageDigest/getInstance "SHA-256")
-           (.getBytes ^String value StandardCharsets/UTF_8)))
+(defn- https-origin? [value required-host-suffix]
+  (try
+    (let [uri (URI/create value)
+          host (some-> (.getHost uri) str/lower-case)
+          path (.getPath uri)]
+      (and (= "https" (.getScheme uri))
+           (not (str/blank? host))
+           (or (nil? required-host-suffix)
+               (str/ends-with? host required-host-suffix))
+           (nil? (.getUserInfo uri))
+           (nil? (.getQuery uri))
+           (nil? (.getFragment uri))
+           (or (str/blank? path) (= "/" path))))
+    (catch Exception _ false)))
+
+(defn config-from-env
+  "Return nil when the human switchboard is entirely unconfigured. Any
+  partial or insecure configuration fails startup rather than weakening the
+  runner API."
+  ([] (config-from-env (System/getenv)))
+  ([env]
+   (let [required ["CCH_CONTROL_WEB_ORIGIN"
+                   "CCH_CONTROL_CLOUDFLARE_ISSUER"
+                   "CCH_CONTROL_CLOUDFLARE_AUDIENCE"
+                   "CCH_CONTROL_WEB_ALLOWED_EMAILS"
+                   "CCH_CONTROL_WEB_SESSION_SECRET"]
+         configured (select-keys env required)]
+     (when (seq configured)
+       (doseq [key required]
+         (when (str/blank? (get env key))
+           (throw (ex-info (str key " is required when the switchboard is enabled")
+                           {:type :invalid-web-config :field key}))))
+       (let [origin (str/replace (get env "CCH_CONTROL_WEB_ORIGIN") #"/$" "")
+             issuer (str/replace (get env "CCH_CONTROL_CLOUDFLARE_ISSUER") #"/$" "")
+             audience (get env "CCH_CONTROL_CLOUDFLARE_AUDIENCE")
+             emails (normalized-emails (get env "CCH_CONTROL_WEB_ALLOWED_EMAILS"))
+             secret (get env "CCH_CONTROL_WEB_SESSION_SECRET")
+             listen-host (or (not-empty (get env "CCH_CONTROL_WEB_HOST"))
+                             "127.0.0.1")
+             port-raw (get env "CCH_CONTROL_WEB_PORT")
+             listen-port (if (str/blank? port-raw) 8788 (parse-long port-raw))]
+         (when-not (https-origin? origin nil)
+           (throw (ex-info "CCH_CONTROL_WEB_ORIGIN must be an HTTPS origin"
+                           {:type :invalid-web-config
+                            :field "CCH_CONTROL_WEB_ORIGIN"})))
+         (when-not (https-origin? issuer ".cloudflareaccess.com")
+           (throw (ex-info
+                    "CCH_CONTROL_CLOUDFLARE_ISSUER must be an HTTPS Cloudflare Access origin"
+                    {:type :invalid-web-config
+                     :field "CCH_CONTROL_CLOUDFLARE_ISSUER"})))
+         (when-not (re-matches #"[A-Za-z0-9_-]{16,256}" audience)
+           (throw (ex-info "Cloudflare Access audience is invalid"
+                           {:type :invalid-web-config
+                            :field "CCH_CONTROL_CLOUDFLARE_AUDIENCE"})))
+         (when-not (and (seq emails)
+                        (every? #(re-matches #"[^@\s]+@[^@\s]+" %) emails))
+           (throw (ex-info "Web allowlist must contain exact email addresses"
+                           {:type :invalid-web-config
+                            :field "CCH_CONTROL_WEB_ALLOWED_EMAILS"})))
+         (when (< (count secret) 32)
+           (throw (ex-info "Web session secret must contain at least 32 characters"
+                           {:type :invalid-web-config
+                            :field "CCH_CONTROL_WEB_SESSION_SECRET"})))
+         (when (str/blank? listen-host)
+           (throw (ex-info "Web listener host must not be blank"
+                           {:type :invalid-web-config
+                            :field "CCH_CONTROL_WEB_HOST"})))
+         (when-not (and listen-port (<= 1 listen-port 65535))
+           (throw (ex-info "Web listener port must be between 1 and 65535"
+                           {:type :invalid-web-config
+                            :field "CCH_CONTROL_WEB_PORT"})))
+         {:origin origin
+          :issuer issuer
+          :audience audience
+          :allowed-emails emails
+          :session-secret secret
+          :listen-host listen-host
+          :listen-port listen-port
+          :jwks-url (str issuer "/cdn-cgi/access/certs")})))))
+
+(defn- http-get! [url]
+  (let [client (-> (HttpClient/newBuilder)
+                   (.connectTimeout (Duration/ofSeconds 5))
+                   .build)
+        request (-> (HttpRequest/newBuilder (URI/create url))
+                    (.timeout (Duration/ofSeconds 10))
+                    .GET
+                    .build)
+        response (.send client request (HttpResponse$BodyHandlers/ofString))]
+    (when-not (= 200 (.statusCode response))
+      (throw (ex-info "Cloudflare Access key endpoint rejected the request"
+                      {:type :access-upstream-error
+                       :status (.statusCode response)})))
+    (.body response)))
+
+(def ^:dynamic *fetch-jwks!* (fn [config] (http-get! (:jwks-url config))))
+
+(defn- cached-jwks! [config force-refresh?]
+  (let [key (:jwks-url config)
+        now (*now-ms*)
+        cached (get @jwks-cache key)]
+    (if (and (not force-refresh?) cached (< now (:refresh-after cached)))
+      (:value cached)
+      (let [value (*fetch-jwks!* config)]
+        (swap! jwks-cache assoc key {:value value
+                                     :refresh-after (+ now jwks-cache-ttl-ms)})
+        value))))
+
+(defn- date-ms [^Date value]
+  (when value (.getTime value)))
+
+(defn verify-access-token
+  "Verify one Cloudflare Access application assertion and return only the
+  identity fields required by the switchboard."
+  [config token jwks-json]
+  (try
+    (let [jwt (SignedJWT/parse token)
+          header (.getHeader jwt)
+          _ (when-not (= JWSAlgorithm/RS256 (.getAlgorithm header))
+              (throw (ex-info "Access token uses an unexpected algorithm"
+                              {:type :invalid-access-token})))
+          key (.getKeyByKeyId (JWKSet/parse jwks-json) (.getKeyID header))
+          _ (when-not (instance? RSAKey key)
+              (throw (ex-info "Access token signing key is unavailable"
+                              {:type :access-key-unavailable})))
+          _ (when-not (.verify jwt (RSASSAVerifier. (.toRSAPublicKey ^RSAKey key)))
+              (throw (ex-info "Access token signature is invalid"
+                              {:type :invalid-access-token})))
+          claims (.getJWTClaimsSet jwt)
+          now (*now-ms*)
+          audience (set (.getAudience claims))
+          issued-at (date-ms (.getIssueTime claims))
+          not-before (date-ms (.getNotBeforeTime claims))
+          expires-at (date-ms (.getExpirationTime claims))
+          subject (.getSubject claims)
+          email (some-> (.getStringClaim claims "email") str/lower-case)]
+      (when-not (= (:issuer config) (.getIssuer claims))
+        (throw (ex-info "Access token issuer is invalid"
+                        {:type :invalid-access-token})))
+      (when-not (contains? audience (:audience config))
+        (throw (ex-info "Access token audience is invalid"
+                        {:type :invalid-access-token})))
+      (when-not (and issued-at expires-at
+                     (<= issued-at (+ now clock-skew-ms))
+                     (or (nil? not-before)
+                         (<= not-before (+ now clock-skew-ms)))
+                     (< now expires-at))
+        (throw (ex-info "Access token is expired or not yet valid"
+                        {:type :invalid-access-token})))
+      (when-not (contains? (:allowed-emails config) email)
+        (throw (ex-info "Access identity is not allowed"
+                        {:type :identity-not-allowed})))
+      (when (str/blank? subject)
+        (throw (ex-info "Access token subject is missing"
+                        {:type :invalid-access-token})))
+      {:subject subject
+       :email email
+       :issued-at issued-at
+       :expires-at expires-at})
+    (catch clojure.lang.ExceptionInfo error (throw error))
+    (catch Exception error
+      (throw (ex-info "Cloudflare Access token is invalid"
+                      {:type :invalid-access-token} error)))))
+
+(defn authenticate!
+  "Authenticate a Ring request from the assertion injected by Cloudflare
+  Access. A missing assertion is never replaced by a browser cookie or runner
+  credential."
+  [config request]
+  (let [token (get-in request [:headers "cf-access-jwt-assertion"])]
+    (when (str/blank? token)
+      (throw (ex-info "Cloudflare Access assertion is required"
+                      {:type :access-required})))
+    (try
+      (verify-access-token config token (cached-jwks! config false))
+      (catch clojure.lang.ExceptionInfo error
+        (if (= :access-key-unavailable (:type (ex-data error)))
+          (verify-access-token config token (cached-jwks! config true))
+          (throw error))))))
 
 (defn- hmac [secret value]
   (let [mac (Mac/getInstance "HmacSHA256")]
@@ -53,258 +215,17 @@
                  "HmacSHA256"))
     (.doFinal mac (.getBytes ^String value StandardCharsets/UTF_8))))
 
-(defn- signed-token [config claims]
-  (let [payload (-> claims json/generate-string
-                    (.getBytes StandardCharsets/UTF_8)
-                    (->> (.encodeToString base64url-encoder)))]
-    (str payload "."
-         (.encodeToString base64url-encoder
-                          (hmac (:session-secret config) payload)))))
+(defn- csrf-material [identity]
+  (str (:subject identity) "\u0000" (:email identity) "\u0000"
+       (:issued-at identity) "\u0000" (:expires-at identity)))
 
-(defn- decode-token [config token expected-kind]
-  (try
-    (let [[payload signature & extra] (str/split (or token "") #"\." -1)
-          expected (.encodeToString base64url-encoder
-                                    (hmac (:session-secret config) payload))]
-      (when (and payload signature (empty? extra)
-                 (broker/secure-equal? expected signature))
-        (let [claims (-> (.decode base64url-decoder payload)
-                         (String. StandardCharsets/UTF_8)
-                         (json/parse-string true))]
-          (when (and (= expected-kind (:kind claims))
-                     (number? (:expires-at claims))
-                     (< (*now-ms*) (:expires-at claims)))
-            claims))))
-    (catch Exception _ nil)))
+(defn csrf-token [config identity]
+  (.encodeToString base64url-encoder
+                   (hmac (:session-secret config) (csrf-material identity))))
 
-(defn- normalized-emails [raw]
-  (->> (str/split (or raw "") #",")
-       (map #(-> % str/trim str/lower-case))
-       (remove str/blank?)
-       set))
-
-(defn- valid-origin? [value]
-  (try
-    (let [uri (URI/create value)
-          path (.getPath uri)]
-      (and (= "https" (.getScheme uri))
-           (not (str/blank? (.getHost uri)))
-           (nil? (.getUserInfo uri))
-           (nil? (.getQuery uri))
-           (nil? (.getFragment uri))
-           (or (str/blank? path) (= "/" path))))
-    (catch Exception _ false)))
-
-(defn config-from-env
-  "Return nil when the human webapp is entirely unconfigured. Any partial or
-  insecure configuration fails startup rather than weakening runner APIs."
-  ([] (config-from-env (System/getenv)))
-  ([env]
-   (let [keys ["CCH_CONTROL_WEB_ORIGIN"
-               "CCH_CONTROL_GOOGLE_CLIENT_ID"
-               "CCH_CONTROL_GOOGLE_CLIENT_SECRET"
-               "CCH_CONTROL_GOOGLE_ALLOWED_EMAILS"
-               "CCH_CONTROL_WEB_SESSION_SECRET"]
-         configured (select-keys env keys)]
-     (when (seq configured)
-       (doseq [key keys]
-         (when (str/blank? (get env key))
-           (throw (ex-info (str key " is required when the switchboard is enabled")
-                           {:type :invalid-web-config :field key}))))
-       (let [origin (str/replace (get env "CCH_CONTROL_WEB_ORIGIN") #"/$" "")
-             emails (normalized-emails
-                      (get env "CCH_CONTROL_GOOGLE_ALLOWED_EMAILS"))
-             secret (get env "CCH_CONTROL_WEB_SESSION_SECRET")
-             hours-raw (get env "CCH_CONTROL_WEB_SESSION_HOURS")
-             hours (if (str/blank? hours-raw) 8 (parse-long hours-raw))]
-         (when-not (valid-origin? origin)
-           (throw (ex-info "CCH_CONTROL_WEB_ORIGIN must be an HTTPS origin"
-                           {:type :invalid-web-config
-                            :field "CCH_CONTROL_WEB_ORIGIN"})))
-         (when-not (and (seq emails)
-                        (every? #(re-matches #"[^@\s]+@[^@\s]+" %) emails))
-           (throw (ex-info "Google email allowlist must contain exact email addresses"
-                           {:type :invalid-web-config
-                            :field "CCH_CONTROL_GOOGLE_ALLOWED_EMAILS"})))
-         (when (< (count secret) 32)
-           (throw (ex-info "Browser session secret must contain at least 32 characters"
-                           {:type :invalid-web-config
-                            :field "CCH_CONTROL_WEB_SESSION_SECRET"})))
-         (when-not (and hours (<= 1 hours 24))
-           (throw (ex-info "Browser session lifetime must be between 1 and 24 hours"
-                           {:type :invalid-web-config
-                            :field "CCH_CONTROL_WEB_SESSION_HOURS"})))
-         {:origin origin
-          :client-id (get env "CCH_CONTROL_GOOGLE_CLIENT_ID")
-          :client-secret (get env "CCH_CONTROL_GOOGLE_CLIENT_SECRET")
-          :allowed-emails emails
-          :session-secret secret
-          :session-ttl-ms (min max-session-ttl-ms (* hours 60 60 1000))})))))
-
-(defn- form-encode [values]
-  (->> values
-       (map (fn [[key value]]
-              (str (URLEncoder/encode (name key) StandardCharsets/UTF_8)
-                   "="
-                   (URLEncoder/encode (str value) StandardCharsets/UTF_8))))
-       (str/join "&")))
-
-(defn- http-request! [request]
-  (let [client (-> (HttpClient/newBuilder)
-                   (.connectTimeout (Duration/ofSeconds 5))
-                   .build)
-        response (.send client request (HttpResponse$BodyHandlers/ofString))]
-    (when-not (= 200 (.statusCode response))
-      (throw (ex-info "Google OIDC endpoint rejected the request"
-                      {:type :oidc-upstream-error
-                       :status (.statusCode response)})))
-    (.body response)))
-
-(defn- exchange-code [config code verifier]
-  (let [body (form-encode {:code code
-                           :client_id (:client-id config)
-                           :client_secret (:client-secret config)
-                           :redirect_uri (str (:origin config) "/auth/google/callback")
-                           :grant_type "authorization_code"
-                           :code_verifier verifier})]
-    (-> (HttpRequest/newBuilder (URI/create token-endpoint))
-        (.timeout (Duration/ofSeconds 10))
-        (.header "Content-Type" "application/x-www-form-urlencoded")
-        (.POST (HttpRequest$BodyPublishers/ofString body))
-        .build
-        http-request!
-        (json/parse-string true))))
-
-(defn- fetch-jwks []
-  (-> (HttpRequest/newBuilder (URI/create jwks-endpoint))
-      (.timeout (Duration/ofSeconds 10))
-      .GET
-      .build
-      http-request!))
-
-(def ^:dynamic *exchange-code!* exchange-code)
-(def ^:dynamic *fetch-jwks!* fetch-jwks)
-
-(defn- date-ms [^Date value]
-  (when value (.getTime value)))
-
-(defn verify-id-token
-  "Verify a Google ID token locally against Google's current signing keys and
-  return only the stable subject and verified email needed by the allowlist."
-  [config id-token nonce jwks-json]
-  (try
-    (let [jwt (SignedJWT/parse id-token)
-          header (.getHeader jwt)
-          _ (when-not (= JWSAlgorithm/RS256 (.getAlgorithm header))
-              (throw (ex-info "Google ID token uses an unexpected algorithm"
-                              {:type :invalid-id-token})))
-          key (.getKeyByKeyId (JWKSet/parse jwks-json) (.getKeyID header))
-          _ (when-not (instance? RSAKey key)
-              (throw (ex-info "Google ID token signing key is unavailable"
-                              {:type :invalid-id-token})))
-          _ (when-not (.verify jwt (RSASSAVerifier.
-                                     (.toRSAPublicKey ^RSAKey key)))
-              (throw (ex-info "Google ID token signature is invalid"
-                              {:type :invalid-id-token})))
-          claims (.getJWTClaimsSet jwt)
-          now (*now-ms*)
-          audience (set (.getAudience claims))
-          authorized-party (.getStringClaim claims "azp")
-          issued-at (date-ms (.getIssueTime claims))
-          not-before (date-ms (.getNotBeforeTime claims))
-          expires-at (date-ms (.getExpirationTime claims))
-          token-nonce (.getStringClaim claims "nonce")
-          subject (.getSubject claims)
-          email (some-> (.getStringClaim claims "email") str/lower-case)
-          verified (.getBooleanClaim claims "email_verified")]
-      (when-not (contains? accepted-issuers (.getIssuer claims))
-        (throw (ex-info "Google ID token issuer is invalid"
-                        {:type :invalid-id-token})))
-      (when-not (contains? audience (:client-id config))
-        (throw (ex-info "Google ID token audience is invalid"
-                        {:type :invalid-id-token})))
-      (when (and (> (count audience) 1)
-                 (not= (:client-id config) authorized-party))
-        (throw (ex-info "Google ID token authorized party is invalid"
-                        {:type :invalid-id-token})))
-      (when-not (and issued-at expires-at
-                     (<= issued-at (+ now 60000))
-                     (or (nil? not-before) (<= not-before (+ now 60000)))
-                     (< now expires-at))
-        (throw (ex-info "Google ID token is expired or not yet valid"
-                        {:type :invalid-id-token})))
-      (when-not (broker/secure-equal? nonce token-nonce)
-        (throw (ex-info "Google ID token nonce is invalid"
-                        {:type :invalid-id-token})))
-      (when-not (and (true? verified) (contains? (:allowed-emails config) email))
-        (throw (ex-info "Google identity is not allowed"
-                        {:type :identity-not-allowed})))
-      (when (str/blank? subject)
-        (throw (ex-info "Google ID token subject is missing"
-                        {:type :invalid-id-token})))
-      {:subject subject :email email})
-    (catch clojure.lang.ExceptionInfo error (throw error))
-    (catch Exception error
-      (throw (ex-info "Google ID token is invalid"
-                      {:type :invalid-id-token} error)))))
-
-(defn begin-login [config]
-  (let [now (*now-ms*)
-        state (random-token 32)
-        nonce (random-token 32)
-        verifier (random-token 64)
-        challenge (.encodeToString base64url-encoder (sha256 verifier))
-        transaction (signed-token config {:kind "oidc"
-                                          :state state
-                                          :nonce nonce
-                                          :verifier verifier
-                                          :expires-at (+ now login-ttl-ms)})
-        query (form-encode {:client_id (:client-id config)
-                            :redirect_uri (str (:origin config)
-                                               "/auth/google/callback")
-                            :response_type "code"
-                            :scope "openid email profile"
-                            :state state
-                            :nonce nonce
-                            :code_challenge challenge
-                            :code_challenge_method "S256"})]
-    {:location (str authorization-endpoint "?" query)
-     :transaction transaction}))
-
-(defn complete-login! [config {:keys [code state transaction]}]
-  (let [claims (decode-token config transaction "oidc")]
-    (when-not (and claims (broker/secure-equal? (:state claims) state))
-      (throw (ex-info "OIDC login state is invalid or expired"
-                      {:type :invalid-login-state})))
-    (when (str/blank? code)
-      (throw (ex-info "OIDC authorization code is missing"
-                      {:type :invalid-login-state})))
-    (let [tokens (*exchange-code!* config code (:verifier claims))
-          id-token (:id_token tokens)]
-      (when (str/blank? id-token)
-        (throw (ex-info "Google token response omitted the ID token"
-                        {:type :invalid-id-token})))
-      (verify-id-token config id-token (:nonce claims) (*fetch-jwks!*)))))
-
-(defn new-session [config identity]
-  (let [now (*now-ms*)]
-    (signed-token config {:kind "session"
-                          :subject (:subject identity)
-                          :email (:email identity)
-                          :csrf (random-token 32)
-                          :issued-at now
-                          :expires-at (+ now (:session-ttl-ms config))})))
-
-(defn session [config token]
-  (decode-token config token "session"))
-
-(defn csrf-valid? [session value]
+(defn csrf-valid? [config identity value]
   (and (string? value)
-       (broker/secure-equal? (:csrf session) value)))
+       (broker/secure-equal? (csrf-token config identity) value)))
 
-(defn cookie
-  ([name value max-age]
-   (str name "=" value "; Path=/; Max-Age=" max-age
-        "; Secure; HttpOnly; SameSite=Lax"))
-  ([name]
-   (str name "=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax")))
+(defn logout-location [config]
+  (str (:origin config) "/cdn-cgi/access/logout"))
