@@ -95,6 +95,23 @@
                      b1 {:runner-id "runner-b" :token "synthetic-token-b"
                          :message-id "postgres-message-1" :status "delivered"}))))
 
+          (is (= "queued"
+                 (:status
+                   (api/enqueue-operator-message!
+                     b1 {:target target :message "Synthetic operator ping"
+                         :message-id "postgres-operator-message"}))))
+          (is (= "operator"
+                 (-> (api/poll-messages!
+                       b1 {:runner-id "runner-b" :token "synthetic-token-b"})
+                     :messages first :source)))
+          (api/ack-message!
+            b1 {:runner-id "runner-b" :token "synthetic-token-b"
+                :message-id "postgres-operator-message" :status "delivered"})
+          (is (= "delivered"
+                 (:status (api/operator-message-metadata
+                            b1 "postgres-operator-message"))))
+          (is (nil? (api/operator-message-metadata b1 "postgres-message-1")))
+
           ;; Leave a second body queued, then restart the broker. Only its
           ;; digest/route metadata survives; an identical retry rehydrates it.
           (api/enqueue-message!

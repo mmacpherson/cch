@@ -197,6 +197,59 @@ Destination-side durable deduplication still prevents a replay from becoming a
 second native submission. Terminal metadata is retained for 24 hours by
 default and then removed, bounding the idempotency ledger.
 
+## Google-protected operator switchboard
+
+The broker can also serve a small, server-rendered switchboard at `/`. It shows
+only the sanitized active route directory: agent family, opaque route id,
+opaque runner id, native status, and a coarse ready/working/needs-you state.
+It has no transcript, prompt history, cwd, process id, socket, token, or message
+body view. Provider links open the provider's own control entrypoint; they are
+not claimed to be per-session deep links because the supported Claude and Codex
+discovery APIs do not currently publish those URLs. cch does not scrape
+provider rollout or transcript files to manufacture them.
+
+Create a Google OAuth 2.0 client of type **Web application** and register this
+exact redirect URI, substituting the private Tailscale Serve origin used for
+the broker:
+
+```text
+https://control.example-tailnet.ts.net/auth/google/callback
+```
+
+Configure the broker through its private deployment environment. The example
+values below are deliberately synthetic; OAuth identity, operator addresses,
+and secrets must remain outside this public repository:
+
+```bash
+export CCH_CONTROL_WEB_ORIGIN='https://control.example-tailnet.ts.net'
+export CCH_CONTROL_GOOGLE_CLIENT_ID='replace-outside-source-control'
+export CCH_CONTROL_GOOGLE_CLIENT_SECRET='replace-outside-source-control'
+export CCH_CONTROL_GOOGLE_ALLOWED_EMAILS='operator@example.invalid'
+export CCH_CONTROL_WEB_SESSION_SECRET='replace-with-at-least-32-random-characters'
+export CCH_CONTROL_WEB_SESSION_HOURS='8'  # optional; allowed range 1..24
+```
+
+All five required values are fail-closed: a partial configuration prevents
+broker startup, while leaving all of them unset disables only the human webapp.
+The runner JSON API remains authenticated exclusively by runner bearer tokens;
+a Google browser cookie never authorizes a runner request, and runner tokens
+never authorize the browser UI.
+
+Sign-in uses Google's authorization-code flow with PKCE, `state`, and `nonce`.
+The broker validates the ID-token signature against Google's keys, plus issuer,
+audience, authorized party when applicable, time claims, verified email, and an
+exact normalized-email allowlist. Browser state is an HMAC-signed, `Secure`,
+`HttpOnly`, `SameSite=Lax`, `__Host-` cookie with bounded expiry. Routing and
+logout forms additionally require a session-bound CSRF token and an exact
+same-origin `Origin` header.
+
+Manual messages have the fixed source `operator`, receive a fresh id, and use
+the same transient body and bounded delivery policy as agent-originated text.
+The page can show delivery metadata for the message it just created, but never
+stores or renders its body. Slash-command input is rejected; approvals,
+permission decisions, terminal frames, and provider credentials remain outside
+the contract.
+
 The checked-in container definition packages the same JVM artifact used by the
 host CLI without an installation script:
 

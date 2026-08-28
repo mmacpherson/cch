@@ -164,3 +164,39 @@
                                  :target "claude:00000000-0000-0000-0000-00000000000c"
                                  :message "Forged" :message-id "message-forged"})
              (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
+
+(deftest web-operator-routes-without-borrowing-a-runner-credential
+  (let [b (broker/new-broker runner-tokens)
+        source "codex:00000000-0000-0000-0000-00000000000a"
+        target "claude:00000000-0000-0000-0000-00000000000c"]
+    (register-pair! b)
+    (is (= "queued"
+           (:status (broker/enqueue-operator!
+                      b {:target target
+                         :message "Synthetic operator request"
+                         :message-id "operator-message"}))))
+    (is (= {:message-id "operator-message"
+            :source "operator"
+            :target target
+            :status "queued"
+            :attempts 0}
+           (select-keys (broker/operator-message-status b "operator-message")
+                        [:message-id :source :target :status :attempts])))
+    (is (= "Synthetic operator request"
+           (-> (broker/poll! b {:runner-id "runner-b"
+                                :token "synthetic-token-b"})
+               :messages first :body)))
+    (broker/enqueue! b {:runner-id "runner-a"
+                        :token "synthetic-token-a"
+                        :source source :target target
+                        :message "Synthetic agent request"
+                        :message-id "agent-message"})
+    (is (nil? (broker/operator-message-status b "agent-message")))
+    (is (= :unknown-session
+           (try
+             (broker/enqueue-operator!
+               b {:target "claude:00000000-0000-0000-0000-0000000000ff"
+                  :message "Synthetic unavailable request"
+                  :message-id "operator-unknown"})
+             (catch clojure.lang.ExceptionInfo error
+               (:type (ex-data error))))))))

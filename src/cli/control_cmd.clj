@@ -11,6 +11,7 @@
             [cch.control.doctor :as control-doctor]
             [cch.control.remote :as remote]
             [cch.control.runner :as runner]
+            [cch.control.web-auth :as web-auth]
             [cch.subprocess :as subprocess]
             [cheshire.core :as json]
             [cli.codex-app-server-service :as codex-service]
@@ -301,15 +302,20 @@
   (let [{:keys [host port]} (parse-command-options args broker-options)
         tokens (broker-http/runner-tokens-from-env)
         database (broker-postgres/database-config-from-env)
+        web-config (web-auth/config-from-env)
         state (if database
                 (broker-postgres/new-broker tokens database)
                 (broker/new-broker tokens))
-        server (broker-http/start! state {:host host :port port})]
+        server (broker-http/start! state {:host host :port port
+                                          :web-config web-config})]
     (println (format "Control broker listening on http://%s:%d" host port))
     (println (if database
                "Postgres route directory and message metadata enabled."
                "Disposable in-memory route directory enabled."))
     (println "Terminate TLS with the private overlay; no provider credentials are accepted.")
+    (println (if web-config
+               "Google-protected human switchboard enabled."
+               "Human switchboard disabled; configure its Google OIDC environment to enable it."))
     (println (format "%d paired runner credential(s) loaded from the environment."
                      (count tokens)))
     (wait-until-shutdown!

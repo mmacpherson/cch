@@ -301,10 +301,10 @@
                     {:type :message-too-large
                      :max-bytes memory/max-message-bytes}))))
 
-(defn- enqueue!
+(defn- enqueue-as!
   [^PostgresBroker broker
-   {:keys [runner-id token source target message message-id ttl-ms] :as request}]
-  (authorize! broker runner-id token)
+   {:keys [source target message message-id ttl-ms source-runner
+           require-owned-source?] :as request}]
   (validate-envelope! request)
   (let [timestamp-value (now broker)
         digest (store/content-digest message)
@@ -332,7 +332,9 @@
                       prior (row tx [(str "SELECT * FROM " messages
                                           " WHERE message_id=? FOR UPDATE")
                                      message-id])]
-                  (when-not (or (= "operator" source) (= runner-id source-owner))
+                  (when (and require-owned-source?
+                             (not (or (= "operator" source)
+                                      (= source-runner source-owner))))
                     (throw (ex-info "Source route is not leased by this runner"
                                     {:type :invalid-source :source source})))
                   (when-not target-owner
@@ -364,7 +366,7 @@
                                  " (message_id,source_route,source_runner,target_route,target_runner,"
                                  "content_sha256,status,attempts,created_at,next_attempt_at,expires_at)"
                                  " VALUES (?,?,?,?,?,?,'queued',0,?,?,?)")
-                            message-id source runner-id target target-owner digest
+                            message-id source source-runner target target-owner digest
                             (timestamp timestamp-value) (timestamp timestamp-value)
                             (timestamp expires)])
                       {:discard discard :store-body? true
@@ -374,6 +376,20 @@
         (when store-body?
           (swap! (:bodies broker) assoc message-id message))
         value))))
+
+(defn- enqueue!
+  [^PostgresBroker broker {:keys [runner-id token] :as request}]
+  (authorize! broker runner-id token)
+  (enqueue-as! broker (assoc request
+                             :source-runner runner-id
+                             :require-owned-source? true)))
+
+(defn- enqueue-operator!
+  [^PostgresBroker broker request]
+  (enqueue-as! broker (assoc request
+                             :source "operator"
+                             :source-runner "operator"
+                             :require-owned-source? false)))
 
 (defn- poll!
   [^PostgresBroker broker {:keys [runner-id token limit]}]
@@ -498,6 +514,24 @@
     (discard-bodies! broker discard)
     value))
 
+(defn- operator-message-status
+  [^PostgresBroker broker message-id]
+  (let [messages (table (:schema broker) "messages")
+        timestamp-value (now broker)
+        {:keys [value discard]}
+        (transact
+          (:datasource broker)
+          (fn [tx]
+            {:discard (expire-metadata! broker tx timestamp-value)
+             :value (some->
+                      (row tx [(str "SELECT * FROM " messages
+                                    " WHERE message_id=? AND source_route='operator'"
+                                    " AND source_runner='operator'")
+                               message-id])
+                      row->metadata)}))]
+    (discard-bodies! broker discard)
+    value))
+
 (defn- summary [^PostgresBroker broker]
   (let [timestamp-value (now broker)
         runners (table (:schema broker) "runners")
@@ -578,12 +612,16 @@
     (sessions broker))
   (enqueue-message! [broker request]
     (enqueue! broker request))
+  (enqueue-operator-message! [broker request]
+    (enqueue-operator! broker request))
   (poll-messages! [broker request]
     (poll! broker request))
   (ack-message! [broker request]
     (ack! broker request))
   (message-metadata [broker runner-id token message-id]
     (message-status broker runner-id token message-id))
+  (operator-message-metadata [broker message-id]
+    (operator-message-status broker message-id))
   (broker-summary [broker]
     (summary broker))
   (close-broker! [broker]

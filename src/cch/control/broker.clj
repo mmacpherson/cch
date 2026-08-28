@@ -182,16 +182,18 @@
 (defn get-session [^Broker broker route-id]
   (some #(when (= route-id (:id %)) %) (sessions broker)))
 
-(defn enqueue!
-  "Accept one transient envelope from an authenticated runner. A repeated id
-  with the same digest/routing is idempotent; conflicting reuse is rejected."
-  [^Broker broker {:keys [runner-id token source target message message-id ttl-ms]}]
-  (authorize! broker runner-id token)
+(defn- enqueue-as!
+  [^Broker broker
+   {:keys [source target message message-id ttl-ms source-runner
+           require-owned-source?]}]
   (doseq [[field value] [[:source source] [:target target] [:message-id message-id]]]
     (when-not (valid-label? value)
       (throw (ex-info (str (name field) " is invalid") {:type :invalid-message :field field}))))
   (when (str/blank? message)
     (throw (ex-info "message is required" {:type :invalid-message})))
+  (when (str/starts-with? (str/triml message) "/")
+    (throw (ex-info "command-mode input is not allowed"
+                    {:type :command-mode-not-allowed})))
   (when (> (alength (.getBytes ^String message StandardCharsets/UTF_8)) max-message-bytes)
     (throw (ex-info "message is too large"
                     {:type :message-too-large :max-bytes max-message-bytes})))
@@ -205,7 +207,9 @@
             source-owner (get-in state [:routes source :runner-id])
             target-owner (get-in state [:routes target :runner-id])
             prior (get-in state [:messages message-id])]
-        (when-not (or (= "operator" source) (= runner-id source-owner))
+        (when (and require-owned-source?
+                   (not (or (= "operator" source)
+                            (= source-runner source-owner))))
           (throw (ex-info "Source route is not leased by this runner"
                           {:type :invalid-source :source source})))
         (when-not target-owner
@@ -221,7 +225,7 @@
                             {:type :message-id-conflict :message-id message-id})))
           (let [envelope {:message-id message-id
                           :source source
-                          :source-runner runner-id
+                          :source-runner source-runner
                           :target target
                           :target-runner target-owner
                           :body message
@@ -234,6 +238,25 @@
             (reset! (:state broker) (assoc-in state [:messages message-id] envelope))
             {:message-id message-id :source source :target target
              :transport "broker-memory" :status "queued"}))))))
+
+(defn enqueue!
+  "Accept one transient envelope from an authenticated runner. A repeated id
+  with the same digest/routing is idempotent; conflicting reuse is rejected."
+  [^Broker broker {:keys [runner-id token] :as request}]
+  (authorize! broker runner-id token)
+  (enqueue-as! broker (assoc request
+                             :source-runner runner-id
+                             :require-owned-source? true)))
+
+(defn enqueue-operator!
+  "Accept one transient envelope from the separately authenticated human web
+  boundary. This capability has no runner token and cannot claim an agent
+  route as its source."
+  [^Broker broker request]
+  (enqueue-as! broker (assoc request
+                             :source "operator"
+                             :source-runner "operator"
+                             :require-owned-source? false)))
 
 (defn poll!
   "Lease up to limit due envelopes for one runner. Unacked leases become due
@@ -309,6 +332,17 @@
     (select-keys message [:message-id :source :target :status :attempts
                           :created-at :expires-at :failure])))
 
+(defn operator-message-status
+  "Return metadata only for a message created by the authenticated web
+  operator capability."
+  [^Broker broker message-id]
+  (expire! broker)
+  (when-let [message (get-in @(:state broker) [:messages message-id])]
+    (when (and (= "operator" (:source message))
+               (= "operator" (:source-runner message)))
+      (select-keys message [:message-id :source :target :status :attempts
+                            :created-at :expires-at :failure]))))
+
 (defn summary
   "Non-sensitive broker diagnostics."
   [^Broker broker]
@@ -329,12 +363,16 @@
     (sessions b))
   (enqueue-message! [b request]
     (enqueue! b request))
+  (enqueue-operator-message! [b request]
+    (enqueue-operator! b request))
   (poll-messages! [b request]
     (poll! b request))
   (ack-message! [b request]
     (ack! b request))
   (message-metadata [b runner-id token message-id]
     (message-status b runner-id token message-id))
+  (operator-message-metadata [b message-id]
+    (operator-message-status b message-id))
   (broker-summary [b]
     (summary b))
   (close-broker! [_] nil))

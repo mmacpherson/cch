@@ -1,6 +1,7 @@
 (ns cch.control.broker-http
   "Small JSON/HTTP boundary around the disposable in-memory broker."
   (:require [cch.control.broker-api :as broker]
+            [cch.control.switchboard :as switchboard]
             [cheshire.core :as json]
             [clojure.string :as str]
             [org.httpkit.server :as httpkit]))
@@ -42,10 +43,12 @@
 (defn handler
   "Build the Ring handler for one Broker. Error responses expose stable types,
   never credentials, bodies, paths, or exception data."
-  [b]
-  (fn [{:keys [request-method uri] :as request}]
-    (try
-      (cond
+  ([b] (handler b nil))
+  ([b web-config]
+   (let [web-handler (when web-config (switchboard/handler b web-config))]
+    (fn [{:keys [request-method uri] :as request}]
+      (try
+        (cond
         (and (= :get request-method) (= "/health" uri))
         (json-response 200 (broker/broker-summary b))
 
@@ -87,21 +90,25 @@
             (json-response 404 {:type "unknown-message"
                                 :message "Unknown message"})))
 
-        :else
-        (json-response 404 {:type "not-found" :message "Not found"}))
-      (catch clojure.lang.ExceptionInfo error
-        (let [type (or (:type (ex-data error)) :invalid-request)]
-          (json-response (error-status type)
-                         {:type (name type) :message (.getMessage error)})))
-      (catch Exception _
-        (json-response 400 {:type "invalid-request"
-                            :message "Invalid request"})))))
+          web-handler
+          (or (web-handler request)
+              (json-response 404 {:type "not-found" :message "Not found"}))
+
+          :else
+          (json-response 404 {:type "not-found" :message "Not found"}))
+        (catch clojure.lang.ExceptionInfo error
+          (let [type (or (:type (ex-data error)) :invalid-request)]
+            (json-response (error-status type)
+                           {:type (name type) :message (.getMessage error)})))
+        (catch Exception _
+          (json-response 400 {:type "invalid-request"
+                              :message "Invalid request"})))))))
 
 (defn start!
   "Start a broker listener. TLS is intentionally terminated by the private
   overlay/reverse proxy; the default listener is loopback-only."
-  [b {:keys [host port] :or {host "127.0.0.1" port 8787}}]
-  (let [stop (httpkit/run-server (handler b)
+  [b {:keys [host port web-config] :or {host "127.0.0.1" port 8787}}]
+  (let [stop (httpkit/run-server (handler b web-config)
                                  {:ip host :port port
                                   :max-body (* 64 1024)})]
     {:stop stop :host host :port port}))
