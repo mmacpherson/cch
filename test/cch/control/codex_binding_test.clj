@@ -33,10 +33,34 @@
                (get-in response
                        [:hookSpecificOutput :permissionDecision])))))))
 
+(deftest hook-normalizes-live-codex-route-alias
+  (let [recorded (atom nil)
+        payload (-> synthetic-payload
+                    (update :tool_input dissoc :target)
+                    (assoc-in [:tool_input :route] "claude:session-1"))]
+    (with-redefs [store/record-codex-binding!
+                  (fn [value] (reset! recorded value))]
+      (let [response (binding/bind! payload)
+            updated (get-in response [:hookSpecificOutput :updatedInput])]
+        (is (= "claude:session-1" (:target @recorded)))
+        (is (= "claude:session-1" (:target updated)))
+        (is (not (contains? updated :route)))))))
+
+(deftest hook-strips-code-mode-runtime-metadata
+  (with-redefs [store/record-codex-binding! (constantly nil)]
+    (let [response (binding/bind!
+                     (assoc-in synthetic-payload [:tool_input :runtime]
+                               {:internal true}))
+          updated (get-in response [:hookSpecificOutput :updatedInput])]
+      (is (not (contains? updated :runtime)))
+      (is (= "tool-call-1" (:source_proof updated))))))
+
 (deftest unexpected-hook-shapes-fail-closed
   (doseq [payload [(assoc synthetic-payload :hook_event_name "PostToolUse")
                    (assoc synthetic-payload :tool_name "mcp__other__tool")
-                   (assoc synthetic-payload :session_id "")]]
+                   (assoc synthetic-payload :session_id "")
+                   (assoc-in synthetic-payload [:tool_input :route]
+                             "claude:ambiguous")]]
     (is (= :invalid-codex-binding-hook
            (try (binding/bind! payload) nil
                 (catch clojure.lang.ExceptionInfo error

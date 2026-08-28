@@ -3,6 +3,7 @@
   (:require [cch.control.codex-binding :as codex-binding]
             [cch.control.core :as control]
             [cheshire.core :as json]
+            [clojure.string :as str]
             [plumcp.core.api.entity-gen :as eg]
             [plumcp.core.api.entity-support :as es]
             [plumcp.core.api.mcp-server :as ms]
@@ -17,23 +18,56 @@
   (System/getenv "CCH_MCP_CALLER"))
 
 (def ^:private send-message-keys
-  #{:target :message :message_id :source_proof})
+  #{:target :route :message :message_id :message-id
+    :source_proof :source-proof})
+
+(defn- runtime-key?
+  "Recognize only the internal metadata field attached by Codex's code-mode
+  MCP bridge. Depending on the bridge path it may retain a namespace or arrive
+  as a non-keyword named key. Its value is always discarded."
+  [key]
+  (and (or (keyword? key) (symbol? key) (string? key))
+       (= "runtime" (name key))))
+
+(defn- reject-duplicate-aliases!
+  [arguments aliases label]
+  (when (< 1 (count (filter #(contains? arguments %) aliases)))
+    (throw (ex-info (str "send_message accepts exactly one " label " field")
+                    {:type :unsupported-control-input
+                     :fields (mapv name aliases)}))))
 
 (defn- validate-send-arguments!
   "Fail closed when a client attempts to smuggle a second protocol through
   the generic message tool. Provider credentials, permission replies, raw
   frames, and command input are not fields in this capability."
   [arguments caller]
-  (let [unsupported (seq (remove send-message-keys (keys arguments)))]
+  (let [unsupported (seq (remove #(or (contains? send-message-keys %)
+                                       (runtime-key? %))
+                                 (keys arguments)))
+        target (:target arguments)
+        route (:route arguments)]
     (when unsupported
-      (throw (ex-info "send_message accepts only its documented text envelope"
+      (throw (ex-info (str "send_message accepts only its documented text envelope; "
+                           "unsupported fields: "
+                           (str/join ", " (sort (map name unsupported))))
                       {:type :unsupported-control-input
                        :fields (vec (sort (map name unsupported)))})))
-    (when (and (not= "codex" caller) (contains? arguments :source_proof))
+    (reject-duplicate-aliases! arguments [:target :route] "destination")
+    (reject-duplicate-aliases! arguments [:message_id :message-id] "message id")
+    (reject-duplicate-aliases! arguments [:source_proof :source-proof] "source proof")
+    (when (and (not= "codex" caller)
+               (some #(contains? arguments %) [:source_proof :source-proof]))
       (throw (ex-info "source_proof is reserved for the trusted Codex hook"
                       {:type :unsupported-control-input
                        :fields ["source_proof"]})))
-    arguments))
+    (cond-> (apply dissoc arguments
+                   :route :message-id :source-proof
+                   (filter runtime-key? (keys arguments)))
+      route (assoc :target route)
+      (contains? arguments :message-id)
+      (assoc :message_id (:message-id arguments))
+      (contains? arguments :source-proof)
+      (assoc :source_proof (:source-proof arguments)))))
 
 (defn ^{:mcp-name "list_sessions" :mcp-type :tool}
   list-sessions
@@ -66,7 +100,8 @@
            source_proof]
     :as arguments}]
   (let [caller (caller-agent)
-        _ (validate-send-arguments! arguments caller)
+        arguments (validate-send-arguments! arguments caller)
+        {:keys [target message message_id source_proof]} arguments
         source (case caller
                  "codex" (codex-binding/claim-source!
                            {:source-proof source_proof
