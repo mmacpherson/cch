@@ -6,6 +6,7 @@
             [cch.control.broker-http :as broker-http]
             [cch.control.broker-postgres :as broker-postgres]
             [cch.control.codex-binding :as codex-binding]
+            [cch.control.codex :as codex]
             [cch.control.core :as control]
             [cch.control.doctor :as control-doctor]
             [cch.control.remote :as remote]
@@ -16,8 +17,14 @@
             [cli.codex-settings :as codex-settings]
             [cli.control-runner-service :as runner-service]
             [cli.settings :as settings]
+            [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.tools.cli :as cli]))
+            [clojure.tools.cli :as cli])
+  (:import [java.math BigInteger]
+           [java.net JarURLConnection]
+           [java.nio.charset StandardCharsets]
+           [java.nio.file Files]
+           [java.security MessageDigest]))
 
 (def ^:private send-options
   [[nil "--to ROUTE" "Destination route id"]
@@ -44,7 +51,41 @@
     (zero? (:exit (subprocess/run (into [command] args))))
     (catch Exception _ false)))
 
-(defn- mcp-commands [agent codex-home cch-bin pairing-path]
+(defn- deployment-files []
+  (let [resource (io/resource "cch/control/mcp.clj")]
+    (case (.getProtocol resource)
+      "jar"
+      [(-> ^JarURLConnection (.openConnection resource)
+           .getJarFileURL
+           .toURI
+           io/file)]
+
+      "file"
+      (let [source-file (io/file (.toURI resource))
+            source-root (nth (iterate #(.getParentFile %) source-file) 3)
+            repo-root (.getParentFile source-root)
+            roots [source-root (io/file repo-root "resources")]
+            files (concat [(io/file repo-root "deps.edn")]
+                          (mapcat file-seq roots))]
+        (->> files (filter #(.isFile %)) (sort-by #(.getPath %))))
+
+      (throw (ex-info "Cannot identify the deployed cch code artifact"
+                      {:type :cch-revision-unavailable
+                       :protocol (.getProtocol resource)})))))
+
+(defn- deployment-revision []
+  (let [digest (MessageDigest/getInstance "SHA-256")]
+    (doseq [file (deployment-files)]
+      ;; Separators prevent two differently partitioned files from producing
+      ;; the same concatenated byte stream. Only the digest enters provider
+      ;; config; local paths and source contents never do.
+      (.update digest (.getBytes (.getName file) StandardCharsets/UTF_8))
+      (.update digest (byte-array [(byte 0)]))
+      (.update digest (Files/readAllBytes (.toPath file)))
+      (.update digest (byte-array [(byte 0)])))
+    (format "%064x" (BigInteger. 1 (.digest digest)))))
+
+(defn- mcp-commands [agent codex-home cch-bin pairing-path revision]
   (case agent
     :claude
     {:get ["claude" "mcp" "get" "cch"]
@@ -52,7 +93,8 @@
      :add (vec (concat ["claude" "mcp" "add" "--scope" "user" "cch"
                         "--env" (str "CODEX_HOME=" codex-home)
                         "--env" "CCH_MCP_CALLER=claude"
-                        "--env" (str "CCH_CONTROL_PAIRING_PATH=" pairing-path)]
+                        "--env" (str "CCH_CONTROL_PAIRING_PATH=" pairing-path)
+                        "--env" (str "CCH_MCP_REVISION=" revision)]
                        ["--" cch-bin "control" "mcp"]))}
 
     :codex
@@ -83,11 +125,11 @@
                        :action action})))
     result))
 
-(defn- install-mcp! [agent codex-home cch-bin pairing-path]
+(defn- install-mcp! [agent codex-home cch-bin pairing-path revision]
   (let [command (name agent)]
     (when (command-available? command)
       (let [{:keys [get remove add]}
-            (mcp-commands agent codex-home cch-bin pairing-path)
+            (mcp-commands agent codex-home cch-bin pairing-path revision)
             present? (configured? command (rest get))]
         ;; Provider CLIs may sanitize inherited environment variables before
         ;; spawning MCP servers. Reconcile the cch-owned entry so both agents
@@ -106,7 +148,8 @@
                :args ["control" "mcp"]
                :env {"CODEX_HOME" codex-home
                      "CCH_MCP_CALLER" "codex"
-                     "CCH_CONTROL_PAIRING_PATH" pairing-path}})
+                     "CCH_CONTROL_PAIRING_PATH" pairing-path
+                     "CCH_MCP_REVISION" revision}})
             (run-mcp-command! agent :validate get))
           (run-mcp-command! agent :install add))
         (if present? :updated :installed)))))
@@ -134,6 +177,7 @@
                     (throw (ex-info "Cannot install native control hooks: cch is not on PATH"
                                     {:type :cch-cli-unavailable})))
         pairing-path (remote/pairing-path)
+        revision (deployment-revision)
         env-pairing (remote/config-from-env)]
     (when env-pairing
       (remote/save-config! env-pairing))
@@ -143,7 +187,8 @@
     (println "Installed automatic Claude session registration in" path)
     (println "Pre-authorized only cch's three native routing tools for Claude")
     (doseq [agent [:claude :codex]
-            :let [status (install-mcp! agent codex-home cch-bin pairing-path)]]
+            :let [status (install-mcp! agent codex-home cch-bin pairing-path
+                                       revision)]]
       (println (format "%-7s MCP: %s" (name agent)
                        (case status
                          :installed "installed"
@@ -219,6 +264,25 @@
                               :source (:source options)
                               :message-id (:message-id options)}))))
 
+(defn- refresh-mcp! [args]
+  (case (first args)
+    "codex"
+    (let [{:keys [tools]} (codex/refresh-mcp!)]
+      (println "Codex cch MCP: refreshed and verified through the shared app-server")
+      (println "Verified tools:" (str/join ", " tools))
+      (println "No Codex agent or app-server process was restarted."))
+
+    "claude"
+    (do
+      (println "Claude MCP refresh is local to each active session.")
+      (println "Run this inside the Claude Code session that needs the new cch version:")
+      (println "  /mcp reconnect cch")
+      (println "This preserves the session and restarts only its cch MCP subprocess."))
+
+    (throw (ex-info
+             "Usage: cch control refresh-mcp <claude|codex>"
+             {:type :invalid-cli-options}))))
+
 (defn- parse-command-options [args option-spec]
   (let [{:keys [options errors summary]} (cli/parse-opts args option-spec)]
     (when (seq errors)
@@ -275,6 +339,7 @@
   (println "  sessions         List sanitized native session presence")
   (println "  get ROUTE        Get one session")
   (println "  send [options]   Send a native text message")
+  (println "  refresh-mcp AGENT Refresh cch tools in active Claude or Codex sessions")
   (println "  broker [options] Run the private broker (Postgres when configured)")
   (println "  runner [options] Run one outbound paired runner")
   (println "  mcp              Run the PluMCP stdio server")
@@ -290,6 +355,7 @@
       "sessions" (print-json (control/list-sessions))
       "get" (print-json {:session (control/get-session (first more))})
       "send" (send! more)
+      "refresh-mcp" (refresh-mcp! more)
       "broker" (run-broker! more)
       "runner" (run-runner! more)
       "mcp" ((requiring-resolve 'cch.control.mcp/-main))

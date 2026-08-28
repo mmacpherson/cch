@@ -60,6 +60,47 @@ pairing. The installer allowlists exactly `list_sessions`, `get_session`, and
 three Claude permission rules. It does not use a wildcard or change either
 provider's global approval policy, auto mode, or permissions for other tools.
 
+### Refreshing active sessions after a cch upgrade
+
+Re-run `cch control install` after upgrading cch so future sessions receive the
+current absolute executable path, environment, hooks, and tool allowlist. The
+installer deliberately does not restart active agents or their existing MCP
+subprocesses. It also records a SHA-256 revision of the deployed cch code in
+the cch-owned MCP environment. The digest contains no source, paths, machine
+identity, or credentials; it gives provider refresh machinery a deterministic
+configuration change when the executable path itself stays constant.
+
+An active Claude session keeps the cch subprocess and tool catalogue it started
+with. Refresh only that session by entering this native Claude Code command in
+it:
+
+```text
+/mcp reconnect cch
+```
+
+The conversation remains active and unrelated Claude sessions are untouched.
+Run the command once in each already-running Claude session that needs the new
+cch version. `cch control refresh-mcp claude` prints this instruction when it is
+not convenient to remember it.
+
+Codex sessions connected to cch's shared app-server use its typed MCP reload
+request instead:
+
+```bash
+cch control refresh-mcp codex
+```
+
+The command calls `config/mcpServer/reload`, then checks
+`mcpServerStatus/list` for exactly cch's expected tools. Codex defines reload at
+app-server scope, so other MCP servers managed by that daemon may reconnect
+briefly. The shared daemon and all attached Codex agent processes remain
+running. A failure to restore cch is reported rather than presented as a
+successful refresh.
+
+These are explicit operator actions rather than part of install or upgrade.
+New Claude sessions and new `codex --remote unix://` sessions start the current
+cch MCP command automatically and need no refresh step.
+
 Claude Code must be version 2.1.224 or newer for native cross-session messaging.
 Claude or Codex Remote Control may be enabled independently after the POC; cch
 does not proxy either provider's cloud connection or approval channel.

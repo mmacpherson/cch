@@ -130,6 +130,48 @@
 (defn sessions []
   (call-with-client sessions-with-client))
 
+(def ^:private cch-tool-names
+  #{"list_sessions" "get_session" "send_message"})
+
+(defn refresh-mcp!
+  "Ask the shared Codex app-server to reload its MCP runtimes, then verify that
+  cch came back with its deliberately narrow tool surface. The upstream reload
+  request is app-server-wide; it does not restart the daemon or attached agent
+  clients, but may briefly reconnect other MCP servers owned by that daemon."
+  []
+  (call-with-client
+    (fn [client]
+      (rpc! client "config/mcpServer/reload" nil)
+      (let [servers (:data (rpc! client "mcpServerStatus/list"
+                                 {:detail "toolsAndAuthOnly"}))
+            cch-server (some #(when (= "cch" (:name %)) %) servers)
+            tools (set (map name (keys (:tools cch-server))))
+            missing (sort (remove tools cch-tool-names))
+            unexpected (sort (remove cch-tool-names tools))]
+        (when-not cch-server
+          (throw (ex-info
+                   "Codex reloaded MCP servers, but the cch server is unavailable"
+                   {:type :codex-mcp-refresh-failed
+                    :server "cch"})))
+        (when (seq missing)
+          (throw (ex-info
+                   (str "Codex reloaded cch, but expected tools are missing: "
+                        (str/join ", " missing))
+                   {:type :codex-mcp-refresh-failed
+                    :server "cch"
+                    :missing-tools missing})))
+        (when (seq unexpected)
+          (throw (ex-info
+                   (str "Codex reloaded cch, but unexpected tools are present: "
+                        (str/join ", " unexpected))
+                   {:type :codex-mcp-refresh-failed
+                    :server "cch"
+                    :unexpected-tools unexpected})))
+        {:agent "codex"
+         :server "cch"
+         :status "refreshed"
+         :tools (sort cch-tool-names)}))))
+
 (defn send!
   "Queue normal text input to an active Codex thread. The app-server's
   clientUserMessageId is the caller's stable id, providing native deduping."
