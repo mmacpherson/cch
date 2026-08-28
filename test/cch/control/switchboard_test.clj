@@ -145,6 +145,25 @@
                                 :token "synthetic-runner-token"})
                :messages first :body)))))
 
+(deftest same-origin-fetch-metadata-survives-a-missing-origin-header
+  (authenticated
+    (fn []
+      (let [b (registered-broker)
+            handler (switchboard/handler b config)
+            csrf (auth/csrf-token config access-identity)
+            request (-> (form-request
+                          "/messages"
+                          (str "csrf=" csrf "&target=" target
+                               "&message=Synthetic+request"))
+                        (update :headers dissoc "origin")
+                        (assoc-in [:headers "host"] "control.invalid")
+                        (assoc-in [:headers "sec-fetch-site"] "same-origin"))]
+        (is (= 303 (:status (handler request))))
+        (is (= "Synthetic request"
+               (-> (broker/poll! b {:runner-id "runner-a"
+                                    :token "synthetic-runner-token"})
+                   :messages first :body)))))))
+
 (deftest routing-posts-require-origin-and-access-bound-csrf
   (authenticated
     (fn []
@@ -159,6 +178,17 @@
                 (doseq [request
                         [(assoc-in base [:headers "origin"]
                                    "https://other.invalid")
+                         (-> base
+                             (update :headers dissoc "origin")
+                             (assoc-in [:headers "host"] "other.invalid")
+                             (assoc-in [:headers "sec-fetch-site"]
+                                       "same-origin"))
+                         (-> base
+                             (update :headers dissoc "origin")
+                             (assoc-in [:headers "host"] "control.invalid")
+                             (assoc-in [:headers "sec-fetch-site"]
+                                       "cross-site"))
+                         (update base :headers dissoc "origin")
                          (assoc base :body
                                 (body
                                   (str "csrf=wrong&target=" target

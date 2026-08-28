@@ -6,7 +6,7 @@
             [cch.control.web-auth :as auth]
             [clojure.string :as str]
             [hiccup2.core :as hic])
-  (:import [java.net URLDecoder URLEncoder]
+  (:import [java.net URI URLDecoder URLEncoder]
            [java.nio.charset StandardCharsets]))
 
 (def ^:private security-headers
@@ -61,8 +61,17 @@
 (defn- request-query [request]
   (parse-form (:query-string request)))
 
+(defn- authorized-form-origin? [config request]
+  (let [headers (:headers request)
+        expected-origin (:origin config)
+        expected-authority (.getAuthority (URI/create expected-origin))]
+    (or (= expected-origin (get headers "origin"))
+        (and (= "same-origin" (get headers "sec-fetch-site"))
+             (= (str/lower-case expected-authority)
+                (some-> (get headers "host") str/lower-case))))))
+
 (defn- csrf! [config request identity form]
-  (when-not (= (:origin config) (get-in request [:headers "origin"]))
+  (when-not (authorized-form-origin? config request)
     (throw (ex-info "Request origin is invalid"
                     {:type :invalid-csrf :reason :origin})))
   (when-not (auth/csrf-valid? config identity (:csrf form))
