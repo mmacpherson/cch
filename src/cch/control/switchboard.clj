@@ -169,7 +169,7 @@
       [:section.panel
        [:h2 "Sessions"]
        [:p.muted
-        "Names are presentation only; routing still uses the opaque route id. Aliases are visible to paired control-plane participants, so do not use secrets, paths, or private client names."]
+        "Names are presentation only; routing still uses the opaque route id. Provider names and aliases are visible to paired control-plane participants, so keep them free of secrets, paths, or private client names."]
        (if (seq sessions)
          [:div.sessions (map #(session-card % (:csrf identity)) sessions)]
          [:div.empty "No active runner leases are currently visible."])]

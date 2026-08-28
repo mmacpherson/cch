@@ -9,7 +9,7 @@
 (def runner-a-sessions
   [{:id "codex:00000000-0000-0000-0000-00000000000a"
     :agent "codex" :native-id "private-native-value" :cwd "/private/path"
-    :name "Private label" :status "idle" :available true}])
+    :name "Native panel" :status "idle" :available true}])
 
 (def runner-b-sessions
   [{:id "codex:00000000-0000-0000-0000-00000000000b"
@@ -36,6 +36,7 @@
              :runner-id "runner-b"}
             {:id "codex:00000000-0000-0000-0000-00000000000a"
              :agent "codex" :status "idle" :available true
+             :name "Native panel"
              :runner-id "runner-a"}
             {:id "codex:00000000-0000-0000-0000-00000000000b"
              :agent "codex" :status "idle" :available true
@@ -44,8 +45,9 @@
     (is (every? #(re-matches #"[a-z]+-[a-z]+-[0-9a-f]{4}"
                              (:mnemonic %))
                 (broker/sessions b)))
-    (is (every? #(= (:mnemonic %) (:display-name %))
-                (broker/sessions b)))
+    (is (= (str "Native panel · "
+                (:mnemonic (second (broker/sessions b))))
+           (:display-name (second (broker/sessions b)))))
     (is (nil? (:cwd (first (broker/sessions b)))))
     (is (nil? (:native-url (last (broker/sessions b))))
         "generic or unrecognized provider links are discarded")
@@ -54,6 +56,17 @@
              (broker/register! b {:runner-id "runner-a" :token "wrong"
                                   :sessions []})
              (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
+
+(deftest malformed-native-names-are-not-federated
+  (let [b (broker/new-broker runner-tokens)
+        route "codex:00000000-0000-0000-0000-00000000000e"]
+    (broker/register!
+      b {:runner-id "runner-a" :token "synthetic-token-a"
+         :sessions [{:id route :agent "codex" :status "idle"
+                     :available true :name "forged\nname"}]})
+    (let [session (first (broker/sessions b))]
+      (is (nil? (:name session)))
+      (is (= (:mnemonic session) (:display-name session))))))
 
 (deftest aliases-are-presentation-only-and-owner-bound
   (let [b (broker/new-broker runner-tokens)

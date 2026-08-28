@@ -88,14 +88,18 @@
           value))
       (catch Exception _ nil))))
 
-(defn sanitize-session [{:keys [id status available native-url]}]
+(defn sanitize-session [{:keys [id status available native-url name]}]
   (when-let [agent (and (valid-label? id) (route-agent id))]
-    (let [native-url (sanitized-native-url agent native-url)]
+    (let [native-url (sanitized-native-url agent native-url)
+          native-name (try
+                        (naming/normalize-native-name name)
+                        (catch clojure.lang.ExceptionInfo _ nil))]
       (cond->
         {:id id
          :agent agent
          :status (if (valid-label? status) status "unknown")
          :available (boolean available)}
+        native-name (assoc :name native-name)
         native-url (assoc :native-url native-url)))))
 
 (defn clamp [value lower upper]

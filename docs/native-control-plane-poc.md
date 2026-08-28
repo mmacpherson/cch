@@ -202,10 +202,11 @@ default and then removed, bounding the idempotency ledger.
 
 The broker can also serve a small, server-rendered switchboard at `/`. It shows
 only the sanitized active route directory: agent family, opaque route id,
-opaque runner id, native status, and a coarse ready/working/needs-you state.
-It has no transcript, prompt history, cwd, process id, socket, token, or message
-body view. A native action is shown only when the local adapter advertises a
-narrowly validated, exact session URL; generic provider home links are omitted.
+opaque runner id, bounded provider-advertised session name, native status, and
+a coarse ready/working/needs-you state. It has no transcript, prompt history,
+cwd, process id, socket, token, or message body view. A native action is shown
+only when the local adapter advertises a narrowly validated, exact session URL;
+generic provider home links are omitted.
 For a Claude session with Remote Control active, the adapter incrementally
 reads Claude's structured `bridge_status` transcript event, caches its dedicated
 `claude.ai/code/session_...` URL in the machine-local operational store, and
@@ -215,15 +216,16 @@ sessions intentionally have no native action yet. cch never reads or federates
 transcript content beyond that provider-authored bridge event.
 
 Every route also receives a stable mnemonic derived only from its opaque route
-id, such as `quiet-otter-a31f`. An operator or the owning agent can set a short
-explicit alias; the UI retains the mnemonic beside it so duplicate aliases stay
-distinguishable, and routing continues to use the route id. Aliases are bounded,
-escaped presentation metadata. They are broker-visible by design, so callers
-are warned not to use secrets, paths, repository or client names, or other
-private context. Provider titles, prompts, cwd, and transcript content are
-never inferred into a name. Runner-authenticated updates must target a route
-currently leased by that runner; Codex self-renames additionally use the same
-one-time native-session hook binding as agent-originated messages.
+id, such as `quiet-otter-a31f`. When Claude or Codex advertises the same bounded
+native session name shown by its own UI, cch carries that name as presentation
+metadata and shows it with the mnemonic, such as `review-pair · quiet-otter-a31f`.
+An operator or the owning agent can set a short explicit alias, which takes
+precedence over the native name. Routing always continues to use the route id.
+Native names and aliases are bounded and escaped. They are broker-visible by
+design; cwd, prompts, transcript content, credentials, and other local metadata
+are not used to derive a name. Runner-authenticated alias updates must target a
+route currently leased by that runner; Codex self-renames additionally use the
+same one-time native-session hook binding as agent-originated messages.
 
 The runner API and human UI use separate listeners. Machines reach only the
 runner listener through tailnet-private Tailscale Serve. A stable human-facing

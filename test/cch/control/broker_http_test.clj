@@ -19,7 +19,8 @@
 
 (def sessions-a
   [{:id "codex:10000000-0000-0000-0000-00000000000a"
-    :agent "codex" :status "idle" :available true :cwd "/not-shared"}])
+    :agent "codex" :status "idle" :available true :cwd "/not-shared"
+    :name "Native panel"}])
 
 (def sessions-b
   [{:id "claude:10000000-0000-0000-0000-00000000000b"
@@ -39,6 +40,10 @@
                "claude:10000000-0000-0000-0000-00000000000b"}
              (set (map :id (remote/sessions a)))))
       (is (every? #(nil? (:cwd %)) (remote/sessions a)))
+      (is (= "Native panel"
+             (:name (some #(when (= "codex:10000000-0000-0000-0000-00000000000a"
+                                    (:id %)) %)
+                          (remote/sessions runner-b)))))
       (is (= "Build pair"
              (:alias
                (remote/set-session-alias!

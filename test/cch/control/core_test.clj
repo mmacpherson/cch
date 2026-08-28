@@ -144,7 +144,7 @@
     (with-redefs [claude/sessions
                   (constantly [{:id route-id :agent "claude"
                                 :status "working" :available true
-                                :name "Private inferred title"}])
+                                :name "Native panel"}])
                   codex/sessions (constantly [])
                   remote/config
                   (constantly {:url "https://broker.invalid"
@@ -155,9 +155,10 @@
                     {:id route :alias alias})]
       (let [local (first (:sessions (control/list-local-sessions)))]
         (is (string? (:mnemonic local)))
-        (is (= (:mnemonic local) (:display-name local)))
+        (is (= (str "Native panel · " (:mnemonic local))
+               (:display-name local)))
         (is (nil? (:alias local)))
-        (is (not= "Private inferred title" (:display-name local))))
+        (is (= "Native panel" (:name local))))
       (is (= {:id route-id :alias "Review pair"}
              (control/set-session-alias! {:route-id route-id
                                           :alias "Review pair"})))

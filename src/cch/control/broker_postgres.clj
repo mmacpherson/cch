@@ -92,6 +92,14 @@
         naming/max-alias-length "),"
         "updated_at timestamptz NOT NULL)")])
 
+(defn migration-4-statements
+  "Persist the bounded provider-advertised presentation name on its lease."
+  [schema]
+  [(str "ALTER TABLE " (table (schema-name schema) "sessions")
+        " ADD COLUMN IF NOT EXISTS native_name text"
+        " CHECK (native_name IS NULL OR char_length(native_name) BETWEEN 1 AND "
+        naming/max-native-name-length ")")])
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -136,7 +144,11 @@
         (when-not (contains? applied 3)
           (doseq [statement (migration-3-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (3)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (3)")]))
+        (when-not (contains? applied 4)
+          (doseq [statement (migration-4-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (4)")]))))
     true))
 
 (defn datasource
@@ -218,11 +230,13 @@
     (swap! (:bodies broker) #(apply dissoc % message-ids))))
 
 (defn- row->session
-  [{:keys [route_id runner_id agent native_status available native_url alias]}]
+  [{:keys [route_id runner_id agent native_status available native_url
+           native_name alias]}]
   (naming/present-session
     (cond-> {:id route_id :runner-id runner_id :agent agent
              :status native_status :available available}
       native_url (assoc :native-url native_url)
+      native_name (assoc :name native_name)
       alias (assoc :alias alias))))
 
 (defn- row->metadata
@@ -281,10 +295,11 @@
                     (doseq [[route-id session] sanitized]
                       (jdbc/execute!
                         tx [(str "INSERT INTO " routes
-                                 " (route_id,runner_id,agent,native_status,available,native_url,lease_expires_at)"
-                                 " VALUES (?,?,?,?,?,?,?)")
+                                 " (route_id,runner_id,agent,native_status,available,native_url,native_name,lease_expires_at)"
+                                 " VALUES (?,?,?,?,?,?,?,?)")
                             route-id runner-id (:agent session) (:status session)
-                            true (:native-url session) (timestamp expires)]))
+                            true (:native-url session) (:name session)
+                            (timestamp expires)]))
                     {:discard discard
                      :value {:status "registered" :runner-id runner-id
                              :route-count (count sanitized) :expires-at expires}})))]
@@ -307,7 +322,8 @@
             {:discard (expire-metadata! broker tx timestamp-value)
              :value (mapv row->session
                           (rows tx [(str "SELECT r.route_id,r.runner_id,r.agent,"
-                                         "r.native_status,r.available,r.native_url,a.alias FROM "
+                                         "r.native_status,r.available,r.native_url,"
+                                         "r.native_name,a.alias FROM "
                                          routes " r LEFT JOIN " aliases
                                          " a ON a.route_id=r.route_id"
                                          " AND a.runner_id=r.runner_id"
@@ -326,7 +342,8 @@
     (transact
       (:datasource broker)
       (fn [tx]
-        (let [route (row tx [(str "SELECT runner_id FROM " routes
+        (let [route (row tx [(str "SELECT route_id,runner_id,agent,native_status,"
+                                  "available,native_url,native_name FROM " routes
                                   " WHERE route_id=? AND lease_expires_at>?")
                              route-id (timestamp timestamp-value)])]
           (when-not route
@@ -347,9 +364,7 @@
                   (timestamp timestamp-value)])
             (jdbc/execute! tx [(str "DELETE FROM " aliases " WHERE route_id=?")
                                route-id]))
-          (naming/present-session
-            (cond-> {:id route-id :runner-id (:runner_id route)}
-              alias (assoc :alias alias))))))))
+          (row->session (cond-> route alias (assoc :alias alias))))))))
 
 (defn- set-session-alias!
   [^PostgresBroker broker {:keys [runner-id token] :as request}]

@@ -13,11 +13,13 @@
 (deftest migration-schema-contains-metadata-but-no-hosted-message-content
   (let [ddl (str/join "\n" (concat
                               (postgres/migration-statements "cch_control")
-                              (postgres/migration-3-statements "cch_control")))]
+                              (postgres/migration-3-statements "cch_control")
+                              (postgres/migration-4-statements "cch_control")))]
     (is (str/includes? ddl "content_sha256"))
     (is (str/includes? ddl "lease_expires_at"))
     (is (str/includes? ddl "awaiting-replay"))
     (is (str/includes? ddl "session_aliases"))
+    (is (str/includes? ddl "native_name"))
     (is (not (re-find #"(?i)\\b(body|token|credential|transcript)\\b" ddl))
         "provider credentials, transcripts, and message bodies have no columns")))
 
@@ -73,7 +75,8 @@
           (api/register-runner!
             b1 {:runner-id "runner-a" :token "synthetic-token-a"
                 :sessions [{:id source :agent "codex" :status "idle"
-                            :available true :cwd "/never-federated"}]})
+                            :available true :cwd "/never-federated"
+                            :name "Native panel"}]})
           (api/register-runner!
             b1 {:runner-id "runner-b" :token "synthetic-token-b"
                 :sessions [{:id target :agent "claude" :status "working"
@@ -84,6 +87,9 @@
                  (:native-url (some #(when (= target (:id %)) %)
                                     (api/active-sessions b1)))))
           (is (every? #(nil? (:cwd %)) (api/active-sessions b1)))
+          (is (= "Native panel"
+                 (:name (some #(when (= source (:id %)) %)
+                              (api/active-sessions b1)))))
           (is (= "Build pair"
                  (:alias
                    (api/set-session-alias!
@@ -224,7 +230,7 @@
                                    "\".schema_migrations")]
                              {:builder-fn rs/as-unqualified-lower-maps})]
               (is (every? true? results))
-              (is (= 3 (:count versions)))
+              (is (= 4 (:count versions)))
               (is (not-any? #{"body" "token" "credential" "transcript"}
                             (map :column_name columns))))))
         (finally

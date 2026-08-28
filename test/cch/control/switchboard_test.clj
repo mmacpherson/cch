@@ -36,7 +36,7 @@
          :sessions [{:id target :agent "claude" :status "waiting"
                      :native-url "https://claude.ai/code/session_synthetic123"
                      :available true :cwd "/private/not-federated"
-                     :name "Private session label"}]})
+                     :name "Native <review>"}]})
     b))
 
 (defn- body [value]
@@ -83,7 +83,10 @@
         (is (= 200 (:status response)))
         (is (str/includes? page target))
         (is (str/includes? page (naming/mnemonic target)))
+        (is (str/includes? page "Native &lt;review&gt;"))
+        (is (not (str/includes? page "Native <review>")))
         (is (str/includes? page "Optional broker-visible name"))
+        (is (str/includes? page "Provider names and aliases are visible"))
         (is (str/includes? page "routing still uses the opaque route id"))
         (is (str/includes? page "Needs you"))
         (is (str/includes? page "Open this Claude session"))
@@ -92,7 +95,6 @@
         (is (not (str/includes? page "href=\"https://claude.ai/code\"")))
         (is (not (str/includes? page "Native authority")))
         (is (not (str/includes? page "/private/not-federated")))
-        (is (not (str/includes? page "Private session label")))
         (is (not (str/includes? page assertion)))
         (is (= "no-store" (get-in response [:headers "Cache-Control"])))
         (is (str/includes? (get-in response [:headers "Content-Security-Policy"])
