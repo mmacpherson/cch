@@ -107,7 +107,7 @@
            [:title (str title " · cch control")]
            [:style
             "
-:root{color-scheme:light dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--amber:#d29922;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:min(1100px,calc(100% - 28px));margin:0 auto;padding:28px 0 60px}header{display:flex;gap:18px;align-items:center;justify-content:space-between;margin-bottom:24px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 14px}.muted,small{color:var(--muted)}a{color:var(--blue)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:0 0 18px}.summary{display:flex;gap:20px;flex-wrap:wrap}.summary strong{font-size:22px;display:block}.sessions{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px}.session{border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}.session-top{display:flex;justify-content:space-between;gap:10px;align-items:center}.route{font:12px/1.4 ui-monospace,SFMono-Regular,monospace;word-break:break-all;color:var(--muted)}.badge{border-radius:999px;padding:3px 9px;font-size:12px;border:1px solid var(--line)}.badge-attention{color:#fff;background:#7a4b00;border-color:var(--amber)}.badge-working{color:#fff;background:#174f2a;border-color:var(--green)}.badge-ready{color:#fff;background:#17365d;border-color:var(--blue)}label{display:block;margin:0 0 6px;color:var(--muted)}select,textarea,.alias-form input[name=alias]{width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);padding:10px;font:inherit}.alias-form{margin-top:12px}.alias-form .actions{margin-top:0}.alias-form input[name=alias]{min-width:0;flex:1}textarea{min-height:120px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 2fr;gap:14px}@media(max-width:700px){.fields{grid-template-columns:1fr}header{align-items:flex-start}}button,.button{display:inline-block;border:1px solid #388bfd;border-radius:8px;background:#238636;color:white;padding:9px 14px;font:inherit;text-decoration:none;cursor:pointer}button.secondary{background:transparent;border-color:var(--line)}.actions{display:flex;gap:10px;align-items:center;margin-top:12px}.notice{border-left:3px solid var(--blue);padding:10px 12px;background:var(--panel);margin-bottom:18px}.error{border-color:var(--red);color:#ffb3ad}.status-delivered{border-color:var(--green)}.status-failed,.status-expired{border-color:var(--red)}code{font-family:ui-monospace,SFMono-Regular,monospace}.inline{display:inline}.provider{margin-top:10px}.empty{text-align:center;padding:28px;color:var(--muted)}"]]
+:root{color-scheme:light dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--amber:#d29922;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:min(1100px,calc(100% - 28px));margin:0 auto;padding:28px 0 60px}header{display:flex;gap:18px;align-items:center;justify-content:space-between;margin-bottom:24px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 14px}.muted,small{color:var(--muted)}a{color:var(--blue)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:0 0 18px}.summary{display:flex;gap:20px;flex-wrap:wrap}.summary strong{font-size:22px;display:block}.sessions{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px}.session{border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}.session-top{display:flex;justify-content:space-between;gap:10px;align-items:center}.route{font:12px/1.4 ui-monospace,SFMono-Regular,monospace;word-break:break-all;color:var(--muted)}.badge{border-radius:999px;padding:3px 9px;font-size:12px;border:1px solid var(--line)}.badge-attention{color:#fff;background:#7a4b00;border-color:var(--amber)}.badge-working{color:#fff;background:#174f2a;border-color:var(--green)}.badge-ready{color:#fff;background:#17365d;border-color:var(--blue)}label{display:block;margin:0 0 6px;color:var(--muted)}select,textarea,.alias-form input[name=alias]{width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);padding:10px;font:inherit}.alias-form{margin-top:12px}.alias-form .actions{margin-top:0}.alias-form input[name=alias]{min-width:0;flex:1}textarea{min-height:120px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 2fr;gap:14px}.session-details{border-top:1px solid var(--line);margin-top:12px;padding-top:9px}.session-details summary{color:var(--muted);cursor:pointer;font-size:13px}.session-meta{display:grid;gap:7px;margin-top:10px}.session-meta small{display:block}.session-meta div:not(.route){min-width:0}@media(max-width:700px){.fields{grid-template-columns:1fr}header{align-items:flex-start}}button,.button{display:inline-block;border:1px solid #388bfd;border-radius:8px;background:#238636;color:white;padding:9px 14px;font:inherit;text-decoration:none;cursor:pointer}button.secondary{background:transparent;border-color:var(--line)}.actions{display:flex;gap:10px;align-items:center;margin-top:12px}.notice{border-left:3px solid var(--blue);padding:10px 12px;background:var(--panel);margin-bottom:18px}.error{border-color:var(--red);color:#ffb3ad}.status-delivered{border-color:var(--green)}.status-failed,.status-expired{border-color:var(--red)}code{font-family:ui-monospace,SFMono-Regular,monospace}.inline{display:inline}.provider{margin-top:10px}.empty{text-align:center;padding:28px;color:var(--muted)}"]]
           [:body
            [:main
             [:header
@@ -119,32 +119,55 @@
                 [:button.secondary {:type "submit"} "Sign out"]])]
             content]]])))
 
-(defn- session-card [session csrf]
+(defn- primary-name [session]
+  (or (:alias session) (:name session) (:mnemonic session)))
+
+(defn- visible-name [session duplicate-names]
+  (let [primary (primary-name session)]
+    (if (and (contains? duplicate-names primary)
+             (not= primary (:mnemonic session)))
+      (str primary " · " (:mnemonic session))
+      primary)))
+
+(defn- session-card [session csrf duplicate-names]
   (let [{:keys [key label]} (attention session)]
     [:article.session
      [:div.session-top
-      [:strong (:display-name session)]
+      [:strong (visible-name session duplicate-names)]
       [:span.badge {:class (str "badge-" key)} label]]
      [:small (str/capitalize (:agent session))]
-     [:div.route (:id session)]
-     [:small "Runner: " (:runner-id session) " · Native state: " (:status session)]
      (when-let [native-url (:native-url session)]
        [:div.provider
         [:a {:href native-url :target "_blank" :rel "noopener noreferrer"}
          (str "Open this " (str/capitalize (:agent session)) " session")]])
-     [:form.alias-form {:method "post" :action "/sessions/alias"}
-      [:input {:type "hidden" :name "csrf" :value csrf}]
-      [:input {:type "hidden" :name "target" :value (:id session)}]
-      [:label {:for (str "alias-" (:id session))} "Alias"]
-      [:div.actions
-       [:input {:id (str "alias-" (:id session))
-                :name "alias" :value (or (:alias session) "")
-                :maxlength naming/max-alias-length
-                :placeholder "Optional broker-visible name"}]
-       [:button.secondary {:type "submit"} "Save"]]]]))
+     [:details.session-details
+      [:summary "Details & rename"]
+      [:div.session-meta
+       (when-let [native-name (:name session)]
+         [:div [:small "Provider name"] [:div native-name]])
+       [:div [:small "Mnemonic"] [:div.route (:mnemonic session)]]
+       [:div [:small "Route"] [:div.route (:id session)]]
+       [:div [:small "Runner"] [:div.route (:runner-id session)]]
+       [:div [:small "Native state"] [:div.route (:status session)]]]
+      [:form.alias-form {:method "post" :action "/sessions/alias"}
+       [:input {:type "hidden" :name "csrf" :value csrf}]
+       [:input {:type "hidden" :name "target" :value (:id session)}]
+       [:label {:for (str "alias-" (:id session))} "Alias"]
+       [:div.actions
+        [:input {:id (str "alias-" (:id session))
+                 :name "alias" :value (or (:alias session) "")
+                 :maxlength naming/max-alias-length
+                 :placeholder "Optional broker-visible name"}]
+        [:button.secondary {:type "submit"} "Save"]]
+       [:small "Visible to paired participants; avoid secrets or private paths."]]]]))
 
 (defn- switchboard-page [b identity {:keys [error message-id]}]
   (let [sessions (broker/active-sessions b)
+        name-counts (frequencies (map primary-name sessions))
+        duplicate-names (->> name-counts
+                             (keep (fn [[session-name count]]
+                                     (when (< 1 count) session-name)))
+                             set)
         runners (count (set (map :runner-id sessions)))
         message (when message-id
                   (broker/operator-message-metadata b message-id))]
@@ -168,10 +191,10 @@
                   "Refresh delivery status"]])])
       [:section.panel
        [:h2 "Sessions"]
-       [:p.muted
-        "Names are presentation only; routing still uses the opaque route id. Provider names and aliases are visible to paired control-plane participants, so keep them free of secrets, paths, or private client names."]
+       [:p.muted "Choose a session by name. Routing details and rename controls are collapsed."]
        (if (seq sessions)
-         [:div.sessions (map #(session-card % (:csrf identity)) sessions)]
+         [:div.sessions
+          (map #(session-card % (:csrf identity) duplicate-names) sessions)]
          [:div.empty "No active runner leases are currently visible."])]
       [:section.panel
        [:h2 "Send ordinary text"]
@@ -186,9 +209,9 @@
             [:select {:id "target" :name "target" :required true}
              (for [target sessions]
                [:option {:value (:id target)}
-                (str (:display-name target) " · "
-                     (str/capitalize (:agent target)) " · " (:status target)
-                     " · " (:runner-id target))])]]
+                (str (visible-name target duplicate-names) " · "
+                     (str/capitalize (:agent target)) " · "
+                     (:status target))])]]
            [:div
             [:label {:for "message"} "Message"]
             [:textarea {:id "message" :name "message" :required true

@@ -218,9 +218,12 @@ transcript content beyond that provider-authored bridge event.
 Every route also receives a stable mnemonic derived only from its opaque route
 id, such as `quiet-otter-a31f`. When Claude or Codex advertises the same bounded
 native session name shown by its own UI, cch carries that name as presentation
-metadata and shows it with the mnemonic, such as `review-pair · quiet-otter-a31f`.
-An operator or the owning agent can set a short explicit alias, which takes
-precedence over the native name. Routing always continues to use the route id.
+metadata. An operator or the owning agent can set a short explicit alias, which
+takes precedence over the native name. The switchboard gives that meaningful
+name the heading by itself. It shows the mnemonic as the heading only for an
+unnamed route or beside duplicate names that require disambiguation; otherwise
+the mnemonic, route id, runner, native state, and rename control remain under a
+collapsed details disclosure. Routing always continues to use the route id.
 Native names and aliases are bounded and escaped. They are broker-visible by
 design; cwd, prompts, transcript content, credentials, and other local metadata
 are not used to derive a name. Runner-authenticated alias updates must target a

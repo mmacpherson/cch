@@ -83,11 +83,16 @@
         (is (= 200 (:status response)))
         (is (str/includes? page target))
         (is (str/includes? page (naming/mnemonic target)))
-        (is (str/includes? page "Native &lt;review&gt;"))
+        (is (str/includes? page "<strong>Native &lt;review&gt;</strong>"))
+        (is (not (str/includes?
+                   page
+                   (str "<strong>Native &lt;review&gt; · "
+                        (naming/mnemonic target) "</strong>"))))
         (is (not (str/includes? page "Native <review>")))
         (is (str/includes? page "Optional broker-visible name"))
-        (is (str/includes? page "Provider names and aliases are visible"))
-        (is (str/includes? page "routing still uses the opaque route id"))
+        (is (str/includes? page "Details &amp; rename"))
+        (is (str/includes? page "Routing details and rename controls are collapsed"))
+        (is (str/includes? page "Native &lt;review&gt; · Claude · waiting"))
         (is (str/includes? page "Needs you"))
         (is (str/includes? page "Open this Claude session"))
         (is (str/includes? page
@@ -99,6 +104,29 @@
         (is (= "no-store" (get-in response [:headers "Cache-Control"])))
         (is (str/includes? (get-in response [:headers "Content-Security-Policy"])
                            "frame-ancestors 'none'"))))))
+
+(deftest duplicate-meaningful-names-show-mnemonics-for-disambiguation
+  (authenticated
+    (fn []
+      (let [route-b "claude:00000000-0000-0000-0000-00000000000b"
+            b (broker/new-broker {"runner-a" "synthetic-runner-token"})]
+        (broker/register!
+          b {:runner-id "runner-a"
+             :token "synthetic-runner-token"
+             :sessions [{:id target :agent "claude" :status "idle"
+                         :available true :name "Review pair"}
+                        {:id route-b :agent "claude" :status "idle"
+                         :available true :name "Review pair"}]})
+        (let [page (:body ((switchboard/handler b config)
+                           (access-request :get "/")))]
+          (is (str/includes?
+                page
+                (str "<strong>Review pair · "
+                     (naming/mnemonic target) "</strong>")))
+          (is (str/includes?
+                page
+                (str "<strong>Review pair · "
+                     (naming/mnemonic route-b) "</strong>"))))))))
 
 (deftest authenticated-operator-can-set-and-clear-a-bounded-alias
   (authenticated
