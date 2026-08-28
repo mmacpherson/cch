@@ -203,10 +203,15 @@ The broker can also serve a small, server-rendered switchboard at `/`. It shows
 only the sanitized active route directory: agent family, opaque route id,
 opaque runner id, native status, and a coarse ready/working/needs-you state.
 It has no transcript, prompt history, cwd, process id, socket, token, or message
-body view. Provider links open the provider's own control entrypoint; they are
-not claimed to be per-session deep links because the supported Claude and Codex
-discovery APIs do not currently publish those URLs. cch does not scrape
-provider rollout or transcript files to manufacture them.
+body view. A native action is shown only when the local adapter advertises a
+narrowly validated, exact session URL; generic provider home links are omitted.
+For a Claude session with Remote Control active, the adapter incrementally
+reads Claude's structured `bridge_status` transcript event, caches its dedicated
+`claude.ai/code/session_...` URL in the machine-local operational store, and
+leases only that URL with presence. Codex 0.149 exposes daemon-level Remote
+Control status but no per-thread URL in its typed app-server protocol, so Codex
+sessions intentionally have no native action yet. cch never reads or federates
+transcript content beyond that provider-authored bridge event.
 
 The runner API and human UI use separate listeners. Machines reach only the
 runner listener through tailnet-private Tailscale Serve. A stable human-facing

@@ -28,6 +28,7 @@
   [(str "CREATE TABLE IF NOT EXISTS control_sessions ("
         "route_id TEXT PRIMARY KEY, agent TEXT NOT NULL, native_id TEXT NOT NULL,"
         "cwd TEXT, name TEXT, socket_path TEXT, auth_token TEXT, pid INTEGER,"
+        "transcript_path TEXT, native_url TEXT,"
         "registered_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
    (str "CREATE UNIQUE INDEX IF NOT EXISTS idx_control_sessions_native "
         "ON control_sessions(agent, native_id)")
@@ -40,6 +41,13 @@
         "consumed_at INTEGER)")])
 
 (defonce ^:private ensured-paths (atom #{}))
+
+(defn- ensure-column! [ds table-name column-name column-ddl]
+  (let [columns (jdbc/execute! ds [(str "PRAGMA table_info(" table-name ")")]
+                               {:builder-fn rs/as-unqualified-maps})]
+    (when-not (some #(= column-name (:name %)) columns)
+      (jdbc/execute! ds [(str "ALTER TABLE " table-name
+                              " ADD COLUMN " column-ddl)]))))
 
 (defn- restrict-db-permissions! [path]
   (when-not (= "Windows" (System/getProperty "os.name"))
@@ -59,7 +67,13 @@
         (fs/create-dirs parent))
       (let [ds (jdbc/get-datasource (datasource))]
         (doseq [ddl schema]
-          (jdbc/execute! ds [ddl])))
+          (jdbc/execute! ds [ddl]))
+        ;; control.db predates migration bookkeeping. These additive, nullable
+        ;; columns safely upgrade existing owner-local stores in place.
+        (ensure-column! ds "control_sessions" "transcript_path"
+                        "transcript_path TEXT")
+        (ensure-column! ds "control_sessions" "native_url"
+                        "native_url TEXT"))
       (restrict-db-permissions! path)
       (swap! ensured-paths conj path))
     path))
@@ -78,23 +92,33 @@
     (format "%064x" (BigInteger. 1 digest))))
 
 (defn upsert-claude!
-  [{:keys [session-id cwd name socket-path auth-token pid]}]
+  [{:keys [session-id cwd name socket-path auth-token pid transcript-path]}]
   (let [now (System/currentTimeMillis)
         route-id (str "claude:" session-id)]
     (execute!
       [(str "INSERT INTO control_sessions "
-            "(route_id, agent, native_id, cwd, name, socket_path, auth_token, pid, registered_at, updated_at) "
-            "VALUES (?, 'claude', ?, ?, ?, ?, ?, ?, ?, ?) "
+            "(route_id, agent, native_id, cwd, name, socket_path, auth_token, pid, transcript_path, registered_at, updated_at) "
+            "VALUES (?, 'claude', ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(route_id) DO UPDATE SET "
             "cwd=excluded.cwd, name=COALESCE(excluded.name, control_sessions.name), "
             "socket_path=excluded.socket_path, auth_token=excluded.auth_token, "
-            "pid=excluded.pid, updated_at=excluded.updated_at")
-       route-id session-id cwd name socket-path auth-token pid now now])
+            "pid=excluded.pid, "
+            "transcript_path=COALESCE(excluded.transcript_path, control_sessions.transcript_path), "
+            "updated_at=excluded.updated_at")
+       route-id session-id cwd name socket-path auth-token pid transcript-path now now])
     route-id))
+
+(defn set-claude-native-url!
+  "Cache one provider-validated deep link in the owner-local operational DB."
+  [route-id native-url]
+  (execute!
+    ["UPDATE control_sessions SET native_url=?, updated_at=? WHERE route_id=? AND agent='claude'"
+     native-url (System/currentTimeMillis) route-id])
+  native-url)
 
 (defn claude-sessions []
   (or (execute!
-        ["SELECT route_id, agent, native_id, cwd, name, socket_path, pid, registered_at, updated_at FROM control_sessions WHERE agent='claude' ORDER BY updated_at DESC"])
+        ["SELECT route_id, agent, native_id, cwd, name, socket_path, pid, transcript_path, native_url, registered_at, updated_at FROM control_sessions WHERE agent='claude' ORDER BY updated_at DESC"])
       []))
 
 (defn claude-session

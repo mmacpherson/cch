@@ -5,11 +5,54 @@
             [cch.subprocess :as subprocess]
             [cheshire.core :as json]
             [clojure.string :as str])
-  (:import [java.net StandardProtocolFamily UnixDomainSocketAddress]
+  (:import [java.io RandomAccessFile]
+           [java.net StandardProtocolFamily UnixDomainSocketAddress]
            [java.nio.channels Channels SocketChannel]
            [java.nio.charset StandardCharsets]))
 
 (def ^:const minimum-version "2.1.224")
+
+(defonce ^:private transcript-scans (atom {}))
+
+(defn- valid-remote-control-url [value]
+  (when (and (string? value)
+             (re-matches #"https://claude\.ai/code/session_[A-Za-z0-9_-]{8,128}"
+                         value))
+    value))
+
+(defn- bridge-url [line]
+  ;; Avoid parsing ordinary (and potentially very large) transcript events.
+  (when (re-find #"\"subtype\"\s*:\s*\"bridge_status\"" line)
+    (try
+      (let [event (json/parse-string line true)]
+        (when (and (= "system" (:type event))
+                   (= "bridge_status" (:subtype event)))
+          (valid-remote-control-url (:url event))))
+      (catch Exception _ nil))))
+
+(defn- scan-native-url!
+  "Incrementally inspect a trusted Claude transcript for its structured Remote
+  Control bridge event. Byte offsets make the 500 ms presence loop stat-only
+  when the transcript has not grown; the discovered URL is cached in SQLite."
+  [route-id transcript-path cached-url]
+  (or (valid-remote-control-url cached-url)
+      (when (and (not (str/blank? transcript-path))
+                 (fs/regular-file? transcript-path))
+        (let [length (fs/size transcript-path)
+              prior-offset (get @transcript-scans transcript-path 0)
+              offset (if (<= prior-offset length) prior-offset 0)]
+          (with-open [reader (RandomAccessFile. (str transcript-path) "r")]
+            (.seek reader offset)
+            (loop [found nil]
+              (if-let [raw-line (.readLine reader)]
+                (let [line (String. (.getBytes raw-line StandardCharsets/ISO_8859_1)
+                                    StandardCharsets/UTF_8)]
+                  (recur (or (bridge-url line) found)))
+                (let [next-offset (.getFilePointer reader)]
+                  (when found
+                    (store/set-claude-native-url! route-id found))
+                  (swap! transcript-scans assoc transcript-path next-offset)
+                  found))))))))
 
 (defn- socket-pid [socket-path]
   (some->> socket-path
@@ -24,6 +67,7 @@
   ([payload env]
    (let [session-id  (or (:session_id payload) (:sessionId payload))
          cwd         (:cwd payload)
+         transcript-path (or (:transcript_path payload) (:transcriptPath payload))
          socket-path (get env "CLAUDE_CODE_MESSAGING_SOCKET")
          auth-token  (get env "CLAUDE_CODE_MESSAGING_TOKEN")]
      (when (str/blank? (str session-id))
@@ -37,6 +81,7 @@
      (store/upsert-claude! {:session-id session-id
                             :cwd cwd
                             :name (:name payload)
+                            :transcript-path transcript-path
                             :socket-path socket-path
                             :auth-token auth-token
                             :pid (socket-pid socket-path)}))))
@@ -63,22 +108,27 @@
   []
   (let [live-by-id (into {} (map (juxt :sessionId identity)) (native-sessions))]
     (mapv
-      (fn [{:keys [route_id native_id cwd name socket_path pid updated_at]}]
+      (fn [{:keys [route_id native_id cwd name socket_path pid transcript_path
+                   native_url updated_at]}]
         (let [live (get live-by-id native_id)
-              socket-live? (and socket_path (fs/exists? socket_path))]
-          {:id route_id
-           :agent "claude"
-           :native-id native_id
-           :name (or (:name live) name)
-           :cwd (or (:cwd live) cwd)
-           :pid (or (:pid live) pid)
-           :status (or (:status live) "stale")
-           :available (boolean (and live socket-live?))
-           :updated-at updated_at
-           :unavailable-reason
-           (when-not (and live socket-live?)
-             (if live "registered inbox socket no longer exists"
-                 "session is no longer reported by claude agents"))}))
+              socket-live? (and socket_path (fs/exists? socket_path))
+              native-url (when live
+                           (scan-native-url! route_id transcript_path native_url))]
+          (cond->
+            {:id route_id
+             :agent "claude"
+             :native-id native_id
+             :name (or (:name live) name)
+             :cwd (or (:cwd live) cwd)
+             :pid (or (:pid live) pid)
+             :status (or (:status live) "stale")
+             :available (boolean (and live socket-live?))
+             :updated-at updated_at
+             :unavailable-reason
+             (when-not (and live socket-live?)
+               (if live "registered inbox socket no longer exists"
+                   "session is no longer reported by claude agents"))}
+            native-url (assoc :native-url native-url))))
       (store/claude-sessions))))
 
 (defn send!

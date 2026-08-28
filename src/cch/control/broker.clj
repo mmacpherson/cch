@@ -2,13 +2,15 @@
   "Disposable in-memory rendezvous for the cross-runner control-plane POC.
 
   The broker stores short-lived route presence and transient text envelopes.
-  Native provider credentials and machine-local session metadata never enter
-  this component. All mutation is serialized on the Broker value so enqueue,
-  poll, acknowledgement, and duplicate detection are atomic."
+  Native provider credentials and private machine-local metadata never enter
+  this component; presence may include a provider-validated session deep link.
+  All mutation is serialized on the Broker value so enqueue, poll,
+  acknowledgement, and duplicate detection are atomic."
   (:require [cch.control.broker-api :as api]
             [cch.control.store :as store]
             [clojure.string :as str])
-  (:import [java.nio.charset StandardCharsets]
+  (:import [java.net URI]
+           [java.nio.charset StandardCharsets]
            [java.security MessageDigest]))
 
 (def ^:const default-lease-ms 60000)
@@ -68,12 +70,31 @@
     (str/starts-with? route-id "codex:") "codex"
     :else nil))
 
-(defn sanitize-session [{:keys [id status available]}]
+(defn- sanitized-native-url [agent value]
+  (when (and (string? value) (<= (count value) 512))
+    (try
+      (let [uri (URI. value)
+            path (.getPath uri)]
+        (when (and (= "https" (.getScheme uri))
+                   (nil? (.getUserInfo uri))
+                   (= -1 (.getPort uri))
+                   (nil? (.getQuery uri))
+                   (nil? (.getFragment uri))
+                   (= agent "claude")
+                   (= "claude.ai" (some-> (.getHost uri) str/lower-case))
+                   (re-matches #"/code/session_[A-Za-z0-9_-]{8,128}" path))
+          value))
+      (catch Exception _ nil))))
+
+(defn sanitize-session [{:keys [id status available native-url]}]
   (when-let [agent (and (valid-label? id) (route-agent id))]
-    {:id id
-     :agent agent
-     :status (if (valid-label? status) status "unknown")
-     :available (boolean available)}))
+    (let [native-url (sanitized-native-url agent native-url)]
+      (cond->
+        {:id id
+         :agent agent
+         :status (if (valid-label? status) status "unknown")
+         :available (boolean available)}
+        native-url (assoc :native-url native-url)))))
 
 (defn clamp [value lower upper]
   (-> (or value lower) (max lower) (min upper)))

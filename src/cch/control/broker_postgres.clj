@@ -76,6 +76,10 @@
      (str "CREATE INDEX IF NOT EXISTS messages_expires_idx ON " messages
           " (expires_at)")]))
 
+(defn- migration-2-statements [schema]
+  [(str "ALTER TABLE " (table schema "sessions")
+        " ADD COLUMN IF NOT EXISTS native_url text")])
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -112,7 +116,11 @@
         (when-not (contains? applied 1)
           (doseq [statement (migration-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (1)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (1)")]))
+        (when-not (contains? applied 2)
+          (doseq [statement (migration-2-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (2)")]))))
     true))
 
 (defn datasource
@@ -193,9 +201,11 @@
   (when (seq message-ids)
     (swap! (:bodies broker) #(apply dissoc % message-ids))))
 
-(defn- row->session [{:keys [route_id runner_id agent native_status available]}]
-  {:id route_id :runner-id runner_id :agent agent
-   :status native_status :available available})
+(defn- row->session
+  [{:keys [route_id runner_id agent native_status available native_url]}]
+  (cond-> {:id route_id :runner-id runner_id :agent agent
+           :status native_status :available available}
+    native_url (assoc :native-url native_url)))
 
 (defn- row->metadata
   [{:keys [message_id source_route target_route status attempts created_at
@@ -253,10 +263,10 @@
                     (doseq [[route-id session] sanitized]
                       (jdbc/execute!
                         tx [(str "INSERT INTO " routes
-                                 " (route_id,runner_id,agent,native_status,available,lease_expires_at)"
-                                 " VALUES (?,?,?,?,?,?)")
+                                 " (route_id,runner_id,agent,native_status,available,native_url,lease_expires_at)"
+                                 " VALUES (?,?,?,?,?,?,?)")
                             route-id runner-id (:agent session) (:status session)
-                            true (timestamp expires)]))
+                            true (:native-url session) (timestamp expires)]))
                     {:discard discard
                      :value {:status "registered" :runner-id runner-id
                              :route-count (count sanitized) :expires-at expires}})))]
@@ -278,7 +288,7 @@
             {:discard (expire-metadata! broker tx timestamp-value)
              :value (mapv row->session
                           (rows tx [(str "SELECT route_id,runner_id,agent,"
-                                         "native_status,available FROM " routes
+                                         "native_status,available,native_url FROM " routes
                                          " WHERE lease_expires_at>? ORDER BY route_id")
                                     (timestamp timestamp-value)]))}))]
     (discard-bodies! broker discard)

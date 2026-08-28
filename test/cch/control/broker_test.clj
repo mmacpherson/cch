@@ -13,9 +13,11 @@
 
 (def runner-b-sessions
   [{:id "codex:00000000-0000-0000-0000-00000000000b"
-    :agent "codex" :status "idle" :available true}
+    :agent "codex" :status "idle" :available true
+    :native-url "https://chatgpt.com/codex"}
    {:id "claude:00000000-0000-0000-0000-00000000000c"
-    :agent "claude" :status "working" :available true}
+    :agent "claude" :status "working" :available true
+    :native-url "https://claude.ai/code/session_synthetic123"}
    {:id "claude:00000000-0000-0000-0000-00000000000d"
     :agent "claude" :status "stale" :available false}])
 
@@ -30,6 +32,7 @@
     (register-pair! b)
     (is (= [{:id "claude:00000000-0000-0000-0000-00000000000c"
              :agent "claude" :status "working" :available true
+             :native-url "https://claude.ai/code/session_synthetic123"
              :runner-id "runner-b"}
             {:id "codex:00000000-0000-0000-0000-00000000000a"
              :agent "codex" :status "idle" :available true
@@ -39,6 +42,8 @@
              :runner-id "runner-b"}]
            (broker/sessions b)))
     (is (nil? (:cwd (first (broker/sessions b)))))
+    (is (nil? (:native-url (last (broker/sessions b))))
+        "generic or unrecognized provider links are discarded")
     (is (= :unauthorized
            (try
              (broker/register! b {:runner-id "runner-a" :token "wrong"

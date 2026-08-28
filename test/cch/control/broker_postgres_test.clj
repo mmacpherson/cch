@@ -74,8 +74,12 @@
           (api/register-runner!
             b1 {:runner-id "runner-b" :token "synthetic-token-b"
                 :sessions [{:id target :agent "claude" :status "working"
-                            :available true}]})
+                            :available true
+                            :native-url "https://claude.ai/code/session_synthetic123"}]})
           (is (= #{source target} (set (map :id (api/active-sessions b1)))))
+          (is (= "https://claude.ai/code/session_synthetic123"
+                 (:native-url (some #(when (= target (:id %)) %)
+                                    (api/active-sessions b1)))))
           (is (every? #(nil? (:cwd %)) (api/active-sessions b1)))
 
           (is (= "queued"
@@ -199,7 +203,7 @@
                                    "\".schema_migrations")]
                              {:builder-fn rs/as-unqualified-lower-maps})]
               (is (every? true? results))
-              (is (= 1 (:count versions)))
+              (is (= 2 (:count versions)))
               (is (not-any? #{"body" "token" "credential" "transcript"}
                             (map :column_name columns))))))
         (finally

@@ -9,10 +9,6 @@
   (:import [java.net URLDecoder URLEncoder]
            [java.nio.charset StandardCharsets]))
 
-(def ^:private provider-links
-  {"claude" {:href "https://claude.ai/code" :label "Open Claude Code"}
-   "codex" {:href "https://chatgpt.com/codex" :label "Open Codex"}})
-
 (def ^:private security-headers
   {"Cache-Control" "no-store"
    "Content-Security-Policy"
@@ -77,7 +73,7 @@
     ("waiting" "blocked" "needs-attention")
     {:key "attention" :label "Needs you"}
 
-    ("working" "running" "active")
+    ("working" "running" "active" "busy")
     {:key "working" :label "Working"}
 
     {:key "ready" :label "Ready"}))
@@ -105,18 +101,17 @@
             content]]])))
 
 (defn- session-card [session]
-  (let [{:keys [key label]} (attention session)
-        provider (get provider-links (:agent session))]
+  (let [{:keys [key label]} (attention session)]
     [:article.session
      [:div.session-top
       [:strong (str/capitalize (:agent session))]
       [:span.badge {:class (str "badge-" key)} label]]
      [:div.route (:id session)]
      [:small "Runner: " (:runner-id session) " · Native state: " (:status session)]
-     (when provider
+     (when-let [native-url (:native-url session)]
        [:div.provider
-        [:a {:href (:href provider) :target "_blank" :rel "noopener noreferrer"}
-         (:label provider)]])]))
+        [:a {:href native-url :target "_blank" :rel "noopener noreferrer"}
+         (str "Open this " (str/capitalize (:agent session)) " session")]])]))
 
 (defn- switchboard-page [b identity {:keys [error message-id]}]
   (let [sessions (broker/active-sessions b)
@@ -171,7 +166,7 @@
       [:section.panel
        [:h2 "Native authority"]
        [:p.muted
-        "Open the provider-native interface for transcripts, approvals, terminal control, and rich session history. This switchboard intentionally does not copy them."]])))
+        "When a provider advertises an exact session URL, open it here for transcripts, approvals, terminal control, and rich session history. This switchboard intentionally does not copy them."]])))
 
 (defn- error-page [status title message]
   (response status (page title nil [:section.panel [:h2 title] [:p message]])))
