@@ -114,3 +114,29 @@
     (is (= [[:broker-unavailable "broker unavailable"]
             [:broker-unavailable "broker unavailable"]]
            @reported))))
+
+(deftest usage-sync-runs-independently-of-routing
+  (let [routing-ran (CountDownLatch. 1)
+        usage-entered (CountDownLatch. 1)
+        release-usage (CountDownLatch. 1)]
+    (with-redefs [runner/tick! (fn [_ _]
+                                 (.countDown routing-ran)
+                                 {:delivered 0})]
+      (let [{:keys [thread usage-thread stop]}
+            (runner/start!
+              {:poll-ms 5 :usage-poll-ms 5}
+              {:list-local-sessions (constantly {:sessions []})
+               :deliver-local! identity
+               :sync-usage! (fn []
+                              (.countDown usage-entered)
+                              (.await release-usage 1 TimeUnit/SECONDS)
+                              {:errors []})})]
+        (try
+          (is (.await usage-entered 1 TimeUnit/SECONDS))
+          (is (.await routing-ran 1 TimeUnit/SECONDS)
+              "routing progresses while usage exchange is blocked")
+          (finally
+            (.countDown release-usage)
+            (stop)
+            (.join thread 1000)
+            (.join usage-thread 1000)))))))

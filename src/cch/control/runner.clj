@@ -4,9 +4,13 @@
   A runner refreshes sanitized local presence, pulls messages addressed to its
   routes, submits them through local native adapters, and acknowledges only
   terminal outcomes. It owns no listener and does not launch agent processes."
-  (:require [cch.control.remote :as remote]))
+  (:require [cch.control.remote :as remote]
+            [cch.control.usage-sync :as usage-sync]
+            [cch.db :as db]))
 
 (def ^:const default-poll-ms 500)
+(def ^:const default-usage-poll-ms 5000)
+(def ^:const max-usage-backoff-ms 60000)
 
 (def permanent-delivery-errors
   #{:invalid-message :invalid-route :message-too-large :stale-session
@@ -54,8 +58,10 @@
            {:list-local-sessions
             (requiring-resolve 'cch.control.core/list-local-sessions)
             :deliver-local!
-            (requiring-resolve 'cch.control.core/send-local-message!)}))
-  ([config dependencies]
+            (requiring-resolve 'cch.control.core/send-local-message!)
+            :sync-usage!
+            #(usage-sync/tick! config (db/db-path))}))
+  ([config {:keys [sync-usage!] :as dependencies}]
    (let [stopping? (atom false)
          poll-ms (or (:poll-ms config) default-poll-ms)
          last-error (atom nil)
@@ -74,11 +80,46 @@
                                 (report-loop-error! error)
                                 (reset! last-error signature)))))
                         (Thread/sleep poll-ms))
-                      (catch InterruptedException _ nil))))]
+                      (catch InterruptedException _ nil))))
+         usage-thread
+         (when sync-usage!
+           (Thread.
+             ^Runnable
+             (fn []
+               (try
+                 (loop [delay-ms (or (:usage-poll-ms config)
+                                     default-usage-poll-ms)
+                        prior-error nil]
+                   (when-not @stopping?
+                     (let [result (try
+                                    (sync-usage!)
+                                    (catch Exception error
+                                      {:errors [{:operation :tick
+                                                 :error error}]}))
+                           error (some-> result :errors first :error)
+                           signature (when error
+                                       [(some-> error ex-data :type)
+                                        (.getMessage ^Exception error)])]
+                       (when (and error (not= signature prior-error))
+                         (report-loop-error! error))
+                       (Thread/sleep delay-ms)
+                       (recur (if error
+                                (min max-usage-backoff-ms (* 2 delay-ms))
+                                (or (:usage-poll-ms config)
+                                    default-usage-poll-ms))
+                              signature))))
+                 (catch InterruptedException _ nil)))))]
      (.setName thread "cch-control-runner")
      (.setDaemon thread true)
      (.start thread)
+     (when usage-thread
+       (.setName usage-thread "cch-control-usage-sync")
+       (.setDaemon usage-thread true)
+       (.start usage-thread))
      {:thread thread
+      :usage-thread usage-thread
       :stop (fn []
               (reset! stopping? true)
-              (.interrupt thread))})))
+              (.interrupt thread)
+              (when usage-thread
+                (.interrupt usage-thread)))})))

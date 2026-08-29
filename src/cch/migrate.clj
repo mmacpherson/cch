@@ -81,7 +81,13 @@
              "CREATE INDEX IF NOT EXISTS idx_usage_observations_forecast "
              "ON usage_observations(agent, window_key, resets_at, observed_at);"
              "CREATE INDEX IF NOT EXISTS idx_usage_observations_publish "
-             "ON usage_observations(publishable, id);")}])
+             "ON usage_observations(publishable, id);")}
+   {:id "0007-usage-sync-state"
+    :up (str "CREATE TABLE IF NOT EXISTS usage_sync_state ("
+             "  direction TEXT PRIMARY KEY CHECK (direction IN ('publish','pull')),"
+             "  cursor INTEGER NOT NULL DEFAULT 0 CHECK (cursor >= 0),"
+             "  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now'))"
+             ");")}])
 
 (defn migration-ids
   "Ordered ids of every defined migration. Public so tests and

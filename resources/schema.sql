@@ -94,6 +94,14 @@ CREATE INDEX IF NOT EXISTS idx_usage_observations_forecast
 CREATE INDEX IF NOT EXISTS idx_usage_observations_publish
   ON usage_observations(publishable, id);
 
+-- Independent crash-safe cursors for the paired runner's normalized usage
+-- exchange. These are machine-local transport state, never federated data.
+CREATE TABLE IF NOT EXISTS usage_sync_state (
+  direction  TEXT PRIMARY KEY CHECK (direction IN ('publish', 'pull')),
+  cursor     INTEGER NOT NULL DEFAULT 0 CHECK (cursor >= 0),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+);
+
 -- Covering expression indexes for the forecast's completed-window "finals"
 -- queries (cch.forecast/historical-finals-sql). Those GROUP BY resets_at and
 -- MAX(used_percentage) per window across ALL history — an unbounded scan that,
