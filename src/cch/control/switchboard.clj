@@ -256,9 +256,18 @@
           [:a {:href (str local-ui-url "/debug") :target "_blank" :rel "noopener noreferrer"} "Debug"]])
        [:p.muted "No runner has advertised a reachable local UI URL."])]))
 
-(defn- usage-page [b identity]
-  (let [forecast (-> (broker/usage-forecast-inputs b)
-                     usage-forecast/from-read-model)
+(defn- cached-usage-forecast [b cache]
+  (let [now (System/currentTimeMillis)
+        cached @cache]
+    (if (< (- now (:cached-at cached 0)) 30000)
+      (:forecast cached)
+      (let [forecast (-> (broker/usage-forecast-inputs b)
+                         usage-forecast/from-read-model)]
+        (reset! cache {:cached-at now :forecast forecast})
+        forecast))))
+
+(defn- usage-page [b identity cache]
+  (let [forecast (cached-usage-forecast b cache)
         agents (:agents forecast)]
     (page
       "Usage" identity
@@ -292,9 +301,10 @@
   "Build a Ring handler for human routes only. Every request must carry a
   valid Cloudflare Access assertion; runner credentials are never accepted."
   [b config]
-  (fn [{:keys [request-method uri] :as request}]
-    (when (contains? #{"/" "/usage" "/messages" "/sessions/alias" "/logout"} uri)
-      (try
+  (let [usage-cache (atom nil)]
+    (fn [{:keys [request-method uri] :as request}]
+      (when (contains? #{"/" "/usage" "/messages" "/sessions/alias" "/logout"} uri)
+        (try
         (let [identity (auth/authenticate! config request)
               identity (assoc identity :csrf (auth/csrf-token config identity))]
           (cond
@@ -304,7 +314,7 @@
                                                      (request-query request))}))
 
             (and (= :get request-method) (= "/usage" uri))
-            (response 200 (usage-page b identity))
+            (response 200 (usage-page b identity usage-cache))
 
             (and (= :post request-method) (= "/messages" uri))
             (let [form (request-form request)]
@@ -357,6 +367,6 @@
                                               {:error (.getMessage error)})))
 
             (error-page 400 "Request failed" "The request could not be completed.")))
-        (catch Exception _
-          (error-page 500 "Switchboard unavailable"
-                      "The switchboard could not complete this request."))))))
+          (catch Exception _
+            (error-page 500 "Switchboard unavailable"
+                        "The switchboard could not complete this request.")))))))
