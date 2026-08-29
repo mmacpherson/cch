@@ -507,7 +507,17 @@
 (defn stop-bg-refresh! []
   (when-let [t @bg-thread]
     (.interrupt ^Thread t)
-    (reset! bg-thread nil)))
+    ;; Interrupting an in-flight SQLite query does not make the thread vanish
+    ;; immediately. Wait for it before server shutdown removes or replaces the
+    ;; database; otherwise the old refresher can recreate WAL/SHM files after
+    ;; cleanup has begun.
+    (try (.join ^Thread t 5000)
+         (catch InterruptedException _
+           (.interrupt (Thread/currentThread))))
+    ;; Preserve a newer refresher if one was started concurrently.
+    (swap! bg-thread (fn [current]
+                       (when-not (identical? current t)
+                         current)))))
 
 (defn statusline-stats
   "Current forecast bundle for the statusLine. Sub-millisecond atom read —
