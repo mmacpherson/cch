@@ -30,7 +30,8 @@
 (def assertion "synthetic-cloudflare-access-assertion")
 
 (defn- registered-broker []
-  (let [b (broker/new-broker {"runner-a" "synthetic-runner-token"})]
+  (let [b (broker/new-broker {"runner-a" "synthetic-runner-token"
+                              "runner-b" "synthetic-runner-token-b"})]
     (broker/register!
       b {:runner-id "runner-a"
          :token "synthetic-runner-token"
@@ -160,8 +161,13 @@
             overview (:body (handler (access-request :get "/")))
             events (:body (handler (access-request :get "/events")))]
         (is (str/includes? overview "Recent activity"))
+        (is (str/includes? overview "agent need attention"))
+        (is (str/includes? overview "Fleet status"))
         (is (str/includes? overview "tool · completed"))
         (is (str/includes? events "Activity across Claude, Codex, and AGY"))
+        (is (str/includes? events "All runners"))
+        (is (str/includes? events ">A</option>"))
+        (is (str/includes? events "title=\"runner-a\""))
         (is (str/includes? events "Codex"))
         (is (str/includes? events "write"))
         (is (str/includes? events "completed"))
@@ -169,6 +175,32 @@
                            "private-session" "private command"
                            "private prompt" "private reason"]]
           (is (not (str/includes? events forbidden))))))))
+
+(deftest events-can-be-filtered-by-broker-authenticated-runner
+  (authenticated
+    (fn []
+      (let [b (registered-broker)
+            now (System/currentTimeMillis)
+            event #(hash-map :event-id (apply str (repeat 64 %1))
+                             :schema-version 1 :observed-at now
+                             :agent "codex" :action "turn.started"
+                             :outcome "observed")]
+        (broker/register!
+          b {:runner-id "runner-b" :token "synthetic-runner-token-b"
+             :sessions []})
+        (broker/publish-activity!
+          b {:runner-id "runner-a" :token "synthetic-runner-token"
+             :observations [(event "a")]})
+        (broker/publish-activity!
+          b {:runner-id "runner-b" :token "synthetic-runner-token-b"
+             :observations [(event "b")]})
+        (let [page (:body
+                     ((switchboard/handler b config)
+                      (access-request :get "/events"
+                                      {:query-string "runner=runner-b"})))]
+          (is (str/includes? page "selected=\"selected\" value=\"runner-b\""))
+          (is (str/includes? page "data-event=\"bbbb"))
+          (is (not (str/includes? page "data-event=\"aaaa"))))))))
 
 (deftest duplicate-meaningful-names-show-mnemonics-for-disambiguation
   (authenticated
