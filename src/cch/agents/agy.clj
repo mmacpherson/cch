@@ -253,7 +253,7 @@
      :script adapter-path
      :restored restored}))
 
-;; --- Lifecycle hooks (event federation) ---
+;; --- Lifecycle hook dispatch ---
 ;;
 ;; AGY lifecycle hooks are `type: command` only (no native HTTP), so — like
 ;; the Codex adapter — cch installs a curl-to-/dispatch/ command per event.

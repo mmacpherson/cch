@@ -121,7 +121,7 @@
       (finally
         (fs/delete-tree dir)))))
 
-;; --- Lifecycle hooks (event federation) ---
+;; --- Lifecycle hook dispatch ---
 
 (deftest dispatcher-hooks-has-correct-shape
   (let [block (agy/dispatcher-hooks :host "127.0.0.1" :port 8888)

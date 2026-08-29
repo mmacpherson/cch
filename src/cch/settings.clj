@@ -4,10 +4,8 @@
 
   Kept dependency-light (YAML + fs only, no cch.* requires) so any module —
   including ones on the write hot path — can read a setting without forming a
-  load cycle. This is the same reason cch.federation reads the global config
-  directly rather than through cch.config (whose config-db → log chain would
-  cycle). New server tunables belong here, one accessor per knob, each with a
-  sane default so a missing or malformed config never breaks the server.
+  load cycle. New server tunables belong here, one accessor per knob, each with
+  a sane default so a missing or malformed config never breaks the server.
 
   Config shape:
 

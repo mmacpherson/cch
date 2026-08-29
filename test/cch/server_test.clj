@@ -125,6 +125,14 @@
                           {:body "{}" :headers {"Content-Type" "application/json"} :throw-exceptions? false})]
       (is (= 404 (:status resp))))))
 
+(deftest test-legacy-table-ingest-route-gone
+  (testing "POST /ingest no longer exposes a generic SQLite collector"
+    (let [resp (http/post (url "/ingest")
+                          {:body "{}"
+                           :headers {"Content-Type" "application/json"}
+                           :throw-exceptions? false})]
+      (is (= 404 (:status resp))))))
+
 (deftest test-unknown-event-returns-empty
   (testing "dispatch on an event with no subscribers returns 200 empty"
     (let [{:keys [status body]} (dispatch! "NobodyHandlesThis" {:cwd "/tmp"})]

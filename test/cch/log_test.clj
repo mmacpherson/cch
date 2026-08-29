@@ -209,12 +209,14 @@
               ;; stop-writer! sends ::stop and joins the drain thread,
               ;; so by the time it returns sqlite3 has consumed everything.
               (log/stop-writer!)))
-          (let [n (-> (p/sh ["sqlite3" db "SELECT count(*) FROM events WHERE hook_name = 'writer-test';"])
-                      :out
-                      str
-                      clojure.string/trim
-                      Long/parseLong)]
-            (is (= 25 n) "all queued inserts must reach the DB after stop-writer!")))
+          (let [[n stamped]
+                (-> (p/sh ["sqlite3" db
+                           (str "SELECT count(*),sum(node IS NOT NULL) FROM events "
+                                "WHERE hook_name = 'writer-test';")])
+                    :out str clojure.string/trim
+                    (clojure.string/split #"\|"))]
+            (is (= "25" n) "all queued inserts must reach the DB after stop-writer!")
+            (is (= "0" stamped) "new local events carry no machine identity")))
         (finally
           (fs/delete-tree tmp-dir))))))
 
@@ -243,7 +245,7 @@
             (finally
               (log/stop-writer!)))
           (let [legacy (-> (p/sh ["sqlite3" "-json" db
-                                  "SELECT session_id, model_id, payload, agent FROM context_snapshots;"])
+                                  "SELECT session_id, model_id, payload, agent, node FROM context_snapshots;"])
                            :out
                            (json/parse-string true))
                 normalized (-> (p/sh ["sqlite3" "-json" db
@@ -260,9 +262,10 @@
             (is (= [{:session_id "synthetic-session"
                      :model_id "synthetic-model"
                      :payload payload
-                     :agent "codex"}]
+                     :agent "codex"
+                     :node nil}]
                    legacy)
-                "legacy context snapshot behavior remains intact")
+                "local context behavior remains intact without machine identity")
             (is (= ["five_hour" "seven_day"] (mapv :window_key normalized)))
             (is (= [9.25 31.0] (mapv :used_percentage normalized)))
             (is (every? #(= 1 (:schema_version %)) normalized))

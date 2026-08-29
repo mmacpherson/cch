@@ -14,7 +14,7 @@
 (def ^:const path-property "cch.control.db.path")
 
 (defn db-path
-  "Separate operational store; intentionally outside events.db federation."
+  "Separate operational store; intentionally outside the local hook event DB."
   []
   (or (System/getProperty path-property)
       (str (or (System/getenv "XDG_DATA_HOME")

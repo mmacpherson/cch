@@ -378,8 +378,8 @@ preserved native delivery and thread persistence semantics.
   OS security boundary against a same-user process deliberately invoking
   operator CLI commands. Native tool approvals remain the authorization layer.
 - Claude inbox tokens remain in the owner-readable local `control.db`. That
-  operational database is separate from federated hook-event history; tokens
-  are omitted from listing APIs and must never be sent to a future broker.
+  operational database is separate from local hook-event history; tokens are
+  omitted from listing APIs and are never sent to the broker.
 - Message bodies and transcript previews are not persisted by cch. Delivery
   deduplication stores only a SHA-256 digest and routing metadata.
 - In the disposable broker, cross-runner message bodies exist transiently in
@@ -418,9 +418,10 @@ provider context payloads between machines:
 - Normalized forecasts are authoritative. Setting
   `CCH_FORECAST_USAGE_SOURCE=legacy` temporarily restores local compatibility
   reads during rollback.
-- Raw `context_snapshots` remain local for native context-governor behavior and
-  compatibility measurement. The legacy shipper now sends hook events only;
-  its collector can still ingest context snapshots during rolling upgrades.
+- Raw `context_snapshots` and hook events remain local for native
+  context-governor and dashboard behavior. The generic table shipper and
+  collector are retired; legacy provenance columns remain only so existing
+  SQLite databases can be read without a destructive rewrite.
 
 Cutover required both forecast windows to agree on presence, current percentage
 within 1 point, projected percentage within 2 points, reset time within 2

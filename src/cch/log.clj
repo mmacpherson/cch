@@ -21,7 +21,6 @@
   (:require [babashka.process :as p]
             [babashka.fs :as fs]
             [cch.db :as db]
-            [cch.federation :as fed]
             [cch.migrate :as migrate]
             [cch.usage-observation :as usage]
             [clojure.java.io :as io]
@@ -147,7 +146,7 @@
         ;; fallback path (concurrent sqlite3 procs); the writer thread
         ;; sets WAL once at startup and is the sole writer.
         insert (format
-                 "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra, agent, node) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
+                 "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra, agent) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
                  (sql-value session-id)
                  (sql-value hook-name)
                  (sql-value event-type)
@@ -158,8 +157,7 @@
                  (sql-value reason)
                  (sql-value elapsed-ms)
                  (sql-value extra)
-                 (sql-value (or agent "claude-code"))
-                 (sql-value (fed/node-name)))
+                 (sql-value (or agent "claude-code")))
         fallback-sql (str "PRAGMA busy_timeout=5000; " insert)]
     (try
       (ensure-db-once! path)
@@ -268,15 +266,14 @@
         agent       (or agent "claude-code")
         observed-at (System/currentTimeMillis)
         legacy      (format
-                      "INSERT INTO context_snapshots (agent, session_id, used_pct, current_tokens, window_size, model_id, payload, node) VALUES (%s,%s,%s,%s,%s,%s,%s,%s);"
+                      "INSERT INTO context_snapshots (agent, session_id, used_pct, current_tokens, window_size, model_id, payload) VALUES (%s,%s,%s,%s,%s,%s,%s);"
                       (sql-value agent)
                       (sql-value session-id)
                       (if used-pct (str used-pct) "NULL")
                       (if current-tokens (str (long current-tokens)) "NULL")
                       (if window-size (str (long window-size)) "NULL")
                       (sql-value model-id)
-                      (sql-value payload)
-                      (sql-value (fed/node-name)))
+                      (sql-value payload))
         observations (usage/from-snapshot {:agent agent
                                            :observed-at observed-at
                                            :payload payload})

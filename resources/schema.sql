@@ -12,12 +12,8 @@ CREATE TABLE IF NOT EXISTS events (
   reason      TEXT,
   elapsed_ms  REAL,
   extra       TEXT,
-  -- Federation (see cch.federation). node = originating machine, stamped
-  -- at write time (defaults to hostname). origin_id = the source row's
-  -- local id, set ONLY on rows ingested from another node; NULL for a
-  -- machine's own local rows. UNIQUE(node, origin_id) makes cross-node
-  -- ingest idempotent — SQLite treats NULLs as distinct, so local rows
-  -- (origin_id NULL) are never deduped against each other.
+  -- Legacy federation provenance retained so existing databases remain
+  -- readable. New rows leave both fields NULL; hook-event tables stay local.
   node        TEXT,
   origin_id   INTEGER
 );
@@ -60,7 +56,7 @@ CREATE TABLE IF NOT EXISTS context_snapshots (
   window_size    INTEGER,
   model_id       TEXT,
   payload        TEXT,
-  -- Federation: see the events table comment above.
+  -- Legacy federation provenance; new local rows leave both fields NULL.
   node           TEXT,
   origin_id      INTEGER
 );
@@ -143,10 +139,8 @@ CREATE INDEX IF NOT EXISTS idx_ctx_7d_samples ON context_snapshots(
   json_extract(payload, '$.rate_limits.seven_day.resets_at'),
   session_id);
 
--- Federation shipper watermark. One row per shipped table holding the
--- highest local id already sent to the collector. The background shipper
--- (cch.federation) reads WHERE id > last_shipped_id, POSTs the batch, then
--- advances last_shipped_id. Only meaningful on nodes that ship.
+-- Legacy shipper watermarks retained for non-destructive upgrades. Current
+-- releases neither read nor advance this table.
 CREATE TABLE IF NOT EXISTS federation_offsets (
   table_name      TEXT PRIMARY KEY,
   last_shipped_id INTEGER NOT NULL DEFAULT 0,
