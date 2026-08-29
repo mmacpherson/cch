@@ -30,17 +30,20 @@ to run locally.
 
 ## Architecture at a glance
 
-```text
-Claude / Codex / AGY
-        │ native hooks, MCP, app-server APIs
-        ▼
-local cch server ─── local SQLite event and usage history
-        │
-        │ outbound authenticated runner connection
-        ▼
-central broker ───── Postgres presence and delivery metadata
-        │
-        └────────── authenticated fleet web application
+```mermaid
+flowchart TB
+    agents["Claude / Codex / AGY"]
+    local["Local cch server"]
+    sqlite[("Local SQLite<br/>events and usage history")]
+    broker["Central broker"]
+    postgres[("Postgres<br/>presence and delivery metadata")]
+    web["Authenticated fleet web application"]
+
+    agents -->|"Native hooks, MCP, app-server APIs"| local
+    local --- sqlite
+    local -->|"Outbound authenticated runner connection"| broker
+    broker --- postgres
+    broker --> web
 ```
 
 Each machine is a **runner**. A runner discovers its local sessions and makes

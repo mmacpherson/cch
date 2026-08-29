@@ -1,6 +1,7 @@
 (ns cch.usage-observation-test
   (:require [cch.usage-observation :as usage]
             [cheshire.core :as json]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]))
 
 (def synthetic-payload
@@ -68,6 +69,24 @@
                                     (update base :observed-at inc))))]
     (is (= first-id repeat-id) "equivalent numeric forms deduplicate")
     (is (not= first-id later-id) "a later observation remains a distinct event")))
+
+(deftest wire-schema-is-closed-semantic-and-sanitized
+  (let [valid (first (usage/from-snapshot
+                       {:agent "codex"
+                        :observed-at 1780000000123
+                        :payload synthetic-payload}))
+        private-value "synthetic-sensitive-value"
+        invalid [(assoc valid :prompt private-value)
+                 (assoc valid :event-id (apply str (repeat 64 "f")))
+                 (assoc valid :used-percentage Double/NaN)
+                 (assoc valid :schema-version 2)]]
+    (is (= valid (usage/validate-observation! valid)))
+    (doseq [observation invalid]
+      (let [error (try
+                    (usage/validate-observation! observation)
+                    (catch clojure.lang.ExceptionInfo exception exception))]
+        (is (= :invalid-usage-observation (:type (ex-data error))))
+        (is (not (str/includes? (str error) private-value)))))))
 
 (deftest invalid-input-is-dropped-per-window
   (testing "one bad window does not poison another valid window"

@@ -1,6 +1,7 @@
 (ns cch.activity-observation
   "Narrow, provider-agnostic activity records safe for the hosted event feed."
   (:require [cch.control.store :as store]
+            [cch.schema :as schema]
             [clojure.string :as str])
   (:import [java.time Instant LocalDateTime ZoneOffset]
            [java.time.format DateTimeFormatter DateTimeParseException]))
@@ -13,67 +14,49 @@
     "tool.permission" "context.compacted" "attention.requested"})
 (def tool-categories #{"read" "write" "execute" "search" "agent" "web" "other"})
 (def outcomes #{"observed" "allowed" "approval-needed" "denied" "completed" "failed"})
-(def allowed-keys
-  #{:event-id :schema-version :observed-at :agent :action :tool-category
-    :outcome :duration-ms})
-
 (defn- finite-number? [value]
   (and (number? value) (Double/isFinite (double value))))
+
+(def ^:private tool-actions
+  (set (filter #(str/starts-with? % "tool.") actions)))
+
+(def ^:private non-tool-actions
+  (remove tool-actions actions))
+
+(def ^:private common-observation-entries
+  [[:event-id [:re #"[a-f0-9]{64}"]]
+   [:schema-version [:= schema-version]]
+   [:observed-at [:int {:min 1}]]
+   [:agent (into [:enum] (sort agents))]
+   [:outcome (into [:enum] (sort outcomes))]
+   [:duration-ms {:optional true}
+    [:or [:int {:min 0 :max 3600000}]
+     [:double {:min 0.0 :max 3600000.0}]]]])
+
+(def observation-schema
+  "Closed, versioned wire contract for one fleet-safe activity observation."
+  [:or
+   (into [:map {:closed true}]
+         (concat common-observation-entries
+                 [[:action (into [:enum] (sort tool-actions))]
+                  [:tool-category (into [:enum] (sort tool-categories))]]))
+   (into [:map {:closed true}]
+         (concat common-observation-entries
+                 [[:action (into [:enum] (sort non-tool-actions))]]))])
+
+(def ^:private observation-validator
+  (schema/validator observation-schema))
 
 (defn validate-observation!
   "Validate and return the canonical allowlisted shape. Unknown keys fail
   closed so a future caller cannot accidentally smuggle a raw provider field."
   [observation]
-  (when-not (map? observation)
-    (throw (ex-info "Activity observation must be an object"
-                    {:type :invalid-activity-observation})))
-  (when-let [unknown (seq (remove allowed-keys (keys observation)))]
-    (throw (ex-info "Activity observation contains unknown fields"
-                    {:type :invalid-activity-observation
-                     :fields (vec unknown)})))
-  (let [{:keys [event-id observed-at agent action tool-category outcome
-                duration-ms]} observation]
-    (when-not (= schema-version (:schema-version observation))
-      (throw (ex-info "Activity schema version is unsupported"
-                      {:type :invalid-activity-observation})))
-    (when-not (and (string? event-id) (re-matches #"[a-f0-9]{64}" event-id))
-      (throw (ex-info "Activity event id is invalid"
-                      {:type :invalid-activity-observation})))
-    (when-not (and (integer? observed-at) (pos? observed-at))
-      (throw (ex-info "Activity timestamp is invalid"
-                      {:type :invalid-activity-observation})))
-    (when-not (contains? agents agent)
-      (throw (ex-info "Activity agent is invalid"
-                      {:type :invalid-activity-observation})))
-    (when-not (contains? actions action)
-      (throw (ex-info "Activity action is invalid"
-                      {:type :invalid-activity-observation})))
-    (when-not (or (nil? tool-category)
-                  (contains? tool-categories tool-category))
-      (throw (ex-info "Activity tool category is invalid"
-                      {:type :invalid-activity-observation})))
-    (when (and (str/starts-with? action "tool.") (nil? tool-category))
-      (throw (ex-info "Tool activity requires a category"
-                      {:type :invalid-activity-observation})))
-    (when (and (not (str/starts-with? action "tool.")) tool-category)
-      (throw (ex-info "Non-tool activity cannot carry a tool category"
-                      {:type :invalid-activity-observation})))
-    (when-not (contains? outcomes outcome)
-      (throw (ex-info "Activity outcome is invalid"
-                      {:type :invalid-activity-observation})))
-    (when-not (or (nil? duration-ms)
-                  (and (finite-number? duration-ms)
-                       (<= 0 (double duration-ms) 3600000)))
-      (throw (ex-info "Activity duration is invalid"
-                      {:type :invalid-activity-observation})))
-    (cond-> {:event-id event-id
-             :schema-version schema-version
-             :observed-at observed-at
-             :agent agent
-             :action action
-             :outcome outcome}
-      tool-category (assoc :tool-category tool-category)
-      (some? duration-ms) (assoc :duration-ms (double duration-ms)))))
+  (schema/validate! observation-validator observation
+                    :invalid-activity-observation
+                    "Activity observation is invalid")
+  (cond-> observation
+    (some? (:duration-ms observation))
+    (update :duration-ms double)))
 
 (defn- parse-millis [value]
   (cond

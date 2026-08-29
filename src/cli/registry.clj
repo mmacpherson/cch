@@ -31,7 +31,7 @@
 ;;   :agent-spec     — map describing the subagent
 ;;
 ;; Future (v1 placeholder):
-;;   :config-schema  — malli schema for hook options (see 8gj)
+;;   :config-schema  — Malli schema for hook options (see vgi.27)
 
 (def hooks
   "Built-in hooks and their configuration."

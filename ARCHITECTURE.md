@@ -79,21 +79,26 @@ operations. It is an administrative surface, not an additional runtime.
 
 ## Topology
 
-```text
-┌──────────────── runner A ────────────────┐
-│ Claude ─┐                               │
-│ Codex ──┼─ native adapters ─ cch server │
-│ AGY ────┘                     │         │
-│                         local SQLite    │
-│                               │         │
-│                       paired runner ────┼────┐
-└─────────────────────────────────────────┘    │ outbound HTTPS
-                                               ▼
-┌──────────────── runner B ────────────────┐  broker/Postgres
-│ native agents ─ adapters ─ cch server   │    │
-│                              │           │    └─ authenticated fleet UI
-│                      paired runner ──────┼────┘
-└──────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph runner_a["Runner A"]
+        agents_a["Claude / Codex / AGY"] --> adapters_a["Native adapters"]
+        adapters_a --> server_a["cch server"]
+        server_a --- sqlite_a[("Local SQLite")]
+        server_a --> paired_a["Paired runner"]
+    end
+
+    subgraph runner_b["Runner B"]
+        agents_b["Native agents"] --> adapters_b["Native adapters"]
+        adapters_b --> server_b["cch server"]
+        server_b --- sqlite_b[("Local SQLite")]
+        server_b --> paired_b["Paired runner"]
+    end
+
+    paired_a -->|"Outbound HTTPS"| broker["Broker"]
+    paired_b -->|"Outbound HTTPS"| broker
+    broker --- postgres[("Postgres")]
+    broker --> fleet["Authenticated fleet UI"]
 ```
 
 ## Session and message model
@@ -162,10 +167,16 @@ scope is provider payloads, MCP arguments, broker HTTP requests and responses,
 runner registration, message envelopes, authentication claims, and normalized
 activity and usage observations.
 
+The normalized activity and usage contracts are the first complete migrations:
+the same closed schemas validate runner publication and broker ingestion. Other
+boundaries migrate incrementally so hand-written checks disappear only when a
+complete replacement and its negative tests land.
+
 Schemas are compiled once at startup. Federation schemas are closed or followed
 by explicit field selection so adding a runner-local field cannot implicitly
-publish it. Coercion is conservative and explicit, and validation errors name
-the invalid field without echoing potentially sensitive values.
+publish it. Coercion is conservative and explicit. Externally visible
+validation errors carry only stable boundary error types and never echo rejected
+fields or values.
 
 Inside a validated boundary, cch continues to use ordinary immutable maps and
 pure transforms. Schema checks do not belong on every internal function call or

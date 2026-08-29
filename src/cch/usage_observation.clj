@@ -5,7 +5,8 @@
   deliberately derived from — rather than a copy of — provider status payloads:
   no session, account, machine, repository, model, or raw payload identity is
   retained."
-  (:require [cheshire.core :as json]
+  (:require [cch.schema :as schema]
+            [cheshire.core :as json]
             [clojure.string :as str])
   (:import [java.math BigDecimal]
            [java.nio.charset StandardCharsets]
@@ -16,10 +17,6 @@
 
 (def ^:private windows
   ["five_hour" "seven_day"])
-
-(def ^:private observation-keys
-  #{:schema-version :event-id :observed-at :agent :window
-    :used-percentage :resets-at})
 
 (defn- finite-number?
   [value]
@@ -95,14 +92,41 @@
          (canonical-decimal used-percentage) "\n"
          resets-at)))
 
+(def observation-schema
+  "Closed canonical wire contract for one fleet-safe usage observation."
+  [:map {:closed true}
+   [:schema-version [:= schema-version]]
+   [:event-id [:re #"[a-f0-9]{64}"]]
+   [:observed-at [:int {:min 1}]]
+   [:agent [:and string? [:re #"[a-z][a-z0-9._-]{0,63}"]]]
+   [:window (into [:enum] windows)]
+   [:used-percentage [:double {:min 0.0 :max 100.0}]]
+   [:resets-at [:int {:min 1}]]])
+
+(def ^:private observation-envelope-schema
+  [:map {:closed true}
+   [:schema-version any?]
+   [:event-id any?]
+   [:observed-at any?]
+   [:agent any?]
+   [:window any?]
+   [:used-percentage any?]
+   [:resets-at any?]])
+
+(def ^:private observation-envelope-validator
+  (schema/validator observation-envelope-schema))
+
+(def ^:private observation-validator
+  (schema/validator observation-schema))
+
 (defn validate-observation!
   "Validate and canonicalize one normalized observation received at a trust
   boundary. Extra fields are rejected so raw provider or machine-local data
   cannot hitch a ride. The supplied event id must match the semantic content."
   [value]
-  (when-not (and (map? value) (= observation-keys (set (keys value))))
-    (throw (ex-info "Usage observation has an invalid shape"
-                    {:type :invalid-usage-observation})))
+  (schema/validate! observation-envelope-validator value
+                    :invalid-usage-observation
+                    "Usage observation is invalid")
   (let [candidate {:schema-version (when (= schema-version (:schema-version value))
                                      schema-version)
                    :observed-at (epoch-millis (:observed-at value))
@@ -112,11 +136,15 @@
                    :used-percentage (percentage (:used-percentage value))
                    :resets-at (epoch-seconds (:resets-at value))}
         expected-id (when (every? some? (vals candidate))
-                      (event-id candidate))]
-    (when-not (and expected-id (= expected-id (:event-id value)))
+                      (event-id candidate))
+        canonical (assoc candidate :event-id (:event-id value))]
+    (schema/validate! observation-validator canonical
+                      :invalid-usage-observation
+                      "Usage observation is invalid")
+    (when-not (= expected-id (:event-id value))
       (throw (ex-info "Usage observation is invalid"
                       {:type :invalid-usage-observation})))
-    (assoc candidate :event-id expected-id)))
+    canonical))
 
 (defn- payload-map
   [payload]

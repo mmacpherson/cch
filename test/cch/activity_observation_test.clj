@@ -1,7 +1,25 @@
 (ns cch.activity-observation-test
   (:require [cch.activity-observation :as activity]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]))
+            [clojure.test :refer [deftest is testing]]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.properties :as prop]
+            [malli.core :as m]
+            [malli.generator :as mg]))
+
+(defspec generated-observations-survive-boundary-canonicalization 100
+  (prop/for-all [observation (mg/generator activity/observation-schema)]
+    (m/validate activity/observation-schema
+                (activity/validate-observation! observation))))
+
+(defspec generated-observations-reject-added-provider-content 100
+  (prop/for-all [observation (mg/generator activity/observation-schema)]
+    (= :invalid-activity-observation
+       (try
+         (activity/validate-observation!
+           (assoc observation :raw-provider-payload "synthetic-private"))
+         (catch clojure.lang.ExceptionInfo error
+           (:type (ex-data error)))))))
 
 (deftest local-events-become-coarse-allowlisted-activity
   (let [raw {:id 42
@@ -45,6 +63,32 @@
                  (activity/validate-observation! (assoc valid field "private"))
                  (catch clojure.lang.ExceptionInfo error
                    (:type (ex-data error))))))))))
+
+(deftest schema-enforces-cross-field-and-numeric-contracts
+  (let [base {:event-id (apply str (repeat 64 "b"))
+              :schema-version 1
+              :observed-at 2000000000000
+              :agent "codex"
+              :action "turn.started"
+              :outcome "observed"}
+        invalid [(assoc base :tool-category "execute")
+                 (assoc base :action "tool.requested")
+                 (assoc base :duration-ms Double/NaN)
+                 (assoc base :duration-ms 3600001)
+                 (assoc base :schema-version 2)]]
+    (doseq [observation invalid]
+      (is (= :invalid-activity-observation
+             (try
+               (activity/validate-observation! observation)
+               (catch clojure.lang.ExceptionInfo error
+                 (:type (ex-data error)))))))
+    (is (= (assoc base :action "tool.requested"
+                       :tool-category "execute"
+                       :duration-ms 12.0)
+           (activity/validate-observation!
+             (assoc base :action "tool.requested"
+                         :tool-category "execute"
+                         :duration-ms 12))))))
 
 (deftest policy-hook-duplicates-and-unrecognized-events-are-not-exported
   (is (nil? (activity/from-local-event
