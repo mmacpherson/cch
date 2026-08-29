@@ -689,8 +689,8 @@
         (prune-usage! broker tx timestamp-value)
         (let [accepted
               (reduce
-                (fn [count observation]
-                  (+ count
+                (fn [accepted-count observation]
+                  (+ accepted-count
                      (count
                        (rows
                          tx

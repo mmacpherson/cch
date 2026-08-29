@@ -1,6 +1,8 @@
 (ns cch.control.broker-postgres-test
   (:require [cch.control.broker-api :as api]
             [cch.control.broker-postgres :as postgres]
+            [cch.control.broker :as memory]
+            [cch.usage-observation :as usage]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [next.jdbc :as jdbc]
@@ -58,6 +60,37 @@
 
 (defn- integration-url []
   (System/getenv "CCH_TEST_POSTGRES_URL"))
+
+(deftest postgres-publish-execution-counts-inserts-without-a-live-database
+  (let [now 2000000000000
+        observation
+        (first
+          (usage/from-snapshot
+            {:agent "codex"
+             :observed-at now
+             :payload {:rate_limits
+                       {:five_hour {:used_percentage 4
+                                    :resets_at 2000003600}}}}))
+        b (postgres/->PostgresBroker
+            nil runner-tokens (atom {}) (constantly now) "cch_control"
+            {:usage-retention-ms memory/default-usage-retention-ms
+             :usage-future-skew-ms memory/default-usage-future-skew-ms
+             :max-usage-observations memory/default-max-usage-observations})
+        transact-var (ns-resolve 'cch.control.broker-postgres 'transact)
+        prune-var (ns-resolve 'cch.control.broker-postgres 'prune-usage!)
+        rows-var (ns-resolve 'cch.control.broker-postgres 'rows)
+        row-var (ns-resolve 'cch.control.broker-postgres 'row)
+        publish-var (ns-resolve 'cch.control.broker-postgres 'publish-usage!)]
+    (with-redefs-fn
+      {transact-var (fn [_ run] (run :synthetic-transaction))
+       prune-var (fn [& _] nil)
+       rows-var (fn [_ _] [{:cursor 7}])
+       row-var (fn [_ _] {:cursor 7})}
+      (fn []
+        (is (= {:accepted 1 :duplicates 0 :latest-cursor 7}
+               (publish-var
+                 b {:runner-id "runner-a" :token "synthetic-token-a"
+                    :observations [observation]})))))))
 
 (deftest postgres-directory-reconnect-replay-and-migrations
   (if (str/blank? (integration-url))
