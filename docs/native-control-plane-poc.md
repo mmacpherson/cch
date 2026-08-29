@@ -397,6 +397,33 @@ trustworthy source attribution, idempotent retries, clear stale-session
 failures, restart recovery, and no permission relay. Native local execution
 continues during runner or broker failure. The non-default Codex launch UX
 remains a product concern, not a routing uncertainty. Postgres broker storage,
-Google OIDC for the human webapp, and federation migration remain downstream
-production phases; provider credentials, approvals, transcripts, and terminal
-bytes remain outside that hosted boundary.
+Google OIDC protects the human webapp. Provider credentials, approvals,
+transcripts, and terminal bytes remain outside the hosted boundary.
+
+## Usage federation migration
+
+Forecast federation now uses the paired control plane rather than copying raw
+provider context payloads between machines:
+
+- Each local capture derives a versioned observation containing only event id,
+  observation time, agent kind, window kind, used percentage, and reset time.
+  Session, account, repository, machine, model, path, and raw payload identity
+  are excluded and rejected at the broker boundary.
+- Local SQLite remains the durable write buffer. Independent publish and pull
+  cursors make retries idempotent, and remotely materialized rows are marked
+  non-publishable so they cannot echo around the fleet.
+- The hosted Postgres broker retains 91 days. Local history import and publish
+  use a 90-day horizon, leaving a transport-day buffer while preserving the
+  twelve completed seven-day windows used by the learned forecast prior.
+- Normalized forecasts are authoritative. Setting
+  `CCH_FORECAST_USAGE_SOURCE=legacy` temporarily restores local compatibility
+  reads during rollback.
+- Raw `context_snapshots` remain local for native context-governor behavior and
+  compatibility measurement. The legacy shipper now sends hook events only;
+  its collector can still ingest context snapshots during rolling upgrades.
+
+Cutover required both forecast windows to agree on presence, current percentage
+within 1 point, projected percentage within 2 points, reset time within 2
+seconds, learned prior mean and sigma within 0.05, and at least 90% sample
+coverage. Live source-local and cross-node cold-start comparisons met those
+tolerances before raw context-snapshot shipping was disabled.

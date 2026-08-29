@@ -162,6 +162,15 @@
       (is (= 1 (count batches)))
       (is (= 100 (count (first batches)))))))
 
+(deftest legacy-ship-cycle-leaves-context-snapshots-local
+  (let [called (atom [])]
+    (with-redefs [ship/ship-table-once!
+                  (fn [_ table]
+                    (swap! called conj table)
+                    3)]
+      (is (= {"events" 3} (ship/ship-once! {})))
+      (is (= ["events"] @called)))))
+
 ;; --- HTTP handler: collector gating (end-to-end through handle-ingest) ---
 
 (defn- ingest-req [headers body-str]

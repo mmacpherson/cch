@@ -81,12 +81,14 @@
             (recur (+ shipped sent))))))))
 
 (defn ship-once!
-  "One full ship cycle across every shippable table. Returns a
+  "One full legacy ship cycle across the hook event log. Usage forecasts move
+  through the privacy-safe control-plane observation stream, so raw context
+  snapshots remain local. Returns a
   {table → rows-shipped} map."
   [cfg]
   (reduce (fn [acc t] (assoc acc t (ship-table-once! cfg t)))
           {}
-          ["events" "context_snapshots"]))
+          ["events"]))
 
 (defonce ^:private shipper (atom nil))
 

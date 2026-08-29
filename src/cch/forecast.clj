@@ -39,12 +39,13 @@
 (def ^:const default-agent "claude-code")
 
 (def ^:dynamic *usage-source*
-  "Compatibility selector used while normalized forecasts run beside the
-  legacy payload table. The root remains legacy until live parity passes."
+  "Forecast source selector. Normalized observations are authoritative after
+  live cross-node parity; CCH_FORECAST_USAGE_SOURCE=legacy is the reversible
+  compatibility escape hatch during rollout."
   (case (System/getenv "CCH_FORECAST_USAGE_SOURCE")
     "normalized" :normalized
     "legacy" :legacy
-    :legacy))
+    :normalized))
 
 (defn- normalized-source? []
   (= :normalized *usage-source*))
@@ -570,7 +571,7 @@
     (catch Throwable _ nil)))
 
 (defn- maybe-refresh!
-  "Recompute only when new snapshots have arrived since the last refresh.
+  "Recompute only when compatibility or normalized usage data has arrived.
   Returns true if it refreshed. The watermark check means an idle box does no
   forecast work at all, and a busy box does exactly one recompute per cadence
   tick regardless of how many snapshots landed in between."
@@ -585,7 +586,7 @@
   "Start the background forecast refresher.
 
   Recomputes on a FIXED cadence (`interval-ms`, default from cch.settings)
-  rather than per snapshot, and only when context_snapshots has grown since the
+  rather than per snapshot, and only when a usage source has grown since the
   last run (watermark gate). This caps recompute cost regardless of event rate:
   an idle box does almost nothing, a busy box recomputes at most once per
   interval. Previously the loop woke on every snapshot POST, which at a busy

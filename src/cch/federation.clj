@@ -106,6 +106,9 @@
   specially). Doubles as the whitelist of shippable table names."
   {"events" [:timestamp :agent :session_id :hook_name :event_type :tool_name
              :file_path :cwd :decision :reason :elapsed_ms :extra]
+   ;; Retained as rolling-upgrade ingest compatibility. Current shippers no
+   ;; longer send this raw provider payload table; normalized usage moves via
+   ;; the paired control runner instead.
    "context_snapshots" [:timestamp :agent :session_id :used_pct :current_tokens
                         :window_size :model_id :payload]})
 
