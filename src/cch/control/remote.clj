@@ -173,6 +173,21 @@
                           :status status}
                    failure (assoc :failure failure))))
 
+(defn publish-usage-observations!
+  [config observations]
+  (request-json! config :post "/v1/usage-observations"
+                 {:runner-id (:runner-id config)
+                  :observations observations}))
+
+(defn read-usage-observations!
+  ([config after-cursor]
+   (read-usage-observations! config after-cursor 500))
+  ([config after-cursor limit]
+   (request-json! config :post "/v1/usage-observations/read"
+                  {:runner-id (:runner-id config)
+                   :after-cursor after-cursor
+                   :limit limit})))
+
 (defn message-status [config message-id]
   (:message (request-json! config :post "/v1/messages/status"
                            {:runner-id (:runner-id config)

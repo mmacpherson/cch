@@ -9,6 +9,7 @@
   (:require [cch.control.broker-api :as api]
             [cch.control.naming :as naming]
             [cch.control.store :as store]
+            [cch.usage-observation :as usage]
             [clojure.string :as str])
   (:import [java.net URI]
            [java.nio.charset StandardCharsets]
@@ -19,6 +20,11 @@
 (def ^:const default-ack-timeout-ms 2000)
 (def ^:const default-max-attempts 3)
 (def ^:const max-message-bytes (* 32 1024))
+(def ^:const default-usage-retention-ms (* 35 24 60 60 1000))
+(def ^:const default-usage-future-skew-ms (* 5 60 1000))
+(def ^:const default-max-usage-observations 2000000)
+(def ^:const max-usage-batch-size 256)
+(def ^:const max-usage-read-limit 1000)
 
 (defrecord Broker [state now-fn options])
 
@@ -27,22 +33,32 @@
   persistent pairing token. The token map and message bodies remain in memory."
   ([runner-tokens] (new-broker runner-tokens {}))
   ([runner-tokens {:keys [now-fn lease-ms message-ttl-ms ack-timeout-ms
-                          max-attempts]
+                          max-attempts usage-retention-ms usage-future-skew-ms
+                          max-usage-observations]
                    :or {now-fn #(System/currentTimeMillis)
                         lease-ms default-lease-ms
                         message-ttl-ms default-message-ttl-ms
                         ack-timeout-ms default-ack-timeout-ms
-                        max-attempts default-max-attempts}}]
+                        max-attempts default-max-attempts
+                        usage-retention-ms default-usage-retention-ms
+                        usage-future-skew-ms default-usage-future-skew-ms
+                        max-usage-observations default-max-usage-observations}}]
    (->Broker (atom {:runner-tokens runner-tokens
                     :runners {}
                     :routes {}
                     :aliases {}
-                    :messages {}})
+                    :messages {}
+                    :usage-observations (sorted-map)
+                    :usage-event-cursors {}
+                    :next-usage-cursor 0})
              now-fn
              {:lease-ms lease-ms
               :message-ttl-ms message-ttl-ms
               :ack-timeout-ms ack-timeout-ms
-              :max-attempts max-attempts})))
+              :max-attempts max-attempts
+              :usage-retention-ms usage-retention-ms
+              :usage-future-skew-ms usage-future-skew-ms
+              :max-usage-observations max-usage-observations})))
 
 (defn- now [^Broker broker]
   ((:now-fn broker)))
@@ -415,6 +431,116 @@
       (select-keys message [:message-id :source :target :status :attempts
                             :created-at :expires-at :failure]))))
 
+(defn validate-usage-batch!
+  "Validate a broker batch against its size, age, and clock-skew bounds. Shared
+  by the in-memory and Postgres implementations so their trust boundary is
+  identical."
+  [observations timestamp retention-ms future-skew-ms]
+  (when-not (vector? observations)
+    (throw (ex-info "observations must be a JSON array"
+                    {:type :invalid-usage-batch})))
+  (when (> (count observations) max-usage-batch-size)
+    (throw (ex-info "Usage observation batch is too large"
+                    {:type :usage-batch-too-large
+                     :max-count max-usage-batch-size})))
+  (let [oldest (- timestamp retention-ms)
+        newest (+ timestamp future-skew-ms)]
+    (mapv
+      (fn [observation]
+        (let [validated (usage/validate-observation! observation)
+              observed-at (:observed-at validated)]
+          (cond
+            (< observed-at oldest)
+            (throw (ex-info "Usage observation is outside retention"
+                            {:type :usage-observation-expired}))
+
+            (> observed-at newest)
+            (throw (ex-info "Usage observation is too far in the future"
+                            {:type :usage-observation-future}))
+
+            :else validated)))
+      observations)))
+
+(defn- prune-usage-state
+  [state oldest max-count]
+  (let [fresh (->> (:usage-observations state)
+                   (filter (fn [[_ observation]]
+                             (>= (:observed-at observation) oldest)))
+                   (take-last max-count)
+                   (into (sorted-map)))
+        event-cursors (into {}
+                            (map (fn [[cursor observation]]
+                                   [(:event-id observation) cursor]))
+                            fresh)]
+    (assoc state
+           :usage-observations fresh
+           :usage-event-cursors event-cursors)))
+
+(defn publish-usage!
+  "Idempotently append a bounded batch of narrow observations. Authentication
+  establishes permission only; runner identity is intentionally not stored on
+  the observation."
+  [^Broker broker {:keys [runner-id token observations]}]
+  (authorize! broker runner-id token)
+  (let [timestamp (now broker)
+        observations (validate-usage-batch!
+                       observations timestamp
+                       (get-in broker [:options :usage-retention-ms])
+                       (get-in broker [:options :usage-future-skew-ms]))
+        oldest (- timestamp (get-in broker [:options :usage-retention-ms]))
+        max-count (get-in broker [:options :max-usage-observations])]
+    (locking broker
+      (let [initial (prune-usage-state @(:state broker) oldest max-count)
+            [next-state accepted duplicates]
+            (reduce
+              (fn [[state accepted duplicates] observation]
+                (if (contains? (:usage-event-cursors state)
+                               (:event-id observation))
+                  [state accepted (inc duplicates)]
+                  (let [cursor (inc (:next-usage-cursor state))]
+                    [(-> state
+                         (assoc :next-usage-cursor cursor)
+                         (assoc-in [:usage-observations cursor]
+                                   (assoc observation :cursor cursor))
+                         (assoc-in [:usage-event-cursors (:event-id observation)]
+                                   cursor))
+                     (inc accepted)
+                     duplicates])))
+              [initial 0 0]
+              observations)
+            retained (prune-usage-state next-state oldest max-count)]
+        (reset! (:state broker) retained)
+        {:accepted accepted
+         :duplicates duplicates
+         :latest-cursor (:next-usage-cursor retained)}))))
+
+(defn read-usage!
+  "Read retained observations after a broker cursor. Cursor gaps caused by
+  bounded retention are normal: callers simply advance to `next-cursor`."
+  [^Broker broker {:keys [runner-id token after-cursor limit]}]
+  (authorize! broker runner-id token)
+  (let [after-cursor (or after-cursor 0)
+        limit (or limit 500)]
+    (when-not (and (integer? after-cursor) (<= 0 after-cursor))
+      (throw (ex-info "after_cursor must be a non-negative integer"
+                      {:type :invalid-usage-cursor})))
+    (when-not (and (integer? limit) (<= 1 limit max-usage-read-limit))
+      (throw (ex-info "limit is invalid" {:type :invalid-usage-cursor})))
+    (locking broker
+      (let [timestamp (now broker)
+            state (prune-usage-state
+                    @(:state broker)
+                    (- timestamp (get-in broker [:options :usage-retention-ms]))
+                    (get-in broker [:options :max-usage-observations]))
+            observations (->> (:usage-observations state)
+                              (drop-while (fn [[cursor _]]
+                                            (<= cursor after-cursor)))
+                              (take limit)
+                              (mapv val))
+            next-cursor (or (:cursor (peek observations)) after-cursor)]
+        (reset! (:state broker) state)
+        {:observations observations :next-cursor next-cursor}))))
+
 (defn summary
   "Non-sensitive broker diagnostics."
   [^Broker broker]
@@ -445,6 +571,10 @@
     (poll! b request))
   (ack-message! [b request]
     (ack! b request))
+  (publish-usage-observations! [b request]
+    (publish-usage! b request))
+  (read-usage-observations! [b request]
+    (read-usage! b request))
   (message-metadata [b runner-id token message-id]
     (message-status b runner-id token message-id))
   (operator-message-metadata [b message-id]

@@ -39,6 +39,12 @@
     :message-id-conflict 409
     :runner-not-registered 409
     :message-too-large 413
+    :usage-batch-too-large 413
+    :invalid-usage-observation 422
+    :invalid-usage-batch 422
+    :invalid-usage-cursor 422
+    :usage-observation-expired 422
+    :usage-observation-future 422
     400))
 
 (defn handler
@@ -95,6 +101,18 @@
             (json-response 200 {:message message})
             (json-response 404 {:type "unknown-message"
                                 :message "Unknown message"})))
+
+        (and (= :post request-method) (= "/v1/usage-observations" uri))
+        (let [payload (read-json request)]
+          (json-response 200
+                         (broker/publish-usage-observations!
+                           b (merge payload (credentials request payload)))))
+
+        (and (= :post request-method) (= "/v1/usage-observations/read" uri))
+        (let [payload (read-json request)]
+          (json-response 200
+                         (broker/read-usage-observations!
+                           b (merge payload (credentials request payload)))))
 
         :else
         (json-response 404 {:type "not-found" :message "Not found"}))

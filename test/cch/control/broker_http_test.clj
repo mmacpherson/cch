@@ -2,6 +2,7 @@
   (:require [cch.control.broker :as broker]
             [cch.control.broker-http :as broker-http]
             [cch.control.remote :as remote]
+            [cch.usage-observation :as usage]
             [babashka.fs :as fs]
             [clojure.test :refer [deftest is testing]])
   (:import [java.net ServerSocket]
@@ -73,11 +74,25 @@
              (:body (first (remote/poll! runner-b)))))
       (remote/ack! runner-b "http-message-1" "delivered")
       (is (= "delivered" (:status (remote/message-status a "http-message-1"))))
+      (let [observation
+            (first
+              (usage/from-snapshot
+                {:agent "codex"
+                 :observed-at (System/currentTimeMillis)
+                 :payload {:rate_limits
+                           {:five_hour {:used_percentage 7
+                                        :resets_at 2000000000}}}}))]
+        (is (= {:accepted 1 :duplicates 0 :latest-cursor 1}
+               (remote/publish-usage-observations! a [observation])))
+        (is (= [observation]
+               (->> (remote/read-usage-observations! runner-b 0 10)
+                    :observations
+                    (mapv #(dissoc % :cursor))))))
       (is (= :unauthorized
              (try
                (remote/sessions (assoc a :token "wrong"))
                (catch clojure.lang.ExceptionInfo error
-                 (:type (ex-data error))))))
+               (:type (ex-data error))))))
       (finally
         ((:stop server) :timeout 100)))))
 

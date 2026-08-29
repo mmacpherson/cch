@@ -11,6 +11,8 @@
   (enqueue-operator-message! [broker request])
   (poll-messages! [broker request])
   (ack-message! [broker request])
+  (publish-usage-observations! [broker request])
+  (read-usage-observations! [broker request])
   (message-metadata [broker runner-id token message-id])
   (operator-message-metadata [broker message-id])
   (broker-summary [broker])

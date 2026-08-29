@@ -1,5 +1,6 @@
 (ns cch.control.broker-test
   (:require [cch.control.broker :as broker]
+            [cch.usage-observation :as usage]
             [clojure.test :refer [deftest is]]))
 
 (def runner-tokens
@@ -26,6 +27,16 @@
                        :sessions runner-a-sessions})
   (broker/register! b {:runner-id "runner-b" :token "synthetic-token-b"
                        :sessions runner-b-sessions}))
+
+(defn- observation
+  [agent observed-at window used-percentage resets-at]
+  (first
+    (usage/from-snapshot
+      {:agent agent
+       :observed-at observed-at
+       :payload {:rate_limits
+                 {(keyword window) {:used_percentage used-percentage
+                                    :resets_at resets-at}}}})))
 
 (deftest registration-publishes-only-sanitized-available-routes
   (let [b (broker/new-broker runner-tokens)]
@@ -269,3 +280,79 @@
                   :message-id "operator-unknown"})
              (catch clojure.lang.ExceptionInfo error
                (:type (ex-data error))))))))
+
+(deftest usage-observations-are-idempotent-and-cursor-readable
+  (let [clock (atom 2000000000000)
+        b (broker/new-broker runner-tokens {:now-fn #(deref clock)})
+        first-observation (observation "codex" @clock "five_hour" 12.5
+                                       (quot (+ @clock 3600000) 1000))
+        second-observation (observation "agy" (inc @clock) "seven_day" 34
+                                        (quot (+ @clock 86400000) 1000))]
+    (is (= {:accepted 2 :duplicates 0 :latest-cursor 2}
+           (broker/publish-usage!
+             b {:runner-id "runner-a" :token "synthetic-token-a"
+                :observations [first-observation second-observation]})))
+    (is (= {:accepted 0 :duplicates 1 :latest-cursor 2}
+           (broker/publish-usage!
+             b {:runner-id "runner-b" :token "synthetic-token-b"
+                :observations [first-observation]})))
+    (let [page-one (broker/read-usage!
+                     b {:runner-id "runner-b" :token "synthetic-token-b"
+                        :after-cursor 0 :limit 1})
+          page-two (broker/read-usage!
+                     b {:runner-id "runner-a" :token "synthetic-token-a"
+                        :after-cursor (:next-cursor page-one) :limit 10})]
+      (is (= 1 (:next-cursor page-one)))
+      (is (= [first-observation]
+             (mapv #(dissoc % :cursor) (:observations page-one))))
+      (is (= 2 (:next-cursor page-two)))
+      (is (= [second-observation]
+             (mapv #(dissoc % :cursor) (:observations page-two))))
+      (is (every? #(nil? (:runner-id %))
+                  (concat (:observations page-one) (:observations page-two)))))))
+
+(deftest usage-observation-boundary-rejects-forgery-and-bounds-retention
+  (let [clock (atom 2000000000000)
+        b (broker/new-broker
+            runner-tokens
+            {:now-fn #(deref clock)
+             :usage-retention-ms 1000
+             :usage-future-skew-ms 100
+             :max-usage-observations 2})
+        valid #(observation "codex" % "five_hour" 10
+                            (quot (+ @clock 3600000) 1000))
+        publish #(broker/publish-usage!
+                   b {:runner-id "runner-a" :token "synthetic-token-a"
+                      :observations %})
+        error-type (fn [f]
+                     (try (f) nil
+                          (catch clojure.lang.ExceptionInfo error
+                            (:type (ex-data error)))))]
+    (is (= :unauthorized
+           (error-type #(broker/publish-usage!
+                          b {:runner-id "runner-a" :token "wrong"
+                             :observations []}))))
+    (is (= :invalid-usage-observation
+           (error-type #(publish [(assoc (valid @clock)
+                                         :session-id "must-not-cross")]))))
+    (is (= :invalid-usage-observation
+           (error-type #(publish [(update (valid @clock)
+                                          :used-percentage inc)]))))
+    (is (= :usage-batch-too-large
+           (error-type #(publish (vec (repeat 257 (valid @clock)))))))
+    (is (= :usage-observation-expired
+           (error-type #(publish [(valid (- @clock 1001))]))))
+    (is (= :usage-observation-future
+           (error-type #(publish [(valid (+ @clock 101))]))))
+    (publish [(valid (- @clock 2)) (valid (- @clock 1)) (valid @clock)])
+    (let [retained (:observations
+                     (broker/read-usage!
+                       b {:runner-id "runner-a" :token "synthetic-token-a"
+                          :after-cursor 0 :limit 10}))]
+      (is (= 2 (count retained)))
+      (is (= [(- @clock 1) @clock] (mapv :observed-at retained))))
+    (swap! clock + 1001)
+    (is (empty? (:observations
+                  (broker/read-usage!
+                    b {:runner-id "runner-a" :token "synthetic-token-a"
+                       :after-cursor 0 :limit 10}))))))

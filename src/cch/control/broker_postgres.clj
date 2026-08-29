@@ -100,6 +100,27 @@
         " CHECK (native_name IS NULL OR char_length(native_name) BETWEEN 1 AND "
         naming/max-native-name-length ")")])
 
+(defn migration-5-statements
+  "Create the narrow forecast-observation stream. Authentication authorizes a
+  write but runner identity is intentionally absent from durable rows."
+  [schema]
+  (let [observations (table (schema-name schema) "usage_observations")]
+    [(str "CREATE TABLE IF NOT EXISTS " observations " ("
+          "cursor bigserial PRIMARY KEY,"
+          "event_id char(64) NOT NULL UNIQUE,"
+          "schema_version smallint NOT NULL CHECK (schema_version=1),"
+          "observed_at bigint NOT NULL,"
+          "agent varchar(64) NOT NULL,"
+          "window_key text NOT NULL CHECK (window_key IN ('five_hour','seven_day')),"
+          "used_percentage double precision NOT NULL CHECK "
+          "(used_percentage >= 0 AND used_percentage <= 100),"
+          "resets_at bigint NOT NULL,"
+          "received_at timestamptz NOT NULL DEFAULT now())")
+     (str "CREATE INDEX IF NOT EXISTS usage_observations_forecast_idx ON "
+          observations " (agent,window_key,resets_at,observed_at)")
+     (str "CREATE INDEX IF NOT EXISTS usage_observations_observed_idx ON "
+          observations " (observed_at)")]))
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -148,7 +169,11 @@
         (when-not (contains? applied 4)
           (doseq [statement (migration-4-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (4)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (4)")]))
+        (when-not (contains? applied 5)
+          (doseq [statement (migration-5-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (5)")]))))
     true))
 
 (defn datasource
@@ -624,6 +649,98 @@
     (discard-bodies! broker discard)
     value))
 
+(defn- prune-usage!
+  [^PostgresBroker broker tx timestamp-value]
+  (let [observations (table (:schema broker) "usage_observations")
+        oldest (- timestamp-value (get-in broker [:options :usage-retention-ms]))
+        max-count (get-in broker [:options :max-usage-observations])]
+    (jdbc/execute! tx [(str "DELETE FROM " observations " WHERE observed_at < ?")
+                       oldest])
+    (jdbc/execute!
+      tx [(str "DELETE FROM " observations " WHERE cursor IN ("
+               "SELECT cursor FROM " observations
+               " ORDER BY cursor DESC OFFSET ?)")
+          max-count])))
+
+(defn- row->usage-observation
+  [{:keys [cursor event_id schema_version observed_at agent window_key
+           used_percentage resets_at]}]
+  {:cursor cursor
+   :event-id (str/trim event_id)
+   :schema-version schema_version
+   :observed-at observed_at
+   :agent agent
+   :window window_key
+   :used-percentage used_percentage
+   :resets-at resets_at})
+
+(defn- publish-usage!
+  [^PostgresBroker broker {:keys [runner-id token observations]}]
+  (authorize! broker runner-id token)
+  (let [timestamp-value (now broker)
+        observations (memory/validate-usage-batch!
+                       observations timestamp-value
+                       (get-in broker [:options :usage-retention-ms])
+                       (get-in broker [:options :usage-future-skew-ms]))
+        table-name (table (:schema broker) "usage_observations")]
+    (transact
+      (:datasource broker)
+      (fn [tx]
+        (prune-usage! broker tx timestamp-value)
+        (let [accepted
+              (reduce
+                (fn [count observation]
+                  (+ count
+                     (count
+                       (rows
+                         tx
+                         [(str "INSERT INTO " table-name
+                               " (event_id,schema_version,observed_at,agent,window_key,"
+                               "used_percentage,resets_at) VALUES (?,?,?,?,?,?,?)"
+                               " ON CONFLICT (event_id) DO NOTHING RETURNING cursor")
+                          (:event-id observation)
+                          (:schema-version observation)
+                          (:observed-at observation)
+                          (:agent observation)
+                          (:window observation)
+                          (:used-percentage observation)
+                          (:resets-at observation)]))))
+                0
+                observations)]
+          (prune-usage! broker tx timestamp-value)
+          {:accepted accepted
+           :duplicates (- (count observations) accepted)
+           :latest-cursor (or (:cursor
+                                (row tx [(str "SELECT max(cursor) AS cursor FROM "
+                                              table-name)]))
+                              0)})))))
+
+(defn- read-usage!
+  [^PostgresBroker broker {:keys [runner-id token after-cursor limit]}]
+  (authorize! broker runner-id token)
+  (let [after-cursor (or after-cursor 0)
+        limit (or limit 500)]
+    (when-not (and (integer? after-cursor) (<= 0 after-cursor))
+      (throw (ex-info "after_cursor must be a non-negative integer"
+                      {:type :invalid-usage-cursor})))
+    (when-not (and (integer? limit)
+                   (<= 1 limit memory/max-usage-read-limit))
+      (throw (ex-info "limit is invalid" {:type :invalid-usage-cursor})))
+    (let [observations-table (table (:schema broker) "usage_observations")
+          observations
+          (transact
+            (:datasource broker)
+            (fn [tx]
+              (prune-usage! broker tx (now broker))
+              (mapv row->usage-observation
+                    (rows tx [(str "SELECT cursor,event_id,schema_version,"
+                                   "observed_at,agent,window_key,used_percentage,resets_at "
+                                   "FROM " observations-table
+                                   " WHERE cursor>? ORDER BY cursor LIMIT ?")
+                              after-cursor limit]))))]
+      {:observations observations
+       :next-cursor (or (:cursor (peek observations)) after-cursor)})))
+
 (defn- summary [^PostgresBroker broker]
   (let [timestamp-value (now broker)
         runners (table (:schema broker) "runners")
@@ -648,13 +765,17 @@
    (new-broker runner-tokens database {}))
   ([runner-tokens database
     {:keys [now-fn lease-ms message-ttl-ms ack-timeout-ms max-attempts
-            metadata-retention-ms schema]
+            metadata-retention-ms usage-retention-ms usage-future-skew-ms
+            max-usage-observations schema]
      :or {now-fn #(System/currentTimeMillis)
           lease-ms memory/default-lease-ms
           message-ttl-ms memory/default-message-ttl-ms
           ack-timeout-ms memory/default-ack-timeout-ms
           max-attempts memory/default-max-attempts
-          metadata-retention-ms default-metadata-retention-ms}}]
+          metadata-retention-ms default-metadata-retention-ms
+          usage-retention-ms memory/default-usage-retention-ms
+          usage-future-skew-ms memory/default-usage-future-skew-ms
+          max-usage-observations memory/default-max-usage-observations}}]
    (let [schema (schema-name (or schema (:schema database)))
          datasource (datasource database)]
      (try
@@ -671,7 +792,10 @@
                           :message-ttl-ms message-ttl-ms
                           :ack-timeout-ms ack-timeout-ms
                           :max-attempts max-attempts
-                          :metadata-retention-ms metadata-retention-ms})
+                          :metadata-retention-ms metadata-retention-ms
+                          :usage-retention-ms usage-retention-ms
+                          :usage-future-skew-ms usage-future-skew-ms
+                          :max-usage-observations max-usage-observations})
        (catch Exception error
          (.close ^HikariDataSource datasource)
          (throw error))))))
@@ -714,6 +838,10 @@
     (poll! broker request))
   (ack-message! [broker request]
     (ack! broker request))
+  (publish-usage-observations! [broker request]
+    (publish-usage! broker request))
+  (read-usage-observations! [broker request]
+    (read-usage! broker request))
   (message-metadata [broker runner-id token message-id]
     (message-status broker runner-id token message-id))
   (operator-message-metadata [broker message-id]

@@ -17,6 +17,10 @@
 (def ^:private windows
   ["five_hour" "seven_day"])
 
+(def ^:private observation-keys
+  #{:schema-version :event-id :observed-at :agent :window
+    :used-percentage :resets-at})
+
 (defn- finite-number?
   [value]
   (and (number? value)
@@ -81,6 +85,29 @@
          window "\n"
          (canonical-decimal used-percentage) "\n"
          resets-at)))
+
+(defn validate-observation!
+  "Validate and canonicalize one normalized observation received at a trust
+  boundary. Extra fields are rejected so raw provider or machine-local data
+  cannot hitch a ride. The supplied event id must match the semantic content."
+  [value]
+  (when-not (and (map? value) (= observation-keys (set (keys value))))
+    (throw (ex-info "Usage observation has an invalid shape"
+                    {:type :invalid-usage-observation})))
+  (let [candidate {:schema-version (when (= schema-version (:schema-version value))
+                                     schema-version)
+                   :observed-at (epoch-millis (:observed-at value))
+                   :agent (agent-name (:agent value))
+                   :window (when (some #{(:window value)} windows)
+                             (:window value))
+                   :used-percentage (percentage (:used-percentage value))
+                   :resets-at (epoch-seconds (:resets-at value))}
+        expected-id (when (every? some? (vals candidate))
+                      (event-id candidate))]
+    (when-not (and expected-id (= expected-id (:event-id value)))
+      (throw (ex-info "Usage observation is invalid"
+                      {:type :invalid-usage-observation})))
+    (assoc candidate :event-id expected-id)))
 
 (defn- payload-map
   [payload]
