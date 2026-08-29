@@ -9,6 +9,7 @@
   (:require [cch.control.broker-api :as api]
             [cch.control.naming :as naming]
             [cch.control.store :as store]
+            [cch.control.usage-read-model :as usage-read-model]
             [cch.usage-observation :as usage]
             [clojure.string :as str])
   (:import [java.net URI]
@@ -544,6 +545,19 @@
         (reset! (:state broker) state)
         {:observations observations :next-cursor next-cursor}))))
 
+(defn usage-inputs
+  "Internal operator read model; not exposed on the runner HTTP listener."
+  [^Broker broker]
+  (locking broker
+    (let [timestamp (now broker)
+          state (prune-usage-state
+                  @(:state broker)
+                  (- timestamp (get-in broker [:options :usage-retention-ms]))
+                  (get-in broker [:options :max-usage-observations]))]
+      (reset! (:state broker) state)
+      (usage-read-model/from-observations
+        (vals (:usage-observations state)) timestamp))))
+
 (defn summary
   "Non-sensitive broker diagnostics."
   [^Broker broker]
@@ -578,6 +592,8 @@
     (publish-usage! b request))
   (read-usage-observations! [b request]
     (read-usage! b request))
+  (usage-forecast-inputs [b]
+    (usage-inputs b))
   (message-metadata [b runner-id token message-id]
     (message-status b runner-id token message-id))
   (operator-message-metadata [b message-id]

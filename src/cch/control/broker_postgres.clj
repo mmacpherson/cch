@@ -9,6 +9,7 @@
             [cch.control.broker-api :as api]
             [cch.control.naming :as naming]
             [cch.control.store :as store]
+            [cch.control.usage-read-model :as usage-read-model]
             [clojure.string :as str]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs])
@@ -121,6 +122,15 @@
      (str "CREATE INDEX IF NOT EXISTS usage_observations_observed_idx ON "
           observations " (observed_at)")]))
 
+(defn migration-6-statements
+  "Index the bounded hosted forecast's latest-observation lookup."
+  [schema]
+  (let [observations (table (schema-name schema) "usage_observations")]
+    [(str "CREATE INDEX IF NOT EXISTS usage_observations_latest_idx ON "
+          observations
+          " (agent,window_key,observed_at DESC,cursor DESC)"
+          " WHERE used_percentage>0")]))
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -173,7 +183,11 @@
         (when-not (contains? applied 5)
           (doseq [statement (migration-5-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (5)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (5)")]))
+        (when-not (contains? applied 6)
+          (doseq [statement (migration-6-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (6)")]))))
     true))
 
 (defn datasource
@@ -741,6 +755,82 @@
       {:observations observations
        :next-cursor (or (:cursor (peek observations)) after-cursor)})))
 
+(defn- postgres-window-input
+  [tx observations-table agent window-key resets-at now-ms]
+  (let [{:keys [span-seconds bucket-seconds]}
+        (get usage-read-model/window-settings window-key)
+        window-start-ms (* 1000 (- resets-at span-seconds))
+        samples
+        (rows
+          tx
+          [(str "WITH source AS ("
+                " SELECT cursor,observed_at,used_percentage"
+                " FROM " observations-table
+                " WHERE agent=? AND window_key=? AND resets_at=?"
+                " AND observed_at>=?"
+                "), fresh AS ("
+                " SELECT *,max(used_percentage) OVER ("
+                "  ORDER BY observed_at,cursor"
+                "  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING"
+                " ) AS prev_max FROM source"
+                "), monotone AS ("
+                " SELECT * FROM fresh"
+                " WHERE used_percentage>=coalesce(prev_max,0)"
+                "), bucketed AS ("
+                " SELECT *,row_number() OVER ("
+                "  PARTITION BY (observed_at/1000)/?"
+                "  ORDER BY observed_at,cursor"
+                " ) AS bucket_row FROM monotone"
+                ") SELECT observed_at,used_percentage,"
+                " (SELECT count(*) FROM source) AS sample_count"
+                " FROM bucketed WHERE bucket_row=1 ORDER BY observed_at")
+           agent window-key resets-at window-start-ms bucket-seconds])
+        finals
+        (rows
+          tx
+          [(str "SELECT final_pct FROM ("
+                " SELECT resets_at,max(used_percentage) AS final_pct"
+                " FROM " observations-table
+                " WHERE agent=? AND window_key=? AND resets_at<?"
+                " GROUP BY resets_at ORDER BY resets_at DESC LIMIT 12"
+                ") completed WHERE final_pct>=10 ORDER BY resets_at DESC")
+           agent window-key (quot now-ms 1000)])]
+    {:resets-at resets-at
+     :sample-count (long (or (:sample_count (first samples)) 0))
+     :samples (mapv (fn [{:keys [observed_at used_percentage]}]
+                      {:observed-at observed_at
+                       :used-percentage (double used_percentage)})
+                    samples)
+     :historical-finals (mapv #(double (:final_pct %)) finals)}))
+
+(defn- usage-inputs
+  "Internal bounded read model for the authenticated human listener."
+  [^PostgresBroker broker]
+  (let [timestamp-value (now broker)
+        observations-table (table (:schema broker) "usage_observations")]
+    (transact
+      (:datasource broker)
+      (fn [tx]
+        (prune-usage! broker tx timestamp-value)
+        (let [latest
+              (rows
+                tx
+                [(str "SELECT DISTINCT ON (agent,window_key)"
+                      " agent,window_key,resets_at"
+                      " FROM " observations-table
+                      " WHERE used_percentage>0"
+                      " ORDER BY agent,window_key,observed_at DESC,cursor DESC")])]
+          {:generated-at timestamp-value
+           :agents
+           (reduce
+             (fn [agents {:keys [agent window_key resets_at]}]
+               (assoc-in agents [agent window_key]
+                         (postgres-window-input
+                           tx observations-table agent window_key
+                           resets_at timestamp-value)))
+             (sorted-map)
+             latest)})))))
+
 (defn- summary [^PostgresBroker broker]
   (let [timestamp-value (now broker)
         runners (table (:schema broker) "runners")
@@ -842,6 +932,8 @@
     (publish-usage! broker request))
   (read-usage-observations! [broker request]
     (read-usage! broker request))
+  (usage-forecast-inputs [broker]
+    (usage-inputs broker))
   (message-metadata [broker runner-id token message-id]
     (message-status broker runner-id token message-id))
   (operator-message-metadata [broker message-id]

@@ -17,13 +17,15 @@
                               (postgres/migration-statements "cch_control")
                               (postgres/migration-3-statements "cch_control")
                               (postgres/migration-4-statements "cch_control")
-                              (postgres/migration-5-statements "cch_control")))]
+                              (postgres/migration-5-statements "cch_control")
+                              (postgres/migration-6-statements "cch_control")))]
     (is (str/includes? ddl "content_sha256"))
     (is (str/includes? ddl "lease_expires_at"))
     (is (str/includes? ddl "awaiting-replay"))
     (is (str/includes? ddl "session_aliases"))
     (is (str/includes? ddl "native_name"))
     (is (str/includes? ddl "usage_observations"))
+    (is (str/includes? ddl "usage_observations_latest_idx"))
     (is (str/includes? ddl "used_percentage"))
     (is (not (re-find #"(?i)\b(session_id|runner_id|account|hostname|path|payload)\b"
                       (str/join "\n" (postgres/migration-5-statements
@@ -91,6 +93,48 @@
                (publish-var
                  b {:runner-id "runner-a" :token "synthetic-token-a"
                     :observations [observation]})))))))
+
+(deftest postgres-usage-read-model-is-bounded-without-a-live-database
+  (let [now 2000000000000
+        reset (quot (+ now 3600000) 1000)
+        b (postgres/->PostgresBroker
+            nil runner-tokens (atom {}) (constantly now) "cch_control"
+            {:usage-retention-ms memory/default-usage-retention-ms
+             :usage-future-skew-ms memory/default-usage-future-skew-ms
+             :max-usage-observations memory/default-max-usage-observations})
+        transact-var (ns-resolve 'cch.control.broker-postgres 'transact)
+        prune-var (ns-resolve 'cch.control.broker-postgres 'prune-usage!)
+        rows-var (ns-resolve 'cch.control.broker-postgres 'rows)
+        inputs-var (ns-resolve 'cch.control.broker-postgres 'usage-inputs)
+        statements (atom [])]
+    (with-redefs-fn
+      {transact-var (fn [_ run] (run :synthetic-transaction))
+       prune-var (fn [& _] nil)
+       rows-var
+       (fn [_ [sql & _]]
+         (swap! statements conj sql)
+         (cond
+           (str/includes? sql "DISTINCT ON")
+           [{:agent "claude-code" :window_key "five_hour"
+             :resets_at reset}]
+
+           (str/includes? sql "WITH source")
+           [{:observed_at (- now 60000) :used_percentage 12.0
+             :sample_count 2}
+            {:observed_at now :used_percentage 14.0 :sample_count 2}]
+
+           (str/includes? sql "SELECT final_pct")
+           [{:final_pct 81.0} {:final_pct 76.0}]
+
+           :else []))}
+      (fn []
+        (let [model (inputs-var b)
+              input (get-in model [:agents "claude-code" "five_hour"])]
+          (is (= 2 (:sample-count input)))
+          (is (= [12.0 14.0] (mapv :used-percentage (:samples input))))
+          (is (= [81.0 76.0] (:historical-finals input)))
+          (is (some #(str/includes? % "row_number() OVER") @statements)
+              "samples are time-bucketed in Postgres, not loaded wholesale"))))))
 
 (deftest postgres-directory-reconnect-replay-and-migrations
   (if (str/blank? (integration-url))
@@ -270,7 +314,7 @@
                                    "\".schema_migrations")]
                              {:builder-fn rs/as-unqualified-lower-maps})]
               (is (every? true? results))
-              (is (= 5 (:count versions)))
+              (is (= 6 (:count versions)))
               (is (not-any? #{"body" "token" "credential" "transcript"}
                             (map :column_name columns))))))
         (finally

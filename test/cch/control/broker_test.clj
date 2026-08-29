@@ -1,6 +1,8 @@
 (ns cch.control.broker-test
   (:require [cch.control.broker :as broker]
+            [cch.control.broker-api :as api]
             [cch.usage-observation :as usage]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]))
 
 (def runner-tokens
@@ -310,6 +312,25 @@
              (mapv #(dissoc % :cursor) (:observations page-two))))
       (is (every? #(nil? (:runner-id %))
                   (concat (:observations page-one) (:observations page-two)))))))
+
+(deftest hosted-usage-read-model-is-internal-bounded-and-sanitized
+  (let [clock (atom 2000000000000)
+        b (broker/new-broker runner-tokens {:now-fn #(deref clock)})
+        reset (quot (+ @clock 3600000) 1000)
+        observations [(observation "codex" (- @clock 60000)
+                                           "five_hour" 12 reset)
+                      (observation "codex" @clock
+                                           "five_hour" 14 reset)]]
+    (broker/publish-usage!
+      b {:runner-id "runner-a" :token "synthetic-token-a"
+         :observations observations})
+    (let [model (api/usage-forecast-inputs b)
+          input (get-in model [:agents "codex" "five_hour"])]
+      (is (= reset (:resets-at input)))
+      (is (= 2 (:sample-count input)))
+      (is (= [12.0 14.0] (mapv :used-percentage (:samples input))))
+      (is (not (str/includes? (pr-str model) "runner-a")))
+      (is (not (str/includes? (pr-str model) "synthetic-token-a"))))))
 
 (deftest usage-observation-boundary-rejects-forgery-and-bounds-retention
   (let [clock (atom 2000000000000)

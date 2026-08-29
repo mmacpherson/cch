@@ -258,6 +258,15 @@
   {:seven-day {:prior-mu 0.42 :prior-sigma 0.13}
    :five-hour {:prior-mu 3.75 :prior-sigma 1.3}})
 
+(defn prior-params
+  "Pure prior selection for a canonical window and completed-window finals.
+  Used by local SQLite forecasts and the hosted normalized read model."
+  [window-key final-pcts]
+  (let [rows (mapv (fn [pct] {:final_pct pct}) final-pcts)]
+    (if-let [learned (weighted-prior-params rows (window-hours window-key))]
+      {:prior-mu (:mu learned) :prior-sigma (:sigma learned)}
+      (window-config window-key))))
+
 (defn- window-priors
   "Best-available prior for [agent window-key], as :prior-mu/:prior-sigma.
   Prefers the empirical-Bayes prior learned from this agent's own completed
@@ -265,11 +274,9 @@
   exist to learn from. Both /usage and statusline projections MUST go through
   this so they agree."
   [agent window-key]
-  (let [seed    (window-config window-key)
-        learned (learned-prior agent window-key)]
-    (if learned
-      {:prior-mu (:mu learned) :prior-sigma (:sigma learned)}
-      seed)))
+  (if-let [learned (learned-prior agent window-key)]
+    {:prior-mu (:mu learned) :prior-sigma (:sigma learned)}
+    (prior-params window-key [])))
 
 (defn- build-current-window
   "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
