@@ -119,10 +119,10 @@
 label{display:block;margin:0 0 .35em;color:var(--fg-muted);font-size:var(--font-sm)}select,textarea,.alias-form input[name=alias]{width:100%;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);padding:.6em;font:inherit}.alias-form{margin-top:.8em}.alias-form input[name=alias]{min-width:0;flex:1}textarea{min-height:110px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 2fr;gap:1em}
 .session-details{border-top:1px solid var(--border);margin-top:.8em;padding-top:.6em}.session-details summary{color:var(--fg-muted);cursor:pointer;font-size:var(--font-sm)}.session-meta{display:grid;gap:.45em;margin-top:.7em}.session-meta small{display:block;color:var(--fg-muted)}
 button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid var(--accent);border-radius:4px;background:var(--accent);color:var(--bg);font:inherit;cursor:pointer}button.secondary{background:var(--surface);border-color:var(--border);color:var(--fg)}.actions{display:flex;gap:.6em;align-items:center;margin-top:.8em}.notice{border-left:3px solid var(--accent);padding:.7em .9em;background:var(--surface);margin-bottom:1em}.error{border-color:var(--c-deny)}.status-delivered{border-color:var(--c-allow)}.status-failed,.status-expired{border-color:var(--c-deny)}.inline{display:inline}.provider{margin-top:.6em}.empty{text-align:center;padding:2em;color:var(--fg-muted)}
-.fleet-hero{display:grid;grid-template-columns:minmax(250px,1.2fr) minmax(360px,1fr);gap:2em;align-items:center;padding:1.25em 1.4em;border-color:oklch(72% .18 235/.35);background:linear-gradient(120deg,var(--accent-soft),var(--surface) 52%);position:relative;overflow:hidden}.fleet-hero:after{content:'';position:absolute;right:-5em;top:-8em;width:18em;height:18em;border:1px solid oklch(72% .18 235/.13);border-radius:50%;pointer-events:none}.fleet-kicker,.overview-eyebrow{font:500 var(--font-xs)/1.3 var(--family-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}.fleet-kicker{display:flex;align-items:center;gap:.55em;margin-bottom:.35em}.fleet-title{font-size:1.45em;margin:0 0 .25em}.fleet-copy{color:var(--fg-muted);font-size:var(--font-sm);margin:0}.fleet-metrics{display:grid;grid-template-columns:repeat(3,1fr);position:relative;z-index:1}.fleet-metric{padding:.2em 1em;border-left:1px solid var(--border)}.fleet-metric strong{display:block;font:600 1.7em/1.2 var(--family-mono)}.fleet-metric small{color:var(--fg-muted)}
-.overview-grid{grid-template-columns:repeat(3,1fr);gap:.8em;margin-top:0}.overview-card{display:flex;flex-direction:column;min-height:150px;padding:1.05em 1.1em;border-top-width:2px}.overview-card-agents{border-top-color:var(--accent)}.overview-card-events{border-top-color:var(--c-allow)}.overview-card-usage{border-top-color:var(--c-ask)}.overview-card h2{font-size:1.15em;margin:.35em 0}.overview-card p{color:var(--fg-muted);margin-bottom:1em}.overview-link{font-weight:600;margin-top:auto}.overview-link:after{content:' →'}.recent-panel{padding:1.1em 1.2em}.recent-heading{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:.7em}.recent-heading h2{margin:0}.live-label{display:inline-flex;align-items:center;gap:.45em;color:var(--fg-muted);font:var(--font-xs)/1 var(--family-mono);margin-left:.7em}.live-label .dot{background:var(--c-allow)}
+.fleet-hero{display:grid;grid-template-columns:minmax(250px,1.2fr) minmax(360px,1fr);gap:2em;align-items:center;padding:1.25em 1.4em;border-color:oklch(72% .18 235/.35);background:linear-gradient(120deg,var(--accent-soft),var(--surface) 52%);position:relative;overflow:hidden}.fleet-hero:after{content:'';position:absolute;right:-5em;top:-8em;width:18em;height:18em;border:1px solid oklch(72% .18 235/.13);border-radius:50%;pointer-events:none}.fleet-kicker{font:500 var(--font-xs)/1.3 var(--family-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--accent);display:flex;align-items:center;gap:.55em;margin-bottom:.35em}.panel h2.fleet-title{font-size:1.45em;margin:0 0 .25em}.fleet-copy{color:var(--fg-muted);font-size:var(--font-sm);margin:0}.fleet-metrics{display:grid;grid-template-columns:repeat(3,1fr);position:relative;z-index:1}.fleet-metric{padding:.2em 1em;border-left:1px solid var(--border)}.fleet-metric strong{display:block;font:600 1.7em/1.2 var(--family-mono)}.fleet-metric small{color:var(--fg-muted)}
+.session-context{display:flex;align-items:center;gap:.45em;margin-top:.15em;color:var(--fg-muted);font-size:var(--font-sm)}.session-context .runner-chip{color:var(--fg)}.context-separator{color:var(--border)}.recent-panel{padding:1.1em 1.2em}.recent-heading{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:.7em}.recent-heading h2{margin:0}.live-label{display:inline-flex;align-items:center;gap:.45em;color:var(--fg-muted);font:var(--font-xs)/1 var(--family-mono);margin-left:.7em}.live-label .dot{background:var(--c-allow)}
 .activity-table .event-time{width:13%;font-family:var(--family-mono);color:var(--fg-muted)}.activity-table .event-runner{width:12%;font-family:var(--family-mono)}.activity-table .event-agent{width:11%}.activity-table .event-action{width:21%;font-weight:500}.activity-table .event-tool{width:13%;color:var(--fg-muted)}.activity-table .event-outcome{width:18%}.activity-table .event-ms{width:6%;text-align:right;font-family:var(--family-mono);color:var(--fg-muted)}.runner-chip{display:inline-block;padding:1px 7px;border:1px solid var(--border);border-radius:999px;background:var(--bg);font-size:var(--font-xs);max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}.event-outcome .dot{margin-right:.45em}.event-filters{margin-bottom:1em}.event-filters select{width:auto;min-width:11em;padding:4px 8px}
-@media(max-width:850px){.fleet-hero{grid-template-columns:1fr;gap:1.2em}.overview-grid{grid-template-columns:1fr}.overview-card{min-height:0}}@media(max-width:700px){.fields{grid-template-columns:1fr}.nav-wrap{align-items:flex-start;flex-wrap:wrap}.nav-status{width:100%;margin-left:0}.nav-tabs{order:3;width:100%;overflow-x:auto;margin-left:0}.fleet-metrics{grid-template-columns:repeat(3,1fr)}.fleet-metric{padding:.2em .65em}.activity-table .event-ms,.activity-table th.event-ms{display:none}}")
+@media(max-width:850px){.fleet-hero{grid-template-columns:1fr;gap:1.2em}}@media(max-width:700px){.fields{grid-template-columns:1fr}.nav-wrap{align-items:flex-start;flex-wrap:wrap}.nav-status{width:100%;margin-left:0}.nav-tabs{order:3;width:100%;overflow-x:auto;margin-left:0}.fleet-metrics{grid-template-columns:repeat(3,1fr)}.fleet-metric{padding:.2em .65em}.activity-table .event-ms,.activity-table th.event-ms{display:none}}")
 
 (def ^:private fleet-tabs
   [[:overview "overview" "/"]
@@ -167,13 +167,23 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
       (str primary " · " (:mnemonic session))
       primary)))
 
+(defn- runner-label [runner-id]
+  (when runner-id
+    (->> (str/split (str/replace-first runner-id #"^runner-" "") #"[-_]+")
+         (map str/capitalize)
+         (str/join " "))))
+
 (defn- session-card [session csrf duplicate-names]
   (let [{:keys [key label]} (attention session)]
     [:article.session
      [:div.session-top
       [:strong (visible-name session duplicate-names)]
       [:span.badge {:class (str "badge-" key)} label]]
-     [:small (str/capitalize (:agent session))]
+     [:div.session-context
+      [:span (str/capitalize (:agent session))]
+      [:span.context-separator "·"]
+      [:span.runner-chip {:title (:runner-id session)}
+       (runner-label (:runner-id session))]]
      (when-let [native-url (:native-url session)]
        [:div.provider
         [:a {:href native-url :target "_blank" :rel "noopener noreferrer"}
@@ -249,6 +259,7 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
                [:option {:value (:id target)}
                 (str (visible-name target duplicate-names) " · "
                      (str/capitalize (:agent target)) " · "
+                     (runner-label (:runner-id target)) " · "
                      (:status target))])]]
            [:div
             [:label {:for "message"} "Message"]
@@ -275,12 +286,6 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
              "approval-needed" "dot-ask"
              ("denied" "failed") "dot-deny"
              "dot-observe")}])
-
-(defn- runner-label [runner-id]
-  (when runner-id
-    (->> (str/split (str/replace-first runner-id #"^runner-" "") #"[-_]+")
-         (map str/capitalize)
-         (str/join " "))))
 
 (defn- activity-table [observations]
   (if (seq observations)
@@ -385,22 +390,6 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
         [:div.fleet-metric [:strong (count sessions)] [:small "active agents"]]
         [:div.fleet-metric [:strong runners] [:small "runners"]]
         [:div.fleet-metric [:strong needs-attention] [:small "need attention"]]]]
-      [:div.overview-grid
-       [:section.panel.overview-card.overview-card-agents
-        [:div.overview-eyebrow "Coordinate"]
-        [:h2 "Agents"]
-        [:p "Identify, open, and send ordinary text to active Claude, Codex, and Agy sessions."]
-        [:a.overview-link {:href "/agents"} "Open agents"]]
-       [:section.panel.overview-card.overview-card-events
-        [:div.overview-eyebrow "Observe"]
-        [:h2 "Events"]
-        [:p "Review recent execution activity across Claude, Codex, and AGY."]
-        [:a.overview-link {:href "/events"} "Open events"]]
-       [:section.panel.overview-card.overview-card-usage
-        [:div.overview-eyebrow "Forecast"]
-        [:h2 "Usage"]
-        [:p "Inspect global rate-limit windows and projections across every supported agent family."]
-        [:a.overview-link {:href "/usage"} "Open usage"]]]
       [:section.panel.recent-panel
        [:div.recent-heading
         [:div [:h2.inline "Recent activity"]
