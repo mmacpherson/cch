@@ -107,6 +107,29 @@
       (finally
         (fs/delete-tree directory)))))
 
+(deftest publisher-skips-rows-too-close-to-the-broker-retention-boundary
+  (let [directory (str (fs/create-temp-dir {:prefix "usage-publish-buffer-test-"}))
+        path (str directory "/events.db")
+        now (System/currentTimeMillis)
+        stale (observation "codex" (- now (* 91 24 60 60 1000))
+                           "five_hour" 8 (quot (+ now 3600000) 1000))
+        fresh (observation "codex" now "five_hour" 9
+                           (quot (+ now 3600000) 1000))
+        published (atom nil)]
+    (try
+      (insert-local! path stale)
+      (insert-local! path fresh)
+      (with-redefs [remote/publish-usage-observations!
+                    (fn [_ observations]
+                      (reset! published observations)
+                      {:accepted (count observations) :duplicates 0})]
+        (is (= 1 (:sent (usage-sync/publish-once! {} path 10))))
+        (is (= [(:event-id fresh)] (mapv :event-id @published)))
+        (is (= [{:direction "publish" :cursor 2}]
+               (sync-cursors path))))
+      (finally
+        (fs/delete-tree directory)))))
+
 (deftest paired-runners-recover-and-exchange-without-echo
   (let [directory (str (fs/create-temp-dir {:prefix "usage-sync-test-"}))
         db-a (str directory "/a.db")

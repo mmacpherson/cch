@@ -13,7 +13,12 @@
 
 (def ^:const default-batch-size 200)
 (def ^:const default-backfill-batch-size 1000)
-(def ^:const default-backfill-retention-ms (* 91 24 60 60 1000))
+;; Keep one day inside the broker's 91-day retention boundary. A historical
+;; replay can take long enough that rows exactly on the broker boundary expire
+;; between local selection and upload; the transport buffer prevents a stale
+;; first row from wedging an otherwise valid batch.
+(def ^:const default-backfill-retention-ms (* 90 24 60 60 1000))
+(def ^:const default-publish-retention-ms default-backfill-retention-ms)
 
 (defonce ^:private ensured-paths (atom #{}))
 
@@ -124,12 +129,14 @@
    (ensure-db! path)
    (let [ds (jdbc/get-datasource (datasource path))
          after (cursor ds "publish")
+         cutoff (- (System/currentTimeMillis) default-publish-retention-ms)
          local-rows
          (rows ds [(str "SELECT id,event_id,schema_version,observed_at,agent,"
                         "window_key,used_percentage,resets_at "
                         "FROM usage_observations "
-                        "WHERE publishable=1 AND id>? ORDER BY id LIMIT ?")
-                   after batch-size])]
+                        "WHERE publishable=1 AND id>? AND observed_at>=? "
+                        "ORDER BY id LIMIT ?")
+                   after cutoff batch-size])]
      (if (empty? local-rows)
        {:sent 0 :accepted 0 :duplicates 0 :cursor after}
        (let [result (remote/publish-usage-observations!
