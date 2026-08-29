@@ -1,15 +1,19 @@
 (ns cch.control.switchboard
-  "Server-rendered, Cloudflare Access-protected switchboard for sanitized broker
-  presence and ordinary-text routing. Provider-native UIs remain the only
-  surfaces for transcripts, terminal control, and approvals."
+  "Cloudflare Access-protected fleet view of the cch application. Provider-
+  native UIs remain authoritative for transcripts, terminal control, and
+  approvals."
   (:require [cch.control.broker-api :as broker]
             [cch.control.naming :as naming]
             [cch.control.usage-forecast :as usage-forecast]
             [cch.control.web-auth :as auth]
+            [cch.usage :as usage]
+            [cch.web :as web]
             [clojure.string :as str]
             [hiccup2.core :as hic])
   (:import [java.net URI URLDecoder URLEncoder]
-           [java.nio.charset StandardCharsets]))
+           [java.nio.charset StandardCharsets]
+           [java.time Instant ZoneId]
+           [java.time.format DateTimeFormatter]))
 
 (def ^:private security-headers
   {"Cache-Control" "no-store"
@@ -98,30 +102,58 @@
 
     {:key "ready" :label "Ready"}))
 
-(defn- page [title identity & content]
+(def ^:private hosted-css
+  "
+.hosted-page .page-header{align-items:center;margin-bottom:1.2em}
+.hosted-page .page-header h1{margin:0}
+.hosted-subtitle{color:var(--fg-muted);font-size:var(--font-sm);margin-top:.2em}
+.hosted-signout{margin:0}.hosted-signout .btn{padding:3px 9px;font-size:var(--font-xs)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1em;margin:0 0 1em}
+.panel h2{font-size:1.05em;margin:0 0 .8em}.panel>.muted{margin-bottom:1em}
+.summary{display:flex;gap:2em;flex-wrap:wrap}.summary strong{font:600 1.6em/1.2 var(--family-mono);display:block}.summary small{color:var(--fg-muted)}
+.sessions,.forecast-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:.8em}
+.session,.forecast-card{border:1px solid var(--border);border-radius:6px;padding:1em;min-width:0}
+.session-top{display:flex;justify-content:space-between;gap:.7em;align-items:center}.route{font:var(--font-xs)/1.4 var(--family-mono);word-break:break-all;color:var(--fg-muted)}
+.badge{border-radius:999px;padding:2px 8px;font-size:var(--font-xs);border:1px solid var(--border)}
+.badge-attention{color:var(--c-ask);border-color:var(--c-ask);background:var(--c-ask-bg)}.badge-working{color:var(--c-allow);border-color:var(--c-allow);background:var(--c-allow-bg)}.badge-ready{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+label{display:block;margin:0 0 .35em;color:var(--fg-muted);font-size:var(--font-sm)}select,textarea,.alias-form input[name=alias]{width:100%;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);padding:.6em;font:inherit}.alias-form{margin-top:.8em}.alias-form input[name=alias]{min-width:0;flex:1}textarea{min-height:110px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 2fr;gap:1em}
+.session-details{border-top:1px solid var(--border);margin-top:.8em;padding-top:.6em}.session-details summary{color:var(--fg-muted);cursor:pointer;font-size:var(--font-sm)}.session-meta{display:grid;gap:.45em;margin-top:.7em}.session-meta small{display:block;color:var(--fg-muted)}
+button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid var(--accent);border-radius:4px;background:var(--accent);color:var(--bg);font:inherit;cursor:pointer}button.secondary{background:var(--surface);border-color:var(--border);color:var(--fg)}.actions{display:flex;gap:.6em;align-items:center;margin-top:.8em}.notice{border-left:3px solid var(--accent);padding:.7em .9em;background:var(--surface);margin-bottom:1em}.error{border-color:var(--c-deny)}.status-delivered{border-color:var(--c-allow)}.status-failed,.status-expired{border-color:var(--c-deny)}.inline{display:inline}.provider{margin-top:.6em}.empty{text-align:center;padding:2em;color:var(--fg-muted)}
+.overview-grid{margin-top:0}.overview-card h2{margin-bottom:.35em}.overview-card p{color:var(--fg-muted);margin-bottom:.7em}
+.activity-table .event-time{width:14%;font-family:var(--family-mono);color:var(--fg-muted)}.activity-table .event-agent{width:13%}.activity-table .event-action{width:24%;font-weight:500}.activity-table .event-tool{width:16%;color:var(--fg-muted)}.activity-table .event-outcome{width:20%}.activity-table .event-ms{width:10%;text-align:right;font-family:var(--family-mono);color:var(--fg-muted)}.event-outcome .dot{margin-right:.45em}.event-filters{margin-bottom:1em}.event-filters select{width:auto;min-width:12em;padding:4px 8px}.recent-heading{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:.7em}.recent-heading h2{margin:0}
+@media(max-width:700px){.fields{grid-template-columns:1fr}.nav-wrap{align-items:flex-start;flex-wrap:wrap}.nav-status{width:100%;margin-left:0}.nav-tabs{order:3;width:100%;overflow-x:auto;margin-left:0}.overview-grid{grid-template-columns:1fr}}")
+
+(def ^:private fleet-tabs
+  [[:overview "overview" "/"]
+   [:agents "agents" "/agents"]
+   [:events "events" "/events"]
+   [:usage "usage" "/usage"]])
+
+(defn- page [title active identity & content]
   (str "<!doctype html>"
        (hic/html
          [:html {:lang "en"}
           [:head
            [:meta {:charset "utf-8"}]
            [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
-           [:title (str title " · cch control")]
-           [:style
-            "
-:root{color-scheme:light dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--amber:#d29922;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:min(1100px,calc(100% - 28px));margin:0 auto;padding:28px 0 60px}header{display:flex;gap:18px;align-items:center;justify-content:space-between;margin-bottom:24px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 14px}.muted,small{color:var(--muted)}a{color:var(--blue)}.header-actions,.appnav,.local-links{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.appnav a{padding:7px 10px;border-radius:7px;text-decoration:none;border:1px solid var(--line)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:0 0 18px}.summary{display:flex;gap:20px;flex-wrap:wrap}.summary strong{font-size:22px;display:block}.sessions,.forecast-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px}.session,.forecast-card{border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}.forecast-value{font-size:28px;font-weight:700}.forecast-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.session-top{display:flex;justify-content:space-between;gap:10px;align-items:center}.route{font:12px/1.4 ui-monospace,SFMono-Regular,monospace;word-break:break-all;color:var(--muted)}.badge{border-radius:999px;padding:3px 9px;font-size:12px;border:1px solid var(--line)}.badge-attention{color:#fff;background:#7a4b00;border-color:var(--amber)}.badge-working{color:#fff;background:#174f2a;border-color:var(--green)}.badge-ready{color:#fff;background:#17365d;border-color:var(--blue)}label{display:block;margin:0 0 6px;color:var(--muted)}select,textarea,.alias-form input[name=alias]{width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);padding:10px;font:inherit}.alias-form{margin-top:12px}.alias-form .actions{margin-top:0}.alias-form input[name=alias]{min-width:0;flex:1}textarea{min-height:120px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 2fr;gap:14px}.session-details{border-top:1px solid var(--line);margin-top:12px;padding-top:9px}.session-details summary{color:var(--muted);cursor:pointer;font-size:13px}.session-meta{display:grid;gap:7px;margin-top:10px}.session-meta small{display:block}.session-meta div:not(.route){min-width:0}@media(max-width:700px){.fields{grid-template-columns:1fr}.header-actions{justify-content:flex-end}header{align-items:flex-start}.forecast-meta{grid-template-columns:1fr}}button,.button{display:inline-block;border:1px solid #388bfd;border-radius:8px;background:#238636;color:white;padding:9px 14px;font:inherit;text-decoration:none;cursor:pointer}button.secondary{background:transparent;border-color:var(--line)}.actions{display:flex;gap:10px;align-items:center;margin-top:12px}.notice{border-left:3px solid var(--blue);padding:10px 12px;background:var(--panel);margin-bottom:18px}.error{border-color:var(--red);color:#ffb3ad}.status-delivered{border-color:var(--green)}.status-failed,.status-expired{border-color:var(--red)}code{font-family:ui-monospace,SFMono-Regular,monospace}.inline{display:inline}.provider{margin-top:10px}.empty{text-align:center;padding:28px;color:var(--muted)}"]]
+           [:title (str "cch · " title)]
+           [:style (hic/raw (web/base-css))]
+           [:style (hic/raw hosted-css)]]
           [:body
-           [:main
-            [:header
-             [:div [:h1 "Multi-agent control"]
-              [:small "Local execution · brokered presence and text routing"]]
-             (when identity
-               [:div.header-actions
-                [:nav.appnav
-                 [:a {:href "/"} "Agents"]
-                 [:a {:href "/usage"} "Usage"]]
-                [:form.inline {:method "post" :action "/logout"}
-                 [:input {:type "hidden" :name "csrf" :value (:csrf identity)}]
-                 [:button.secondary {:type "submit"} "Sign out"]]])]
+           [:div.page-wrap.hosted-page
+            (web/nav-bar
+              {:active active
+               :tabs fleet-tabs
+               :status "control plane · online"
+               :actions
+               (when identity
+                 [:form.hosted-signout {:method "post" :action "/logout"}
+                  [:input {:type "hidden" :name "csrf" :value (:csrf identity)}]
+                  [:button.btn {:type "submit"} "sign out"]])})
+            [:div.page-header
+             [:div
+              [:h1 title]
+              [:p.hosted-subtitle "Local execution · global coordination"]]]
             content]]])))
 
 (defn- primary-name [session]
@@ -166,8 +198,6 @@
         [:button.secondary {:type "submit"} "Save"]]
        [:small "Visible to paired participants; avoid secrets or private paths."]]]]))
 
-(declare local-tools)
-
 (defn- switchboard-page [b identity {:keys [error message-id]}]
   (let [sessions (broker/active-sessions b)
         name-counts (frequencies (map primary-name sessions))
@@ -179,7 +209,7 @@
         message (when message-id
                   (broker/operator-message-metadata b message-id))]
     (page
-      "Switchboard" identity
+      "agents" :agents identity
       [:section.summary.panel
        [:div [:strong (count sessions)] [:small "active sessions"]]
        [:div [:strong runners] [:small "connected runners"]]
@@ -226,35 +256,126 @@
                         :placeholder "Ask this agent to inspect, review, or continue…"}]]]
           [:div.actions [:button {:type "submit"} "Send message"]]]
          [:p.muted "A session must be active before a message can be routed."])]
-      (local-tools b))))
+      )))
+
+(declare agent-label)
+
+(def ^:private activity-time-format
+  (.withZone (DateTimeFormatter/ofPattern "MMM d HH:mm:ss")
+             (ZoneId/systemDefault)))
+
+(defn- activity-time [observed-at]
+  (.format activity-time-format (Instant/ofEpochMilli observed-at)))
+
+(defn- activity-dot [outcome]
+  [:span.dot
+   {:class (case outcome
+             ("allowed" "completed") "dot-allow"
+             "approval-needed" "dot-ask"
+             ("denied" "failed") "dot-deny"
+             "dot-observe")}])
+
+(defn- activity-table [observations]
+  (if (seq observations)
+    [:table.dense-table.activity-table
+     [:thead
+      [:tr
+       [:th.event-time "Time"]
+       [:th.event-agent "Agent"]
+       [:th.event-action "Activity"]
+       [:th.event-tool "Tool"]
+       [:th.event-outcome "Outcome"]
+       [:th.event-ms "ms"]]]
+     [:tbody
+      (for [{:keys [event-id observed-at agent action tool-category outcome
+                    duration-ms]} observations]
+        [:tr {:data-event event-id}
+         [:td.event-time (activity-time observed-at)]
+         [:td.event-agent (agent-label agent)]
+         [:td.event-action (str/replace action "." " · ")]
+         [:td.event-tool (or tool-category "—")]
+         [:td.event-outcome (activity-dot outcome) outcome]
+         [:td.event-ms (when (number? duration-ms)
+                         (if (< duration-ms 1.0)
+                           "<1"
+                           (str (Math/round (double duration-ms)))))]])]]
+    [:div.empty "No normalized agent activity is available yet."]))
+
+(defn- parse-activity-query [query]
+  (let [agent (some-> (:agent query) str/lower-case not-empty)
+        action (some-> (:action query) str/lower-case not-empty)]
+    (cond-> {:limit 200}
+      (contains? #{"claude-code" "codex" "agy"} agent) (assoc :agent agent)
+      (contains? #{"session.started" "session.stopped" "session.ended"
+                   "turn.started" "tool.requested" "tool.completed"
+                   "tool.failed" "tool.permission" "context.compacted"
+                   "attention.requested"} action)
+      (assoc :action action))))
+
+(defn- events-page [b identity query]
+  (let [{:keys [agent action] :as filters} (parse-activity-query query)
+        observations (broker/recent-activity-observations b filters)]
+    (page
+      "events" :events identity
+      [:p.page-subtitle
+       "Activity across Claude, Codex, and AGY"]
+      [:form.filter-bar.event-filters {:method "get" :action "/events"}
+       [:label {:for "event-agent"} "Agent"]
+       [:select {:id "event-agent" :name "agent"}
+        [:option {:value ""} "All agents"]
+        (for [[value label] [["claude-code" "Claude"] ["codex" "Codex"]
+                             ["agy" "AGY"]]]
+          [:option (cond-> {:value value} (= value agent) (assoc :selected true))
+           label])]
+       [:label {:for "event-action"} "Activity"]
+       [:select {:id "event-action" :name "action"}
+        [:option {:value ""} "All activity"]
+        (for [value ["session.started" "session.stopped" "session.ended"
+                     "turn.started" "tool.requested" "tool.completed"
+                     "tool.failed" "tool.permission" "context.compacted"
+                     "attention.requested"]]
+          [:option (cond-> {:value value} (= value action) (assoc :selected true))
+           (str/replace value "." " · ")])]
+       [:button.btn {:type "submit"} "filter"]
+       [:a.btn {:href "/events"} "clear"]]
+      [:section.panel (activity-table observations)])))
+
+(defn- overview-page [b identity]
+  (let [sessions (broker/active-sessions b)
+        runners (count (set (map :runner-id sessions)))
+        needs-attention (count (filter #(= "attention" (:key (attention %)))
+                                       sessions))
+        recent (broker/recent-activity-observations b {:limit 8})]
+    (page
+      "overview" :overview identity
+      [:section.summary.panel
+       [:div [:strong (count sessions)] [:small "active agents"]]
+       [:div [:strong runners] [:small "connected runners"]]
+       [:div [:strong needs-attention] [:small "need attention"]]]
+      [:div.overview-grid
+       [:section.panel.overview-card
+        [:h2 "Agents"]
+        [:p "Identify, open, and send ordinary text to active Claude, Codex, and Agy sessions."]
+        [:a.btn {:href "/agents"} "Open agents"]]
+       [:section.panel.overview-card
+        [:h2 "Events"]
+        [:p "Review recent execution activity across Claude, Codex, and AGY."]
+        [:a.btn {:href "/events"} "Open events"]]
+       [:section.panel.overview-card
+        [:h2 "Usage"]
+        [:p "Inspect global rate-limit windows and projections across every supported agent family."]
+        [:a.btn {:href "/usage"} "Open usage"]]]
+      [:section.panel
+       [:div.recent-heading
+        [:h2 "Recent activity"]
+        [:a {:href "/events"} "View all"]]
+       (activity-table recent)])))
 
 (defn- agent-label [agent]
-  (case agent "claude-code" "Claude Code" (str/capitalize agent)))
-
-(defn- duration-label [seconds]
-  (let [seconds (max 0 (long seconds))
-        days (quot seconds 86400)
-        hours (quot (mod seconds 86400) 3600)
-        minutes (quot (mod seconds 3600) 60)]
-    (cond
-      (pos? days) (format "%dd %dh" days hours)
-      (pos? hours) (format "%dh %dm" hours minutes)
-      :else (format "%dm" minutes))))
-
-(defn- local-tools [b]
-  (let [runners (filter :local-ui-url (broker/active-runners b))]
-    [:section.panel
-     [:h2 "Local tools"]
-     [:p.muted "Hooks, raw events, configuration, and debugging stay on each runner and open directly; this application does not proxy them."]
-     (if (seq runners)
-       (for [{:keys [runner-id local-ui-url]} runners]
-         [:div.local-links
-          [:strong runner-id]
-          [:a {:href local-ui-url :target "_blank" :rel "noopener noreferrer"} "Overview"]
-          [:a {:href (str local-ui-url "/hooks") :target "_blank" :rel "noopener noreferrer"} "Hooks"]
-          [:a {:href (str local-ui-url "/events") :target "_blank" :rel "noopener noreferrer"} "Events"]
-          [:a {:href (str local-ui-url "/debug") :target "_blank" :rel "noopener noreferrer"} "Debug"]])
-       [:p.muted "No runner has advertised a reachable local UI URL."])]))
+  (case agent
+    "claude-code" "Claude Code"
+    "agy" "AGY"
+    (str/capitalize agent)))
 
 (defn- cached-usage-forecast [b cache]
   (let [now (System/currentTimeMillis)
@@ -266,36 +387,32 @@
         (reset! cache {:cached-at now :forecast forecast})
         forecast))))
 
-(defn- usage-page [b identity cache]
+(defn- parse-usage-selection [query]
+  {:window (case (some-> (:window query) str/lower-case)
+             ("5h" "5hour" "5-hour" "five-hour" "fivehour") :five-hour
+             :seven-day)
+   :agent (case (some-> (:agent query) str/lower-case)
+            "codex" "codex"
+            ("agy" "antigravity") "agy"
+            ("claude" "claude-code" "cc") "claude-code"
+            "claude-code")})
+
+(defn- usage-page [b identity cache query]
   (let [forecast (cached-usage-forecast b cache)
-        agents (:agents forecast)]
+        {:keys [window agent]} (parse-usage-selection query)
+        window-name (if (= window :five-hour) "five_hour" "seven_day")
+        data (some-> (get-in forecast [:agents agent window-name :page-data])
+                     (assoc :agent agent))
+        subtitle (if (= window :five-hour)
+                   "5-hour rate-limit window · fleet-wide projection with 90% credible interval"
+                   "7-day rate-limit window · fleet-wide projection with 90% credible interval")]
     (page
-      "Usage" identity
-      [:section.panel
-       [:h2 "Usage & forecast"]
-       [:p.muted "Fleet-wide projections from normalized usage observations. No account, session, machine, repository, transcript, or raw provider payload is stored in this view."]
-       (if (some seq (vals agents))
-         [:div.forecast-grid
-          (for [[agent windows] agents
-                [window {:keys [current-pct projected-pct seconds-left
-                                sample-count band]}] windows]
-            [:article.forecast-card
-             [:div.session-top
-              [:strong (agent-label agent)]
-              [:span.badge (if (= window "five_hour") "5 hour" "7 day")]]
-             [:div.forecast-value (str current-pct "%")]
-             [:small (str "Projected " projected-pct "%")]
-             [:div.forecast-meta
-              [:div [:small "Resets in"] [:div (duration-label seconds-left)]]
-              [:div [:small "Samples"] [:div sample-count]]
-              (when band
-                [:div [:small "Projection band"]
-                 [:div (str (:lo band) "%–" (:hi band) "%")]])]])]
-         [:div.empty "No normalized usage observations are available yet."])]
-      (local-tools b))))
+      "usage" :usage identity
+      [:p.page-subtitle subtitle]
+      (usage/page-view data {:base "/usage" :window window :agent agent}))))
 
 (defn- error-page [status title message]
-  (response status (page title nil [:section.panel [:h2 title] [:p message]])))
+  (response status (page title nil nil [:section.panel [:h2 title] [:p message]])))
 
 (defn handler
   "Build a Ring handler for human routes only. Every request must carry a
@@ -303,18 +420,25 @@
   [b config]
   (let [usage-cache (atom nil)]
     (fn [{:keys [request-method uri] :as request}]
-      (when (contains? #{"/" "/usage" "/messages" "/sessions/alias" "/logout"} uri)
+      (when (contains? #{"/" "/agents" "/events" "/usage" "/messages" "/sessions/alias" "/logout"} uri)
         (try
         (let [identity (auth/authenticate! config request)
               identity (assoc identity :csrf (auth/csrf-token config identity))]
           (cond
             (and (= :get request-method) (= "/" uri))
+            (response 200 (overview-page b identity))
+
+            (and (= :get request-method) (= "/agents" uri))
             (response 200 (switchboard-page
                             b identity {:message-id (:message-id
                                                      (request-query request))}))
 
             (and (= :get request-method) (= "/usage" uri))
-            (response 200 (usage-page b identity usage-cache))
+            (response 200 (usage-page b identity usage-cache
+                                      (request-query request)))
+
+            (and (= :get request-method) (= "/events" uri))
+            (response 200 (events-page b identity (request-query request)))
 
             (and (= :post request-method) (= "/messages" uri))
             (let [form (request-form request)]
@@ -323,7 +447,7 @@
                              b {:target (:target form)
                                 :message (:message form)
                                 :message-id (str (random-uuid))})]
-                (redirect (str "/?message-id="
+                (redirect (str "/agents?message-id="
                                (url-encode (:message-id result))))))
 
             (and (= :post request-method) (= "/sessions/alias" uri))
@@ -331,7 +455,7 @@
               (csrf! config request identity form)
               (broker/set-operator-session-alias!
                 b {:route-id (:target form) :alias (:alias form)})
-              (redirect "/"))
+              (redirect "/agents"))
 
             (and (= :post request-method) (= "/logout" uri))
             (let [form (request-form request)]

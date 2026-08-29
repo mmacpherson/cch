@@ -41,6 +41,37 @@
                  {(keyword window) {:used_percentage used-percentage
                                     :resets_at resets-at}}}})))
 
+(defn- activity [event-id observed-at agent action outcome]
+  {:event-id (apply str (repeat 64 event-id))
+   :schema-version 1 :observed-at observed-at :agent agent
+   :action action :outcome outcome})
+
+(deftest activity-is-idempotent-bounded-and-has-no-runner-attribution
+  (let [clock (atom 2000000000000)
+        b (broker/new-broker runner-tokens {:now-fn #(deref clock)})
+        first-event (activity "a" @clock "claude-code" "turn.started" "observed")
+        second-event (activity "b" (inc @clock) "codex" "session.started" "observed")]
+    (is (= {:accepted 2 :duplicates 0 :latest-cursor 2}
+           (broker/publish-activity!
+             b {:runner-id "runner-a" :token "synthetic-token-a"
+                :observations [first-event second-event]})))
+    (is (= {:accepted 0 :duplicates 1 :latest-cursor 2}
+           (broker/publish-activity!
+             b {:runner-id "runner-b" :token "synthetic-token-b"
+                :observations [first-event]})))
+    (is (= [second-event]
+           (api/recent-activity-observations b {:limit 10 :agent "codex"})))
+    (let [rendered (pr-str (api/recent-activity-observations b {:limit 10}))]
+      (is (not (str/includes? rendered "runner-a")))
+      (is (not (str/includes? rendered "synthetic-token"))))
+    (is (= :invalid-activity-observation
+           (try
+             (broker/publish-activity!
+               b {:runner-id "runner-a" :token "synthetic-token-a"
+                  :observations [(assoc first-event :cwd "/private")]})
+             (catch clojure.lang.ExceptionInfo error
+               (:type (ex-data error))))))))
+
 (deftest registration-publishes-only-sanitized-available-routes
   (let [b (broker/new-broker runner-tokens)]
     (register-pair! b)

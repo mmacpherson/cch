@@ -95,6 +95,25 @@
       (is (re-find #"usage-chart-block" out))
       (is (re-find #"svg" out)))))
 
+(deftest full-page-view-shares-controls-tiles-and-chart
+  (let [out (str (u/page-view (assoc (make-data) :rate-phr 2.25)
+                              {:base "/usage" :window :seven-day
+                               :agent "codex"}))]
+    (is (re-find #"filter-strip" out))
+    (is (re-find #"agent=codex" out))
+    (is (re-find #"used" out))
+    (is (re-find #"24%" out))
+    (is (re-find #"75%" out))
+    (is (re-find #"2.3%/h" out))
+    (is (re-find #"usage-chart-block" out))))
+
+(deftest full-page-view-handles-a-missing-data-source
+  (let [out (str (u/page-view nil {:base "/usage" :window :five-hour
+                                   :agent "agy"}))]
+    (is (re-find #"Not enough" out))
+    (is (re-find #"window=5h&amp;agent=agy|window=5h&agent=agy" out))
+    (is (re-find #"—" out))))
+
 (defn- make-5h-data []
   ;; Halfway through a 5h window, four observed samples at 30-min cadence.
   (let [now (* 2 3600)]

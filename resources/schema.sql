@@ -107,6 +107,15 @@ CREATE TABLE IF NOT EXISTS usage_backfill_state (
   updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
 );
 
+-- Machine-local cursor for exporting a deliberately narrow activity stream.
+-- Raw events remain in `events`; only allowlisted derived records cross the
+-- control-plane boundary.
+CREATE TABLE IF NOT EXISTS activity_sync_state (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  last_event_id INTEGER NOT NULL DEFAULT 0 CHECK (last_event_id >= 0),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+);
+
 -- Covering expression indexes for the forecast's completed-window "finals"
 -- queries (cch.forecast/historical-finals-sql). Those GROUP BY resets_at and
 -- MAX(used_percentage) per window across ALL history — an unbounded scan that,

@@ -45,6 +45,11 @@
     :invalid-usage-cursor 422
     :usage-observation-expired 422
     :usage-observation-future 422
+    :activity-batch-too-large 413
+    :invalid-activity-observation 422
+    :invalid-activity-batch 422
+    :activity-observation-expired 422
+    :activity-observation-future 422
     400))
 
 (defn handler
@@ -112,6 +117,12 @@
         (let [payload (read-json request)]
           (json-response 200
                          (broker/read-usage-observations!
+                           b (merge payload (credentials request payload)))))
+
+        (and (= :post request-method) (= "/v1/activity-observations" uri))
+        (let [payload (read-json request)]
+          (json-response 200
+                         (broker/publish-activity-observations!
                            b (merge payload (credentials request payload)))))
 
         :else

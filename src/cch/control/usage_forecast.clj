@@ -40,14 +40,36 @@
                          :historical-finals finals}
             projection (projections/rate-bayes-projection observed window-info)
             projected (or (:proj projection) last-pct)
-            band (:band projection)]
+            band (:band projection)
+            rates (projections/rate-samples observed)
+            recent-rate (when (>= (count rates) 2)
+                          (let [recent (take-last 3 rates)]
+                            (/ (reduce + 0.0 (map :rate recent))
+                               (count recent))))
+            page-data {:agent nil
+                       :window-key window-key
+                       :span-secs span-seconds
+                       :observed observed
+                       :rate-samples
+                       (mapv (fn [{:keys [ts pct]}]
+                               {:ts ts :pct pct :resets-at resets-at})
+                             observed)
+                       :rate-scale 1.0
+                       :resets-at resets-at
+                       :window-start (- resets-at span-seconds)
+                       :now now
+                       :last-pct last-pct
+                       :samples (:sample-count input)
+                       :projection projection
+                       :rate-phr recent-rate}]
         (cond->
           {:current-pct (Math/round last-pct)
            :projected-pct (round-one projected)
            :resets-at resets-at
            :seconds-left (max 0 (- resets-at now))
            :sample-count (:sample-count input)
-           :prior {:mu prior-mu :sigma prior-sigma}}
+           :prior {:mu prior-mu :sigma prior-sigma}
+           :page-data page-data}
           band
           (assoc :band {:lo (Math/round (double (:lo band)))
                         :hi (Math/round (double (:hi band)))}))))))

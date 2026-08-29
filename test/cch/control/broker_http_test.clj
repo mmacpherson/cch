@@ -88,6 +88,15 @@
                (->> (remote/read-usage-observations! runner-b 0 10)
                     :observations
                     (mapv #(dissoc % :cursor))))))
+      (let [activity {:event-id (apply str (repeat 64 "c"))
+                      :schema-version 1
+                      :observed-at (System/currentTimeMillis)
+                      :agent "codex" :action "turn.started"
+                      :outcome "observed"}]
+        (is (= {:accepted 1 :duplicates 0 :latest-cursor 1}
+               (remote/publish-activity-observations! a [activity])))
+        (is (= [activity]
+               (broker/recent-activity b {:limit 10}))))
       (is (= :unauthorized
              (try
                (remote/sessions (assoc a :token "wrong"))

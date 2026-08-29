@@ -8,7 +8,8 @@
   Pure functions of the data bundle from cch.forecast/current-window —
   easy to test without a server."
   (:require [cch.forecast :as forecast]
-            [cch.projections :as proj])
+            [cch.projections :as proj]
+            [clojure.string :as str])
   (:import (java.time Instant ZoneId)
            (java.time.format DateTimeFormatter)))
 
@@ -357,6 +358,91 @@
    (chart-svg data)
    (legend data)
    (rate-chart-svg data)])
+
+(defn usage-href
+  "Build a Usage link while preserving agent and window selection. `base` is
+  normally /usage for both local and hosted applications."
+  [base {:keys [window agent]}]
+  (let [params (cond-> []
+                 (= window :five-hour) (conj "window=5h")
+                 (and agent (not= agent "claude-code"))
+                 (conj (str "agent=" agent)))]
+    (if (seq params)
+      (str base "?" (str/join "&" params))
+      base)))
+
+(defn filter-strip
+  "Shared window and agent controls for local and fleet-scoped Usage pages."
+  [base active-window active-agent]
+  [:div.filter-strip
+   [:div.filter-group
+    [:span.filter-label "Window"]
+    [:div.filter-tabs
+     (for [[key label] [[:five-hour "5h"] [:seven-day "7d"]]]
+       [:a.filter-tab {:href (usage-href base {:window key
+                                               :agent active-agent})
+                       :class (when (= key active-window) "active")
+                       :aria-current (when (= key active-window) "page")}
+        label])]]
+   [:div.filter-group
+    [:span.filter-label "Source"]
+    [:div.filter-tabs
+     (for [[agent label] [["claude-code" "Claude"]
+                          ["codex" "Codex"]
+                          ["agy" "AGY"]]]
+       [:a.filter-tab {:href (usage-href base {:window active-window
+                                               :agent agent})
+                       :class (when (= agent active-agent) "active")
+                       :aria-current (when (= agent active-agent) "page")}
+        label])]]])
+
+(defn- duration-label [seconds]
+  (when (and seconds (pos? seconds))
+    (let [hours (quot seconds 3600)
+          minutes (quot (mod seconds 3600) 60)]
+      (cond
+        (>= hours 24) (str (quot hours 24) "d " (mod hours 24) "h")
+        (pos? hours) (str hours "h " minutes "m")
+        :else (str minutes "m")))))
+
+(defn stat-tiles
+  "Shared stat row derived solely from a rich Usage data bundle."
+  [data]
+  (let [{:keys [last-pct resets-at now rate-phr projection samples]} data
+        projected (:proj projection)
+        band (:band projection)
+        seconds-left (when (and resets-at now) (max 0 (- resets-at now)))]
+    [:div.tile-row
+     [:div.stat-tile
+      [:div.stat-label "used"]
+      [:div.stat-value (if (number? last-pct)
+                         (str (Math/round (double last-pct)) "%") "—")]]
+     [:div.stat-tile {:class (when (and projected (> projected 85)) "warn")}
+      [:div.stat-label "projected"]
+      [:div.stat-value (if (number? projected)
+                         (str (Math/round (double projected)) "%") "—")
+       (when band
+         [:span {:style "font-size:.55em;opacity:.7;margin-left:.4em;font-weight:400"}
+          (str (Math/round (double (:lo band))) "–"
+               (Math/round (double (:hi band))) "%")])]]
+     [:div.stat-tile
+      [:div.stat-label "resets in"]
+      [:div.stat-value (or (duration-label seconds-left) "—")]]
+     [:div.stat-tile
+      [:div.stat-label "burn rate"]
+      [:div.stat-value (if (number? rate-phr)
+                         (format "%.1f%%/h" (double rate-phr)) "—")]]
+     [:div.stat-tile
+      [:div.stat-label "samples"]
+      [:div.stat-value (str (or samples (count (or (:observed data) []))))]]]))
+
+(defn page-view
+  "The full Usage experience shared by local and hosted data adapters."
+  [data {:keys [base window agent] :or {base "/usage"}}]
+  [:div
+   (filter-strip base window agent)
+   (stat-tiles data)
+   (page-body data)])
 
 (defn build-data
   "Public entry point — fetches the bundle from forecast. Indirection

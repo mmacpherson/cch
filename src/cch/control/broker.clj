@@ -6,7 +6,8 @@
   this component; presence may include a provider-validated session deep link.
   All mutation is serialized on the Broker value so enqueue, poll,
   acknowledgement, and duplicate detection are atomic."
-  (:require [cch.control.broker-api :as api]
+  (:require [cch.activity-observation :as activity]
+            [cch.control.broker-api :as api]
             [cch.control.naming :as naming]
             [cch.control.store :as store]
             [cch.control.usage-read-model :as usage-read-model]
@@ -29,6 +30,11 @@
 (def ^:const default-max-usage-observations 2000000)
 (def ^:const max-usage-batch-size 256)
 (def ^:const max-usage-read-limit 1000)
+(def ^:const default-activity-retention-ms (* 7 24 60 60 1000))
+(def ^:const default-activity-future-skew-ms (* 5 60 1000))
+(def ^:const default-max-activity-observations 200000)
+(def ^:const max-activity-batch-size 256)
+(def ^:const max-activity-read-limit 500)
 
 (defrecord Broker [state now-fn options])
 
@@ -38,7 +44,8 @@
   ([runner-tokens] (new-broker runner-tokens {}))
   ([runner-tokens {:keys [now-fn lease-ms message-ttl-ms ack-timeout-ms
                           max-attempts usage-retention-ms usage-future-skew-ms
-                          max-usage-observations]
+                          max-usage-observations activity-retention-ms
+                          activity-future-skew-ms max-activity-observations]
                    :or {now-fn #(System/currentTimeMillis)
                         lease-ms default-lease-ms
                         message-ttl-ms default-message-ttl-ms
@@ -46,7 +53,10 @@
                         max-attempts default-max-attempts
                         usage-retention-ms default-usage-retention-ms
                         usage-future-skew-ms default-usage-future-skew-ms
-                        max-usage-observations default-max-usage-observations}}]
+                        max-usage-observations default-max-usage-observations
+                        activity-retention-ms default-activity-retention-ms
+                        activity-future-skew-ms default-activity-future-skew-ms
+                        max-activity-observations default-max-activity-observations}}]
    (->Broker (atom {:runner-tokens runner-tokens
                     :runners {}
                     :routes {}
@@ -54,7 +64,10 @@
                     :messages {}
                     :usage-observations (sorted-map)
                     :usage-event-cursors {}
-                    :next-usage-cursor 0})
+                    :next-usage-cursor 0
+                    :activity-observations (sorted-map)
+                    :activity-event-cursors {}
+                    :next-activity-cursor 0})
              now-fn
              {:lease-ms lease-ms
               :message-ttl-ms message-ttl-ms
@@ -62,7 +75,10 @@
               :max-attempts max-attempts
               :usage-retention-ms usage-retention-ms
               :usage-future-skew-ms usage-future-skew-ms
-              :max-usage-observations max-usage-observations})))
+              :max-usage-observations max-usage-observations
+              :activity-retention-ms activity-retention-ms
+              :activity-future-skew-ms activity-future-skew-ms
+              :max-activity-observations max-activity-observations})))
 
 (defn- now [^Broker broker]
   ((:now-fn broker)))
@@ -592,6 +608,104 @@
       (usage-read-model/from-observations
         (vals (:usage-observations state)) timestamp))))
 
+(defn validate-activity-batch!
+  "Validate a bounded batch at the broker trust boundary."
+  [observations timestamp retention-ms future-skew-ms]
+  (when-not (vector? observations)
+    (throw (ex-info "observations must be a JSON array"
+                    {:type :invalid-activity-batch})))
+  (when (> (count observations) max-activity-batch-size)
+    (throw (ex-info "Activity observation batch is too large"
+                    {:type :activity-batch-too-large
+                     :max-count max-activity-batch-size})))
+  (let [oldest (- timestamp retention-ms)
+        newest (+ timestamp future-skew-ms)]
+    (mapv
+      (fn [observation]
+        (let [validated (activity/validate-observation! observation)
+              observed-at (:observed-at validated)]
+          (cond
+            (< observed-at oldest)
+            (throw (ex-info "Activity observation is outside retention"
+                            {:type :activity-observation-expired}))
+            (> observed-at newest)
+            (throw (ex-info "Activity observation is too far in the future"
+                            {:type :activity-observation-future}))
+            :else validated)))
+      observations)))
+
+(defn- prune-activity-state [state oldest max-count]
+  (let [fresh (->> (:activity-observations state)
+                   (filter (fn [[_ observation]]
+                             (>= (:observed-at observation) oldest)))
+                   (take-last max-count)
+                   (into (sorted-map)))
+        event-cursors (into {}
+                            (map (fn [[cursor observation]]
+                                   [(:event-id observation) cursor]))
+                            fresh)]
+    (assoc state :activity-observations fresh
+                 :activity-event-cursors event-cursors)))
+
+(defn publish-activity!
+  "Idempotently append privacy-safe activity. Authentication authorizes the
+  batch but runner identity is not attached to its observations."
+  [^Broker broker {:keys [runner-id token observations]}]
+  (authorize! broker runner-id token)
+  (let [timestamp (now broker)
+        observations (validate-activity-batch!
+                       observations timestamp
+                       (get-in broker [:options :activity-retention-ms])
+                       (get-in broker [:options :activity-future-skew-ms]))
+        oldest (- timestamp (get-in broker [:options :activity-retention-ms]))
+        max-count (get-in broker [:options :max-activity-observations])]
+    (locking broker
+      (let [initial (prune-activity-state @(:state broker) oldest max-count)
+            [next-state accepted duplicates]
+            (reduce
+              (fn [[state accepted duplicates] observation]
+                (if (contains? (:activity-event-cursors state)
+                               (:event-id observation))
+                  [state accepted (inc duplicates)]
+                  (let [cursor (inc (:next-activity-cursor state))]
+                    [(-> state
+                         (assoc :next-activity-cursor cursor)
+                         (assoc-in [:activity-observations cursor]
+                                   (assoc observation :cursor cursor))
+                         (assoc-in [:activity-event-cursors (:event-id observation)]
+                                   cursor))
+                     (inc accepted) duplicates])))
+              [initial 0 0] observations)
+            retained (prune-activity-state next-state oldest max-count)]
+        (reset! (:state broker) retained)
+        {:accepted accepted :duplicates duplicates
+         :latest-cursor (:next-activity-cursor retained)}))))
+
+(defn recent-activity
+  "Internal operator read model. This method has no runner HTTP route."
+  [^Broker broker {:keys [limit agent action] :or {limit 200}}]
+  (when-not (and (integer? limit) (<= 1 limit max-activity-read-limit))
+    (throw (ex-info "limit is invalid" {:type :invalid-activity-query})))
+  (when (and agent (not (contains? activity/agents agent)))
+    (throw (ex-info "agent is invalid" {:type :invalid-activity-query})))
+  (when (and action (not (contains? activity/actions action)))
+    (throw (ex-info "action is invalid" {:type :invalid-activity-query})))
+  (locking broker
+    (let [timestamp (now broker)
+          state (prune-activity-state
+                  @(:state broker)
+                  (- timestamp (get-in broker [:options :activity-retention-ms]))
+                  (get-in broker [:options :max-activity-observations]))
+          observations (->> (:activity-observations state)
+                            vals
+                            (filter #(and (or (nil? agent) (= agent (:agent %)))
+                                          (or (nil? action) (= action (:action %)))))
+                            (sort-by (juxt :observed-at :cursor) #(compare %2 %1))
+                            (take limit)
+                            (mapv #(dissoc % :cursor)))]
+      (reset! (:state broker) state)
+      observations)))
+
 (defn summary
   "Non-sensitive broker diagnostics."
   [^Broker broker]
@@ -600,7 +714,8 @@
     {:status "ok"
      :runner-count (count (:runners state))
      :route-count (count (:routes state))
-     :message-count (count (:messages state))}))
+     :message-count (count (:messages state))
+     :activity-count (count (:activity-observations state))}))
 
 (extend-type Broker
   api/ControlBroker
@@ -630,6 +745,10 @@
     (read-usage! b request))
   (usage-forecast-inputs [b]
     (usage-inputs b))
+  (publish-activity-observations! [b request]
+    (publish-activity! b request))
+  (recent-activity-observations [b request]
+    (recent-activity b request))
   (message-metadata [b runner-id token message-id]
     (message-status b runner-id token message-id))
   (operator-message-metadata [b message-id]

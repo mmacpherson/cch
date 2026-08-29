@@ -4,7 +4,8 @@
   A runner refreshes sanitized local presence, pulls messages addressed to its
   routes, submits them through local native adapters, and acknowledges only
   terminal outcomes. It owns no listener and does not launch agent processes."
-  (:require [cch.control.remote :as remote]
+  (:require [cch.control.activity-sync :as activity-sync]
+            [cch.control.remote :as remote]
             [cch.control.usage-sync :as usage-sync]
             [cch.db :as db]))
 
@@ -60,8 +61,10 @@
             :deliver-local!
             (requiring-resolve 'cch.control.core/send-local-message!)
             :sync-usage!
-            #(usage-sync/tick! config (db/db-path))}))
-  ([config {:keys [sync-usage!] :as dependencies}]
+            #(usage-sync/tick! config (db/db-path))
+            :sync-activity!
+            #(activity-sync/tick! config (db/db-path))}))
+  ([config {:keys [sync-usage! sync-activity!] :as dependencies}]
    (let [stopping? (atom false)
          poll-ms (or (:poll-ms config) default-poll-ms)
          last-error (atom nil)
@@ -82,7 +85,7 @@
                         (Thread/sleep poll-ms))
                       (catch InterruptedException _ nil))))
          usage-thread
-         (when sync-usage!
+         (when (or sync-usage! sync-activity!)
            (Thread.
              ^Runnable
              (fn []
@@ -92,7 +95,22 @@
                         prior-error nil]
                    (when-not @stopping?
                      (let [result (try
-                                    (sync-usage!)
+                                    {:errors
+                                     (->> [[:usage sync-usage!]
+                                           [:activity sync-activity!]]
+                                          (mapcat
+                                            (fn [[operation sync!]]
+                                              (if-not sync!
+                                                []
+                                                (try
+                                                  (let [sync-result (sync!)]
+                                                    (if (seq (:errors sync-result))
+                                                      (:errors sync-result)
+                                                      []))
+                                                  (catch Exception error
+                                                    [{:operation operation
+                                                      :error error}])))))
+                                          vec)}
                                     (catch Exception error
                                       {:errors [{:operation :tick
                                                  :error error}]}))

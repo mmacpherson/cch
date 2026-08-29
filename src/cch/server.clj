@@ -31,6 +31,7 @@
             [cch.protocol :as proto]
             [cch.stats :as stats]
             [cch.usage :as usage]
+            [cch.web :as web]
             [cheshire.core :as json]
             [cli.registry :as registry]
             [clojure.java.io :as io]
@@ -245,58 +246,22 @@
 (declare encode-query)
 (declare parse-query)
 
-(def ^:private nav-hook-svg
-  "Inline version of the favicon glyph, sized for the nav brand. Uses
-  currentColor so CSS in .nav-icon controls its color."
-  [:svg {:xmlns "http://www.w3.org/2000/svg"
-         :width 22 :height 22 :viewBox "0 0 24 24"
-         :fill "none" :stroke "currentColor" :stroke-width 2
-         :stroke-linecap "round" :stroke-linejoin "round"
-         :aria-hidden "true"}
-   [:path {:d "m17.586 11.414-5.93 5.93a1 1 0 0 1-8-8l3.137-3.137a.707.707 0 0 1 1.207.5V10"}]
-   [:path {:d "M20.414 8.586 22 7"}]
-   [:circle {:cx 19 :cy 10 :r 2}]])
-
 (defn- nav-bar
   "Primary nav at the top of every page. `active` is :overview, :events,
   :hooks, or :usage."
   [active & _]
-  (let [tab (fn [k label href]
-              (if (= active k)
-                [:span.nav-tab.active label]
-                [:a.nav-tab {:href href} label]))]
-    [:nav.nav-wrap
-     [:a.nav-brand {:href "/"}
-      [:span.nav-icon nav-hook-svg]
-      "cch"]
-     [:div.nav-tabs
-      (tab :overview "overview" "/")
-      (tab :events   "events"   "/events")
-      (tab :hooks    "hooks"    "/hooks")
-      (tab :usage    "usage"    "/usage")]
-     [:div.nav-status
-      [:span.dot-online]
-      "dispatcher · :8888"]]))
-
-;; Cache-bust static assets across deploys: JVM startup time as ?v=...
-;; New deploy → restarted service → new version → browsers refetch.
-(def ^:private asset-version (str (System/currentTimeMillis)))
+  (web/nav-bar
+    {:active active
+     :tabs [[:overview "overview" "/"]
+            [:events "events" "/events"]
+            [:hooks "hooks" "/hooks"]
+            [:usage "usage" "/usage"]]
+     :status "dispatcher · :8888"}))
 
 (defn- page-head
   "Shared <head> block."
-  [{:keys [title]}]
-  [:head
-   [:meta {:charset "utf-8"}]
-   [:title (str "cch · " title)]
-   [:meta {:name "viewport" :content "width=device-width,initial-scale=1"}]
-   [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
-   [:link {:rel "preconnect" :href "https://fonts.googleapis.com"}]
-   [:link {:rel "preconnect" :href "https://fonts.gstatic.com" :crossorigin true}]
-   [:link {:rel "stylesheet"
-           :href "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=block"}]
-   [:link {:rel "stylesheet" :href (str "/cch.css?v=" asset-version)}]
-   [:script {:type "module"
-             :src  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.0-RC.8/bundles/datastar.js"}]])
+  [options]
+  (web/page-head options))
 
 (defn- badge
   [hook-name & _]
@@ -902,97 +867,6 @@
        :headers {"Content-Type" "application/json"}
        :body (json/generate-string {:error (.getMessage e)})})))
 
-(def ^:private window-key->fc-key
-  {:seven-day :seven_day
-   :five-hour :five_hour})
-
-(defn- bundle->fc-shape
-  "Synthesize a statusline-stats-shaped map for one window from a /usage
-  data bundle. Lets the tile row work for agents that don't feed the
-  bg-refreshed statusline cache (currently anything other than claude-code,
-  since the statusLine command is Claude Code's). Returns nil when the
-  bundle has no data."
-  [data]
-  (when (and data (:last-pct data))
-    (let [{:keys [last-pct projection resets-at now rate-phr]} data
-          proj (:proj projection)
-          band (:band projection)]
-      (cond-> {:current_pct (Math/round (double last-pct))
-               :secs_left   (max 0 (- (long resets-at) (long now)))}
-        proj     (assoc :projected_pct (Double/parseDouble (format "%.1f" (double proj))))
-        band     (assoc :band {:lo (Math/round (double (:lo band)))
-                               :hi (Math/round (double (:hi band)))})
-        rate-phr (assoc :local_rate_phr (Double/parseDouble (format "%.1f" (double rate-phr))))))))
-
-(defn- usage-stat-tiles
-  "Status tiles for the usage page, scoped to `window-key`. Five tiles —
-   the selected window itself is shown by the filter strip above, not as
-   a tile."
-  [fc data window-key]
-  (let [{:keys [current_pct projected_pct secs_left local_rate_phr band]}
-        (get fc (window-key->fc-key window-key))
-        fmt-time (fn [s]
-                   (when (and s (pos? s))
-                     (let [h (quot s 3600) m (quot (mod s 3600) 60)]
-                       (cond (>= h 24) (str (quot h 24) "d " (mod h 24) "h")
-                             (pos? h)  (str h "h " m "m")
-                             :else     (str m "m")))))
-        samples  (or (:samples data) (count (or (:observed data) [])))]
-    [:div.tile-row
-     [:div.stat-tile
-      [:div.stat-label "used"] [:div.stat-value (if current_pct (str (Math/round (double current_pct)) "%") "—")]]
-     [:div.stat-tile {:class (when (and projected_pct (> projected_pct 85)) "warn")}
-      [:div.stat-label "projected"]
-      [:div.stat-value (if projected_pct (str (Math/round (double projected_pct)) "%") "—")
-       (when band
-         [:span {:style "font-size: 0.55em; opacity: 0.7; margin-left: 0.4em; font-weight: 400"}
-          (str (:lo band) "–" (:hi band) "%")])]]
-     [:div.stat-tile
-      [:div.stat-label "resets in"] [:div.stat-value (or (fmt-time secs_left) "—")]]
-     [:div.stat-tile
-      [:div.stat-label "burn rate"]
-      [:div.stat-value (if local_rate_phr (format "%.1f%%/h" (double local_rate_phr)) "—")]]
-     [:div.stat-tile
-      [:div.stat-label "samples"] [:div.stat-value (str samples)]]]))
-
-(defn- usage-href
-  "Build a /usage URL preserving the orthogonal axis. Omits defaults so
-  shared links stay short."
-  [{:keys [window agent]}]
-  (let [params (cond-> []
-                 (= window :five-hour) (conj "window=5h")
-                 (and agent (not= agent "claude-code"))
-                 (conj (str "agent=" agent)))]
-    (if (seq params)
-      (str "/usage?" (str/join "&" params))
-      "/usage")))
-
-(defn- filter-strip
-  "Page-level filters: which window, which source CLI. Tab vocabulary
-   matches the top nav (.nav-tab). Each axis preserves the other when
-   the user clicks a tab — switching agent keeps the chosen window, and
-   vice versa."
-  [active-window active-agent]
-  [:div.filter-strip
-   [:div.filter-group
-    [:span.filter-label "Window"]
-    [:div.filter-tabs
-     (for [[k label] [[:five-hour "5h"] [:seven-day "7d"]]]
-       [:a.filter-tab {:href  (usage-href {:window k :agent active-agent})
-                       :class (when (= k active-window) "active")
-                       :aria-current (when (= k active-window) "page")}
-        label])]]
-   [:div.filter-group
-    [:span.filter-label "Source"]
-    [:div.filter-tabs
-     (for [[agent label] [["claude-code" "Claude"]
-                          ["codex" "Codex"]
-                          ["agy" "AGY"]]]
-       [:a.filter-tab {:href  (usage-href {:window active-window :agent agent})
-                       :class (when (= agent active-agent) "active")
-                       :aria-current (when (= agent active-agent) "page")}
-        label])]]])
-
 (defn- parse-window
   "?window=5h|5hour|five-hour → :five-hour. ?window=7d|7day|seven-day → :seven-day.
    Anything else (or missing) → :seven-day."
@@ -1013,21 +887,14 @@
 
 (defn- usage-html
   "Render the /usage page (server-side, hiccup → string).
-   `agent` selects the data source; the statusline tiles only show for
-   Claude because Codex doesn't feed the bg forecast cache."
+   `agent` selects the runner-local data source. The visual tree is shared
+   with the hosted fleet page through cch.usage/page-view."
   [window-key agent]
   (let [data     (usage/build-data agent window-key)
-        ;; statusline tiles: prefer the bg-refreshed cache (Claude — has
-        ;; fused 5h/7d burn rate, learned priors etc.); for other agents
-        ;; synthesize the same shape from the data bundle so the tiles
-        ;; aren't blank.
-        fc       (or (when (= agent "claude-code") (forecast/statusline-stats))
-                     (when-let [fc-shape (bundle->fc-shape data)]
-                       {(window-key->fc-key window-key) fc-shape}))
         subtitle (case window-key
                    :five-hour "5-hour rate-limit window — projection with 90% credible interval"
                    "7-day rate-limit window — projection with 90% credible interval")
-        href     (usage-href {:window window-key :agent agent})]
+        href     (usage/usage-href "/usage" {:window window-key :agent agent})]
     (str (hic/html
            [:html {:lang "en"}
             (page-head {:title "usage" :css-regime :custom})
@@ -1040,9 +907,9 @@
                 [:p.subtitle subtitle]]
                [:div.header-actions
                 [:a.btn {:href href} "↻ refresh"]]]
-              (filter-strip window-key agent)
-              (usage-stat-tiles fc data window-key)
-              (usage/page-body data)]]]))))
+              (usage/page-view data {:base "/usage"
+                                     :window window-key
+                                     :agent agent})]]]))))
 
 (defn- handle-usage
   "GET /usage[?window=5h|7d][&agent=claude-code|codex|agy] — server-rendered

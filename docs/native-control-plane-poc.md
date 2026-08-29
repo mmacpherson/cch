@@ -203,27 +203,37 @@ default and then removed, bounding the idempotency ledger.
 
 ## Cloudflare Access-protected operator application
 
-The broker also serves a small, server-rendered application with shared Agents
-and Usage navigation. The Agents page shows only the sanitized active route
-directory: agent family, opaque route id,
+The broker also serves the fleet-scoped form of the cch web application. It
+uses the same page shell, navigation vocabulary, filters, stat tiles, and chart
+components as the runner-local application. Its global navigation is Overview,
+Agents, Events, and Usage. Hooks, hook configuration, raw event payloads, and
+debugging stay runner-local and do not appear as hosted pages or a directory of
+runner tools.
+
+The Agents page shows only the sanitized active route directory: agent family, opaque route id,
 opaque runner id, bounded provider-advertised session name, native status, and
 a coarse ready/working/needs-you state. It has no transcript, prompt history,
 cwd, process id, socket, token, or message body view. A native action is shown
 only when the local adapter advertises a narrowly validated, exact session URL;
 generic provider home links are omitted.
 
-The Usage page computes fleet-wide current and projected percentages from the
-bounded normalized broker stream. Postgres performs latest-reset selection,
-monotone time bucketing, sample counts, and completed-window aggregation before
-the projection runs; the web request never loads the retained stream wholesale.
+The Usage page is the same full presentation used locally: agent and window
+filters, stat tiles, observed curve, credible projection band, and burn-rate
+chart. Its data adapter computes fleet-wide values from the bounded normalized
+broker stream. Postgres performs latest-reset selection, monotone time
+bucketing, sample counts, and completed-window aggregation before the
+projection runs; the web request never loads the retained stream wholesale.
 The result contains no account, session, runner, machine, repository,
 transcript, credential, or raw provider-payload identity.
 
-When a paired runner has an optional `CCH_CONTROL_LOCAL_UI_URL`, both hosted
-pages link directly to that runner's Overview, Hooks, Events, and Debug pages.
-Those pages remain local: the hosted application neither fetches nor proxies
-their content. The URL is refreshed automatically with the machine lease, so
-starting agent sessions adds no setup step.
+The Events page reads a separate seven-day normalized activity stream. Each
+record is a closed, versioned shape containing only time, agent family, a
+coarse lifecycle action, optional coarse tool category, outcome, and bounded
+duration. Unknown keys fail validation. There is no central column for route,
+session, runner, account, hostname, repository, cwd, path, command, prompt,
+reason, transcript, credential, or raw payload. Source-local raw hook rows
+remain available only to the runner-local Events page.
+
 For a Claude session with Remote Control active, the adapter incrementally
 reads Claude's structured `bridge_status` transcript event, caches its dedicated
 `claude.ai/code/session_...` URL in the machine-local operational store, and
@@ -445,3 +455,21 @@ within 1 point, projected percentage within 2 points, reset time within 2
 seconds, learned prior mean and sigma within 0.05, and at least 90% sample
 coverage. Live source-local and cross-node cold-start comparisons met those
 tolerances before raw context-snapshot shipping was disabled.
+
+## Activity federation
+
+Global Events uses the same normalized-event pattern instead of reviving table
+replication:
+
+- Claude, Codex, and AGY lifecycle hooks continue to write their complete rows
+  to machine-local SQLite for local diagnostics.
+- An asynchronous runner exporter reads only source-local rows and derives a
+  closed schema: event id, schema version, observation time, agent family,
+  coarse action, optional tool category, outcome, and bounded duration.
+- Policy-hook duplicates, unrecognized provider events, stale history, private
+  context, and every field outside the allowlist are omitted before transport.
+- Publication is authenticated, idempotent, and cursor-based. Postgres retains
+  seven days with count and time bounds, and intentionally has no runner or
+  machine attribution on an activity row.
+- The human listener can query the bounded feed for Overview and Events. The
+  runner JSON listener has no activity-read endpoint.

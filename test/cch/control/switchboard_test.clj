@@ -80,7 +80,7 @@
   (authenticated
     (fn []
       (let [response ((switchboard/handler (registered-broker) config)
-                      (access-request :get "/"))
+                      (access-request :get "/agents"))
             page (:body response)]
         (is (= 200 (:status response)))
         (is (str/includes? page target))
@@ -98,8 +98,8 @@
         (is (str/includes? page "Needs you"))
         (is (str/includes? page "Open this Claude session"))
         (is (str/includes? page "href=\"/usage\""))
-        (is (str/includes? page "https://runner.invalid/hooks"))
-        (is (str/includes? page "this application does not proxy them"))
+        (is (not (str/includes? page "https://runner.invalid")))
+        (is (not (str/includes? page ">Hooks<")))
         (is (str/includes? page
                            "https://claude.ai/code/session_synthetic123"))
         (is (not (str/includes? page "href=\"https://claude.ai/code\"")))
@@ -129,15 +129,46 @@
           b {:runner-id "runner-a" :token "synthetic-runner-token"
              :observations observations})
         (let [response ((switchboard/handler b config)
-                        (access-request :get "/usage"))
+                        (access-request :get "/usage"
+                                        {:query-string "window=5h"}))
               page (:body response)]
           (is (= 200 (:status response)))
-          (is (str/includes? page "Usage &amp; forecast"))
-          (is (str/includes? page "Claude Code"))
+          (is (str/includes? page "quota used (%)"))
+          (is (str/includes? page ">Claude<"))
           (is (str/includes? page "14%"))
-          (is (str/includes? page "https://runner.invalid/events"))
+          (is (str/includes? page "5-hour rate-limit window"))
+          (is (not (str/includes? page "https://runner.invalid")))
           (is (not (str/includes? page target)))
           (is (= "no-store" (get-in response [:headers "Cache-Control"]))))))))
+
+(deftest overview-and-events-render-normalized-global-activity
+  (authenticated
+    (fn []
+      (let [b (registered-broker)
+            event {:event-id (apply str (repeat 64 "d"))
+                   :schema-version 1
+                   :observed-at (System/currentTimeMillis)
+                   :agent "codex"
+                   :action "tool.completed"
+                   :tool-category "write"
+                   :outcome "completed"
+                   :duration-ms 12.5}
+            _ (broker/publish-activity!
+                b {:runner-id "runner-a" :token "synthetic-runner-token"
+                   :observations [event]})
+            handler (switchboard/handler b config)
+            overview (:body (handler (access-request :get "/")))
+            events (:body (handler (access-request :get "/events")))]
+        (is (str/includes? overview "Recent activity"))
+        (is (str/includes? overview "tool · completed"))
+        (is (str/includes? events "Activity across Claude, Codex, and AGY"))
+        (is (str/includes? events "Codex"))
+        (is (str/includes? events "write"))
+        (is (str/includes? events "completed"))
+        (doseq [forbidden ["runner.invalid" "/private/not-federated"
+                           "private-session" "private command"
+                           "private prompt" "private reason"]]
+          (is (not (str/includes? events forbidden))))))))
 
 (deftest duplicate-meaningful-names-show-mnemonics-for-disambiguation
   (authenticated
@@ -152,7 +183,7 @@
                         {:id route-b :agent "claude" :status "idle"
                          :available true :name "Review pair"}]})
         (let [page (:body ((switchboard/handler b config)
-                           (access-request :get "/")))]
+                           (access-request :get "/agents")))]
           (is (str/includes?
                 page
                 (str "<strong>Review pair · "
@@ -176,7 +207,7 @@
         (is (= 303 (:status renamed)))
         (is (= "Review <pair>"
                (:alias (first (broker/sessions b)))))
-        (let [page (:body (handler (access-request :get "/")))]
+        (let [page (:body (handler (access-request :get "/agents")))]
           (is (str/includes? page "Review &lt;pair&gt;"))
           (is (not (str/includes? page "Review <pair>"))))
         (is (= 422
@@ -220,7 +251,7 @@
                         :status "delivered"})
         (let [page (:body (handler
                             (access-request
-                              :get "/"
+                              :get "/agents"
                               {:query-string (str "message-id=" message-id)})))]
           (is (str/includes? page "Message delivered"))
           (is (not (str/includes? page "Synthetic operator request"))))))))

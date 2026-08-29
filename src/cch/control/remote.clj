@@ -209,6 +209,12 @@
                    :after-cursor after-cursor
                    :limit limit})))
 
+(defn publish-activity-observations!
+  [config observations]
+  (request-json! config :post "/v1/activity-observations"
+                 {:runner-id (:runner-id config)
+                  :observations observations}))
+
 (defn message-status [config message-id]
   (:message (request-json! config :post "/v1/messages/status"
                            {:runner-id (:runner-id config)

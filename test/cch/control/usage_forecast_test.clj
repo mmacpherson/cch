@@ -34,7 +34,7 @@
         (is (= 3.75 (get-in @captured [:window-info :prior-mu])))
         (testing "the hosted result contains aggregates, not source identity"
           (is (= #{:current-pct :projected-pct :resets-at :seconds-left
-                   :sample-count :prior :band}
+                   :sample-count :prior :band :page-data}
                  (set (keys projected)))))))))
 
 (deftest stale-window-without-a-new-observation-does-not-project

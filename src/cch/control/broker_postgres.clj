@@ -5,7 +5,8 @@
   schema. Bodies live only in this process; after a broker restart an identical
   enqueue rehydrates the body while the durable digest prevents conflicting
   reuse of a message id."
-  (:require [cch.control.broker :as memory]
+  (:require [cch.activity-observation :as activity]
+            [cch.control.broker :as memory]
             [cch.control.broker-api :as api]
             [cch.control.naming :as naming]
             [cch.control.store :as store]
@@ -139,6 +140,33 @@
           " ADD COLUMN IF NOT EXISTS local_ui_url text"
           " CHECK (local_ui_url IS NULL OR char_length(local_ui_url) BETWEEN 1 AND 512)")]))
 
+(defn migration-8-statements
+  "Create the bounded allowlisted global activity stream. No runner, route,
+  account, repository, path, command, prompt, reason, or payload column exists."
+  [schema]
+  (let [observations (table (schema-name schema) "activity_observations")]
+    [(str "CREATE TABLE IF NOT EXISTS " observations " ("
+          "cursor bigserial PRIMARY KEY,"
+          "event_id char(64) NOT NULL UNIQUE,"
+          "schema_version smallint NOT NULL CHECK (schema_version=1),"
+          "observed_at bigint NOT NULL,"
+          "agent text NOT NULL CHECK (agent IN ('claude-code','codex','agy')),"
+          "action text NOT NULL CHECK (action IN ("
+          "'session.started','session.stopped','session.ended','turn.started',"
+          "'tool.requested','tool.completed','tool.failed','tool.permission',"
+          "'context.compacted','attention.requested')),"
+          "tool_category text CHECK (tool_category IS NULL OR tool_category IN ("
+          "'read','write','execute','search','agent','web','other')),"
+          "outcome text NOT NULL CHECK (outcome IN ("
+          "'observed','allowed','approval-needed','denied','completed','failed')),"
+          "duration_ms double precision CHECK (duration_ms IS NULL OR "
+          "(duration_ms>=0 AND duration_ms<=3600000)),"
+          "received_at timestamptz NOT NULL DEFAULT now())")
+     (str "CREATE INDEX IF NOT EXISTS activity_observations_recent_idx ON "
+          observations " (observed_at DESC,cursor DESC)")
+     (str "CREATE INDEX IF NOT EXISTS activity_observations_filter_idx ON "
+          observations " (agent,action,observed_at DESC,cursor DESC)")]))
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -199,7 +227,11 @@
         (when-not (contains? applied 7)
           (doseq [statement (migration-7-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (7)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (7)")]))
+        (when-not (contains? applied 8)
+          (doseq [statement (migration-8-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (8)")]))))
     true))
 
 (defn datasource
@@ -868,11 +900,96 @@
              (sorted-map)
              latest)})))))
 
+(defn- prune-activity!
+  [^PostgresBroker broker tx timestamp-value]
+  (let [observations (table (:schema broker) "activity_observations")
+        oldest (- timestamp-value (get-in broker [:options :activity-retention-ms]))
+        max-count (get-in broker [:options :max-activity-observations])]
+    (jdbc/execute! tx [(str "DELETE FROM " observations " WHERE observed_at<?")
+                       oldest])
+    (jdbc/execute!
+      tx [(str "DELETE FROM " observations " WHERE cursor IN ("
+               "SELECT cursor FROM " observations
+               " ORDER BY cursor DESC OFFSET ?)")
+          max-count])))
+
+(defn- row->activity
+  [{:keys [event_id schema_version observed_at agent action tool_category
+           outcome duration_ms]}]
+  (cond-> {:event-id (str/trim event_id)
+           :schema-version schema_version
+           :observed-at observed_at
+           :agent agent
+           :action action
+           :outcome outcome}
+    tool_category (assoc :tool-category tool_category)
+    (some? duration_ms) (assoc :duration-ms duration_ms)))
+
+(defn- publish-activity!
+  [^PostgresBroker broker {:keys [runner-id token observations]}]
+  (authorize! broker runner-id token)
+  (let [timestamp-value (now broker)
+        observations (memory/validate-activity-batch!
+                       observations timestamp-value
+                       (get-in broker [:options :activity-retention-ms])
+                       (get-in broker [:options :activity-future-skew-ms]))
+        table-name (table (:schema broker) "activity_observations")]
+    (transact
+      (:datasource broker)
+      (fn [tx]
+        (prune-activity! broker tx timestamp-value)
+        (let [accepted
+              (reduce
+                (fn [accepted-count observation]
+                  (+ accepted-count
+                     (count
+                       (rows
+                         tx
+                         [(str "INSERT INTO " table-name
+                               " (event_id,schema_version,observed_at,agent,action,"
+                               "tool_category,outcome,duration_ms) VALUES (?,?,?,?,?,?,?,?)"
+                               " ON CONFLICT (event_id) DO NOTHING RETURNING cursor")
+                          (:event-id observation) (:schema-version observation)
+                          (:observed-at observation) (:agent observation)
+                          (:action observation) (:tool-category observation)
+                          (:outcome observation) (:duration-ms observation)]))))
+                0 observations)]
+          (prune-activity! broker tx timestamp-value)
+          {:accepted accepted
+           :duplicates (- (count observations) accepted)
+           :latest-cursor (or (:cursor
+                                (row tx [(str "SELECT max(cursor) AS cursor FROM "
+                                              table-name)]))
+                              0)})))))
+
+(defn- recent-activity
+  [^PostgresBroker broker {:keys [limit agent action] :or {limit 200}}]
+  (when-not (and (integer? limit) (<= 1 limit memory/max-activity-read-limit))
+    (throw (ex-info "limit is invalid" {:type :invalid-activity-query})))
+  ;; Reuse the in-memory validator's allowlists without exposing SQL values.
+  (when (and agent (not (contains? activity/agents agent)))
+    (throw (ex-info "agent is invalid" {:type :invalid-activity-query})))
+  (when (and action (not (contains? activity/actions action)))
+    (throw (ex-info "action is invalid" {:type :invalid-activity-query})))
+  (let [table-name (table (:schema broker) "activity_observations")
+        clauses (cond-> [] agent (conj "agent=?") action (conj "action=?"))
+        sql (str "SELECT event_id,schema_version,observed_at,agent,action,"
+                 "tool_category,outcome,duration_ms FROM " table-name
+                 (when (seq clauses) (str " WHERE " (str/join " AND " clauses)))
+                 " ORDER BY observed_at DESC,cursor DESC LIMIT ?")
+        params (cond-> [sql] agent (conj agent) action (conj action) true (conj limit))]
+    (transact
+      (:datasource broker)
+      (fn [tx]
+        (prune-activity! broker tx (now broker))
+        (mapv row->activity (rows tx params))))))
+
 (defn- summary [^PostgresBroker broker]
   (let [timestamp-value (now broker)
         runners (table (:schema broker) "runners")
         routes (table (:schema broker) "sessions")
         messages (table (:schema broker) "messages")
+        activity (table (:schema broker) "activity_observations")
         {:keys [value discard]}
         (transact
           (:datasource broker)
@@ -881,7 +998,8 @@
              :value {:status "ok" :storage "postgres"
                      :runner-count (:count (row tx [(str "SELECT count(*) FROM " runners)]))
                      :route-count (:count (row tx [(str "SELECT count(*) FROM " routes)]))
-                     :message-count (:count (row tx [(str "SELECT count(*) FROM " messages)]))}}))]
+                     :message-count (:count (row tx [(str "SELECT count(*) FROM " messages)]))
+                     :activity-count (:count (row tx [(str "SELECT count(*) FROM " activity)]))}}))]
     (discard-bodies! broker discard)
     value))
 
@@ -893,7 +1011,8 @@
   ([runner-tokens database
     {:keys [now-fn lease-ms message-ttl-ms ack-timeout-ms max-attempts
             metadata-retention-ms usage-retention-ms usage-future-skew-ms
-            max-usage-observations schema]
+            max-usage-observations activity-retention-ms
+            activity-future-skew-ms max-activity-observations schema]
      :or {now-fn #(System/currentTimeMillis)
           lease-ms memory/default-lease-ms
           message-ttl-ms memory/default-message-ttl-ms
@@ -902,7 +1021,10 @@
           metadata-retention-ms default-metadata-retention-ms
           usage-retention-ms memory/default-usage-retention-ms
           usage-future-skew-ms memory/default-usage-future-skew-ms
-          max-usage-observations memory/default-max-usage-observations}}]
+          max-usage-observations memory/default-max-usage-observations
+          activity-retention-ms memory/default-activity-retention-ms
+          activity-future-skew-ms memory/default-activity-future-skew-ms
+          max-activity-observations memory/default-max-activity-observations}}]
    (let [schema (schema-name (or schema (:schema database)))
          datasource (datasource database)]
      (try
@@ -922,7 +1044,10 @@
                           :metadata-retention-ms metadata-retention-ms
                           :usage-retention-ms usage-retention-ms
                           :usage-future-skew-ms usage-future-skew-ms
-                          :max-usage-observations max-usage-observations})
+                          :max-usage-observations max-usage-observations
+                          :activity-retention-ms activity-retention-ms
+                          :activity-future-skew-ms activity-future-skew-ms
+                          :max-activity-observations max-activity-observations})
        (catch Exception error
          (.close ^HikariDataSource datasource)
          (throw error))))))
@@ -973,6 +1098,10 @@
     (read-usage! broker request))
   (usage-forecast-inputs [broker]
     (usage-inputs broker))
+  (publish-activity-observations! [broker request]
+    (publish-activity! broker request))
+  (recent-activity-observations [broker request]
+    (recent-activity broker request))
   (message-metadata [broker runner-id token message-id]
     (message-status broker runner-id token message-id))
   (operator-message-metadata [broker message-id]
