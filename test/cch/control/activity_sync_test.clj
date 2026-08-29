@@ -61,3 +61,28 @@
       (is (nil? (cursor path)))
       (finally
         (fs/delete-tree directory)))))
+
+(deftest old-history-is-jumped-before-the-bounded-page
+  (let [directory (str (fs/create-temp-dir {:prefix "activity-history-test-"}))
+        path (str directory "/events.db")
+        now (str (java.time.Instant/now))
+        sent (atom nil)]
+    (try
+      (log/ensure-db! path)
+      (jdbc/execute!
+        {:dbtype "sqlite" :dbname path}
+        [(str "INSERT INTO events(timestamp,agent,hook_name,event_type) VALUES "
+              "('2020-01-01T00:00:00Z','claude-code','event-log','SessionStart'),"
+              "(?,'codex','event-log','UserPromptSubmit')")
+         now])
+      (with-redefs [remote/publish-activity-observations!
+                    (fn [_ observations]
+                      (reset! sent observations)
+                      {:accepted (count observations) :duplicates 0})]
+        (let [result (sync/tick! {} path 1)]
+          (is (= 1 (:inspected result)))
+          (is (= 1 (:sent result)))
+          (is (= "codex" (:agent (first @sent))))
+          (is (= 2 (cursor path)))))
+      (finally
+        (fs/delete-tree directory)))))

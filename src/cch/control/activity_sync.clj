@@ -4,7 +4,8 @@
             [cch.control.remote :as remote]
             [cch.log :as log]
             [next.jdbc :as jdbc]
-            [next.jdbc.result-set :as rs]))
+            [next.jdbc.result-set :as rs])
+  (:import [java.time Instant]))
 
 (def ^:const default-batch-size 200)
 (def ^:const publish-retention-buffer-ms (* 6 24 60 60 1000))
@@ -37,22 +38,34 @@
          after (or (:last_event_id
                      (row ds ["SELECT last_event_id FROM activity_sync_state WHERE singleton_id=1"]))
                    0)
+         now (System/currentTimeMillis)
+         cutoff (- now publish-retention-buffer-ms)
+         ;; A long-lived local event database can contain millions of rows.
+         ;; Jump the private source cursor over history that the broker would
+         ;; reject instead of walking it a few hundred rows per daemon tick.
+         stale-through (or (:stale_through
+                             (row ds [(str "SELECT coalesce("
+                                           "(SELECT min(id)-1 FROM events "
+                                           " WHERE id>? AND timestamp>=?),"
+                                           "(SELECT max(id) FROM events)) AS stale_through")
+                                      after (str (Instant/ofEpochMilli cutoff))]))
+                           after)
+         start-after (max after stale-through)
          source (rows ds [(str "SELECT id,timestamp,agent,hook_name,event_type,"
                                "tool_name,decision,elapsed_ms FROM events "
                                "WHERE id>? AND origin_id IS NULL ORDER BY id LIMIT ?")
-                          after batch-size])
-         now (System/currentTimeMillis)
+                          start-after batch-size])
          observations (->> source
                            (keep activity/from-local-event)
-                           (filter #(<= (- now publish-retention-buffer-ms)
+                           (filter #(<= cutoff
                                         (:observed-at %)
                                         (+ now publish-future-buffer-ms)))
                            vec)
-         through (or (:id (peek source)) after)
+         through (or (:id (peek source)) start-after)
          result (if (seq observations)
                   (remote/publish-activity-observations! config observations)
                   {:accepted 0 :duplicates 0})]
-     (when (seq source)
+     (when (> through after)
        (jdbc/execute!
          ds
          [(str "INSERT INTO activity_sync_state(singleton_id,last_event_id) "
