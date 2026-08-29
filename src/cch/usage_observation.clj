@@ -10,7 +10,7 @@
   (:import [java.math BigDecimal]
            [java.nio.charset StandardCharsets]
            [java.security MessageDigest]
-           [java.time Instant]))
+           [java.time Instant LocalDateTime ZoneOffset]))
 
 (def schema-version 1)
 
@@ -36,7 +36,16 @@
       (long value)
 
       (and (string? value) (not (str/blank? value)))
-      (.toEpochMilli (Instant/parse value))
+      ;; SQLite's strftime default is an ISO local timestamp in UTC without a
+      ;; zone suffix. New captures use epoch millis, but the compatibility
+      ;; importer must understand both that historical form and strict
+      ;; ISO-8601 instants.
+      (try
+        (.toEpochMilli (Instant/parse value))
+        (catch Exception _
+          (-> (LocalDateTime/parse value)
+              (.toInstant ZoneOffset/UTC)
+              .toEpochMilli)))
 
       :else nil)
     (catch Exception _ nil)))

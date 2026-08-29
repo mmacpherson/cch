@@ -40,6 +40,18 @@
         from-map  (usage/from-snapshot (assoc input :payload synthetic-payload))]
     (is (= from-map from-json))))
 
+(deftest accepts-sqlite-utc-timestamps-without-zone-suffix
+  (let [strict (usage/from-snapshot
+                 {:agent "claude-code"
+                  :observed-at "2026-05-27T19:00:00.123Z"
+                  :payload synthetic-payload})
+        sqlite (usage/from-snapshot
+                 {:agent "claude-code"
+                  :observed-at "2026-05-27T19:00:00.123"
+                  :payload synthetic-payload})]
+    (is (= strict sqlite)
+        "SQLite strftime timestamps are UTC even though they omit Z")))
+
 (deftest event-ids-are-deterministic-and-semantic
   (let [base {:agent "agy"
               :observed-at 1780000000123

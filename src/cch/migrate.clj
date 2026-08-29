@@ -93,7 +93,14 @@
              "  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),"
              "  last_context_id INTEGER NOT NULL DEFAULT 0 CHECK (last_context_id >= 0),"
              "  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now'))"
-             ");")}])
+             ");")}
+   ;; Early dogfooding advanced the cursor while historical SQLite timestamps
+   ;; (UTC without a trailing Z) were not yet parseable. Replay once after the
+   ;; parser fix; deterministic event ids make this safe on every database.
+   {:id "0009-replay-usage-backfill-with-sqlite-timestamps"
+    :up (str "UPDATE usage_backfill_state SET last_context_id=0,"
+             "updated_at=strftime('%Y-%m-%dT%H:%M:%f','now') "
+             "WHERE singleton_id=1;")}])
 
 (defn migration-ids
   "Ordered ids of every defined migration. Public so tests and
