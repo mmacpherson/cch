@@ -74,8 +74,29 @@
 (deftest human-pages-require-a-cloudflare-access-identity
   (let [handler (switchboard/handler (registered-broker) config)]
     (is (= 401 (:status (handler {:request-method :get :uri "/"}))))
+    (is (= 401 (:status (handler {:request-method :get
+                                  :uri "/favicon.svg"}))))
     (authenticated
       #(is (= 200 (:status (handler (access-request :get "/"))))))))
+
+(deftest hosted-mark-and-favicon-share-the-meta-runner-treatment
+  (authenticated
+    (fn []
+      (let [handler (switchboard/handler (registered-broker) config)
+            page (:body (handler (access-request :get "/")))
+            favicon (handler (access-request :get "/favicon.svg"))]
+        (is (str/includes? page "href=\"/favicon.svg\""))
+        (is (str/includes? page "fill=\"white\""))
+        (is (str/includes? page "stroke=\"currentColor\""))
+        (is (= 200 (:status favicon)))
+        (is (= "image/svg+xml" (get-in favicon [:headers "Content-Type"])))
+        (is (= "private, max-age=86400"
+               (get-in favicon [:headers "Cache-Control"])))
+        (is (str/includes? (get-in favicon [:headers "Content-Security-Policy"])
+                           "img-src 'self'"))
+        (is (str/includes? (:body favicon) "fill=\"white\""))
+        (is (str/includes? (:body favicon) "stroke=\"#059669\""))
+        (is (not (str/includes? (:body favicon) "synthetic")))))))
 
 (deftest switchboard-renders-only-sanitized-presence-and-native-authority
   (authenticated

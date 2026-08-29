@@ -14,6 +14,35 @@
    [:path {:d "M20.414 8.586 22 7"}]
    [:circle {:cx 19 :cy 10 :r 2}]])
 
+(def control-nav-mark
+  "Hosted control-plane variant of the hook mark. The outlined white badge
+  distinguishes the fleet/meta surface while preserving the runner identity."
+  [:svg {:xmlns "http://www.w3.org/2000/svg"
+         :width 24 :height 24 :viewBox "0 0 24 24"
+         :aria-hidden "true"}
+   [:rect {:x 1 :y 1 :width 22 :height 22 :rx 6
+           :fill "white" :stroke "currentColor" :stroke-width 1.5}]
+   [:g {:transform "translate(3 3) scale(.75)"
+        :fill "none" :stroke "currentColor" :stroke-width 2.4
+        :stroke-linecap "round" :stroke-linejoin "round"}
+    [:path {:d "m17.586 11.414-5.93 5.93a1 1 0 0 1-8-8l3.137-3.137a.707.707 0 0 1 1.207.5V10"}]
+    [:path {:d "M20.414 8.586 22 7"}]
+    [:circle {:cx 19 :cy 10 :r 2}]]])
+
+(def control-favicon-svg
+  "Standalone SVG for the authenticated hosted favicon route."
+  (str "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\" "
+       "viewBox=\"0 0 32 32\">"
+       "<rect x=\"1.5\" y=\"1.5\" width=\"29\" height=\"29\" rx=\"8\" "
+       "fill=\"white\" stroke=\"#059669\" stroke-width=\"2\"/>"
+       "<g transform=\"translate(4 4)\" fill=\"none\" stroke=\"#059669\" "
+       "stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+       "<path d=\"m17.586 11.414-5.93 5.93a1 1 0 0 1-8-8l3.137-3.137a.707.707 0 0 1 1.207.5V10\"/>"
+       "<path d=\"M20.414 8.586 22 7\"/>"
+       "<circle cx=\"19\" cy=\"10\" r=\"2\"/>"
+       "</g></svg>"))
+
 (def ^:private asset-version (str (System/currentTimeMillis)))
 
 (defn page-head
@@ -45,14 +74,14 @@
 (defn nav-bar
   "Shared navigation. `tabs` is a sequence of [key label href]; `status` and
   `actions` occupy the quiet right-hand status area."
-  [{:keys [active tabs status actions]}]
+  [{:keys [active tabs status actions mark]}]
   (let [tab (fn [[key label href]]
               (if (= active key)
                 [:span.nav-tab.active {:aria-current "page"} label]
                 [:a.nav-tab {:href href} label]))]
     [:nav.nav-wrap
      [:a.nav-brand {:href "/"}
-      [:span.nav-icon nav-mark]
+      [:span.nav-icon (or mark nav-mark)]
       "cch"]
      [:div.nav-tabs (map tab tabs)]
      [:div.nav-status

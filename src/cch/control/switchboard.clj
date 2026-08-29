@@ -18,7 +18,7 @@
 (def ^:private security-headers
   {"Cache-Control" "no-store"
    "Content-Security-Policy"
-   (str "default-src 'none'; style-src 'unsafe-inline'; "
+   (str "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
         "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
    "Referrer-Policy" "no-referrer"
    "X-Content-Type-Options" "nosniff"
@@ -32,6 +32,13 @@
     :body body})
   ([status headers body]
    {:status status :headers (merge security-headers headers) :body body}))
+
+(defn- favicon-response []
+  {:status 200
+   :headers (assoc security-headers
+                   "Content-Type" "image/svg+xml"
+                   "Cache-Control" "private, max-age=86400")
+   :body web/control-favicon-svg})
 
 (defn- redirect
   ([location] (redirect location nil))
@@ -138,6 +145,7 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
            [:meta {:charset "utf-8"}]
            [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
            [:title (str "cch · " title)]
+           [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
            [:style (hic/raw (web/base-css))]
            [:style (hic/raw hosted-css)]]
           [:body
@@ -145,6 +153,7 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
             (web/nav-bar
               {:active active
                :tabs fleet-tabs
+               :mark web/control-nav-mark
                :status "control plane · online"
                :actions
                (when identity
@@ -446,11 +455,15 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
   [b config]
   (let [usage-cache (atom nil)]
     (fn [{:keys [request-method uri] :as request}]
-      (when (contains? #{"/" "/agents" "/events" "/usage" "/messages" "/sessions/alias" "/logout"} uri)
+      (when (contains? #{"/" "/agents" "/events" "/usage" "/favicon.svg"
+                         "/messages" "/sessions/alias" "/logout"} uri)
         (try
         (let [identity (auth/authenticate! config request)
               identity (assoc identity :csrf (auth/csrf-token config identity))]
           (cond
+            (and (= :get request-method) (= "/favicon.svg" uri))
+            (favicon-response)
+
             (and (= :get request-method) (= "/" uri))
             (response 200 (overview-page b identity))
 
