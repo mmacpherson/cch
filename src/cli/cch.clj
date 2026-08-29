@@ -1,5 +1,5 @@
 (ns cli.cch
-  "cch — Claude Code Hooks CLI.
+  "cch — Common Craft Hall CLI.
 
   The command surface is DATA: `commands` is an ordered table mapping each
   subcommand to its description, handler, and (optional) tools.cli option spec.
@@ -80,7 +80,7 @@
   [nil "--help" "Show this command's options"])
 
 (defn print-usage []
-  (println "cch — Claude Code Hooks")
+  (println "cch — Common Craft Hall")
   (println)
   (println "Usage: cch <command> [args]")
   (println)

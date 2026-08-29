@@ -30,6 +30,7 @@
 
 (deftest no-command-prints-usage
   (let [out (with-out-str (cch/-main))]
+    (is (re-find #"cch — Common Craft Hall" out))
     (is (re-find #"Usage: cch" out))))
 
 (deftest help-flag-prints-per-command-summary

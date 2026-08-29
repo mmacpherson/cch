@@ -1,6 +1,6 @@
 [Unit]
 Description=cch HTTP dispatcher + dashboard (jlink runtime)
-Documentation=https://github.com/mmacpherson/claude-code-hooks
+Documentation=https://github.com/mmacpherson/cch
 After=network.target
 
 [Service]

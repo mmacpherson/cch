@@ -2,7 +2,12 @@
 
 ## Project Overview
 
-`cch` is a Babashka-based framework for Claude Code hooks — the lifecycle events (PreToolUse, PostToolUse, SessionStart, etc.) that Claude Code fires as shell commands.
+`cch` (Common Craft Hall) is a Clojure-based, local-first control plane for
+collaborating coding agents. It coordinates native Claude Code and Codex
+sessions across paired runners and incorporates supported AGY observations,
+while leaving execution, credentials, transcripts, approvals, and terminal
+control with provider runtimes. Claude Code hooks remain one local policy and
+observation capability.
 
 ## Public Repo — No Personal Info
 
@@ -33,17 +38,20 @@ clj -M:server              # Run the dispatcher (HTTP + nREPL)
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 **Key concepts:**
-- **Three execution contexts:** hook (hot, <50ms), CLI (human), dev server (long-running)
-- **`defhook` macro** generates `-main` with middleware (timing, error handling, logging)
-- **Pure logic functions** for testability — `check-scope`, not `-main`, is what you test
-- **SQLite event log** at `~/.local/share/cch/events.db` via fire-and-forget sqlite3 CLI
-- **Settings.json management** with atomic writes and `# cch:name` tagging
+- **Native authority:** providers own execution, credentials, transcripts, approvals, and rich control
+- **Runner-local authority:** SQLite holds detailed events, hook policy, and usage observations
+- **Fleet coordination:** a paired runner and Postgres broker exchange sanitized presence, ordinary text, and normalized read models
+- **Narrow federation:** purpose-built activity and usage observations replace raw table copying
+- **`defhook` macro:** local hook decisions use shared timing, error handling, and logging middleware
+- **Atomic ownership:** cch reconciles only its tagged provider configuration entries
 
 ## Source Layout
 
 | Path | Purpose |
 |------|---------|
-| `src/cch/` | Framework core — protocol, middleware, config, logging |
+| `src/cch/` | Local server, storage, normalized observations, and control plane |
+| `src/cch/control/` | Broker, paired runner, native adapters, MCP, and fleet web application |
+| `src/cch/agents/` | Provider observation adapters |
 | `src/hooks/` | Built-in hook implementations |
 | `src/cli/` | CLI commands — init, install, list, log |
 | `test/` | Mirrors src/ — unit + integration tests |
@@ -63,14 +71,15 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 - Pure functions for all decision logic (no I/O in check functions)
 - Clojure idioms: data-first, prefer `cond`/`when` over `if` chains
 - Tests mirror source structure under `test/`
-- Integration tests run hooks as subprocesses (like Claude Code does)
+- Integration tests exercise provider-shaped hook and native-control boundaries
 
 ## Important Constraints
 
 - Hook execution budget: <50ms per dispatch — hooks run in-process inside
   the long-running JVM server (HTTP-type entries in settings.json POST to
   localhost), so JVM startup is paid once at boot, not per hook
-- SQLite logging must be fire-and-forget (non-blocking)
+- Raw provider event payloads remain runner-local; fleet schemas must be normalized and privacy-bounded
+- Cross-agent input is ordinary text only; never broaden it to credentials, approvals, commands, or PTY input
 - Settings.json writes must be atomic (tmp + rename)
 
 

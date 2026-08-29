@@ -1,4 +1,4 @@
-# Pre-commit hooks for cch (Claude Code Hooks)
+# Pre-commit hooks for cch (Common Craft Hall)
 # Install: pre-commit install
 # Run manually: pre-commit run --all-files
 

@@ -1,4 +1,4 @@
-# cch — Claude Code Hooks framework
+# cch — Common Craft Hall
 
 # Show available commands
 help:

@@ -78,7 +78,7 @@
       (do
         (spit project-config
               (str "# cch project configuration\n"
-                   "# See: https://github.com/mmacpherson/claude-code-hooks\n"
+                   "# See: https://github.com/mmacpherson/cch\n"
                    "\n"
                    "# hooks:\n"
                    "#   scope-lock:\n"

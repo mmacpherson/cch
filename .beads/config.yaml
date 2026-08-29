@@ -53,7 +53,7 @@
 # - github.org
 # - github.repo
 
-sync.remote: "git+ssh://git@github.com/mmacpherson/claude-code-hooks.git"
+sync.remote: "git+ssh://git@github.com/mmacpherson/cch.git"
 export:
     auto: false
 dolt:

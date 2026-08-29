@@ -1,289 +1,186 @@
-# cch — Claude Code Hooks
+# cch — Common Craft Hall
 
-A Clojure framework for authoring, installing, and debugging [Claude Code](https://claude.ai/code) hooks. Replaces ad-hoc shell scripts with composable, testable, observable functions running inside a long-lived JVM dispatcher.
+**A local-first control plane for collaborating coding agents.**
 
-**Why a long-running server?** Hooks fire on every tool call. Claude Code's HTTP hook transport POSTs each event to `localhost:8888`, so JVM startup is paid once at boot — every hook dispatch is a sub-millisecond function call after that. Clojure's data-first idiom is a natural fit for JSON-in/JSON-out hooks.
+cch discovers and coordinates native Claude Code and Codex sessions across one
+or more machines, and incorporates supported AGY lifecycle and usage
+observations. Execution, credentials, transcripts, approvals, and terminal
+control remain with each provider's native runtime.
 
-## Quick Start
+The project began as a Claude Code hook framework. Hooks remain a first-class
+capability, but they are now one part of a broader system for agent presence,
+ordinary-text routing, execution events, and shared usage forecasts.
 
-```bash
-# Clone and set up
-git clone <repo-url> ~/projects/claude-code-hooks
-cd ~/projects/claude-code-hooks
-clj -M:cli init
+## What cch does
 
-# See available hooks
-clj -M:cli list
+- Registers live native agent sessions automatically.
+- Gives sessions readable names while routing by opaque identifiers.
+- Sends ordinary text between supported agents on the same or different
+  paired runners.
+- Opens a provider's exact native session URL when the provider advertises one.
+- Presents runner-local events, hooks, and usage in one web application.
+- Presents fleet-wide agents, normalized activity, and usage in an authenticated
+  operator application.
+- Keeps raw provider data local unless a deliberately normalized observation is
+  part of the fleet contract.
 
-# Install a hook (project-local by default)
-clj -M:cli install scope-lock
+cch is not an agent runtime, terminal proxy, transcript store, or provider
+credential broker. If the control plane is unavailable, native agents continue
+to run locally.
 
-# Check event history
-clj -M:cli log
+## Architecture at a glance
+
+```text
+Claude / Codex / AGY
+        │ native hooks, MCP, app-server APIs
+        ▼
+local cch server ─── local SQLite event and usage history
+        │
+        │ outbound authenticated runner connection
+        ▼
+central broker ───── Postgres presence and delivery metadata
+        │
+        └────────── authenticated fleet web application
 ```
+
+Each machine is a **runner**. A runner discovers its local sessions and makes
+only sanitized presence and supported observations available to the broker.
+Messages are leased to a destination runner, delivered through the provider's
+native input mechanism, acknowledged idempotently, and not retained as durable
+message bodies.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the system boundaries and
+[the proof-of-concept record](docs/native-control-plane-poc.md) for the tested
+Claude/Codex vertical slice.
+
+## Quick start
 
 ### Prerequisites
 
-- JDK 21+ and the [Clojure CLI](https://clojure.org/guides/install_clojure) (`clj`)
-- SQLite3 CLI (usually pre-installed on Linux/macOS)
+- JDK 21+
+- [Clojure CLI](https://clojure.org/guides/install_clojure) (`clj`)
+- SQLite
+- At least one supported provider CLI
 
-## How It Works
-
-Claude Code hooks are shell commands that run before or after tool calls. They receive JSON on stdin describing the tool call and return JSON on stdout with a permission decision.
-
-**Without cch:** You write shell scripts or raw Babashka one-offs, wire them manually into `settings.json`, and debug by tailing `/tmp/` log files.
-
-**With cch:** You write a pure Clojure function, wrap it with `defhook`, and the framework handles JSON protocol, error handling, timing, and centralized logging automatically.
-
-```clojure
-(ns hooks.my-hook
-  (:require [cch.core :refer [defhook]]))
-
-(defhook my-hook
-  "Block edits to secret files."
-  {}
-  [input]
-  (when (re-find #"\.env$" (get-in input [:tool_input :file_path] ""))
-    {:decision :deny :reason "Cannot edit .env files"}))
-```
-
-That's it. The `defhook` macro generates a `-main` entry point with middleware for timing, error handling, and SQLite event logging.
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `cch init` | Set up global config, SQLite database, and project config |
-| `cch install <hook>` | Wire a hook into `settings.local.json` (or `--global`, or `--http`) |
-| `cch uninstall <hook>` | Remove a hook from settings |
-| `cch list` | Show available hooks with installation status |
-| `cch log` | Query event history from SQLite |
-| `cch serve` | Run the HTTP dispatcher + web dashboard |
-| `cch install-service` | Install OS-native auto-start (systemd/launchd) for `cch serve` |
-| `cch uninstall-service` | Remove the auto-start unit/plist |
-
-### AGY (Antigravity CLI) usage
-
-AGY exposes quota data through its documented status-line JSON feed. Install
-the cch adapter once, then open the **AGY** source on `/usage`:
+### Install the local application
 
 ```bash
-cch install --agy
-```
-
-The adapter posts snapshots to the local dispatcher without blocking AGY's
-TUI. `cch uninstall --agy` restores the status-line configuration that was
-present before installation.
-
-### Log Queries
-
-```bash
-cch log                          # Last 20 events
-cch log --hook=scope-lock        # Filter by hook
-cch log --decision=deny          # Show all denials
-cch log --session=abc123         # Filter by session
-cch log --limit=50               # More results
-```
-
-## Built-in Hooks
-
-| Hook | Event | Matcher | Description |
-|------|-------|---------|-------------|
-| `scope-lock` | PreToolUse | Edit\|Write | Enforce file edit scope per git worktree |
-| `command-audit` | PostToolUse | Bash | Log every Bash command; flag configured regex patterns as advisory context |
-| `push-gate` | PreToolUse | Bash | Run configured lint/test gates before `git push`; deny if any fail |
-| `event-log` | *(24 events)* | *(all)* | Universal observer — logs every Claude Code event to SQLite |
-
-Planned (not yet implemented): `protect-files`, `format-on-save`, `slow-confirm`.
-
-### The universal observer
-
-`cch install event-log` subscribes to every Claude Code event cch supports — session boundaries, prompt submissions, tool calls (pre + post), task lifecycle, config changes, compactions, MCP elicitations, and more. Each invocation writes a row to `~/.local/share/cch/events.db` with the event type, timestamp, and the full input payload (as JSON in the `extra` column). Query with `cch log --event=<type>` or directly via `sqlite3`.
-
-**Latency caveat.** Each Claude Code event triggers a fresh Babashka process (~50ms). Subscribing to all 24 events is imperceptible on a casual workflow but noticeable on heavy tool loops (every Bash / Edit fires two events). Two options:
-
-- Install a subset: `cch install event-log --exclude=PreToolUse,PostToolUse,PostToolUseFailure`
-- Wait for the HTTP dispatcher (tracked in `claude-code-hooks-bq2`), which eliminates per-event startup cost.
-
-**Payload capture.** The `extra` column stores the full event input as JSON — including `tool_input` for Bash/Edit/Write (commands, file paths, contents), `prompt` text from UserPromptSubmit, and `last_assistant_message` from Stop. It's a local file on your machine; no data leaves the host. Be aware of this before using cch in a regulated environment.
-
-## `cch serve` — HTTP dispatcher + dashboard
-
-```bash
-cch serve                        # default: 127.0.0.1:8888
-cch serve --port 9000 --host 127.0.0.1
-```
-
-Runs a long-lived Babashka HTTP server that dispatches hooks in-process and serves a simple dashboard.
-
-**Why:** command-mode hooks spawn a fresh Babashka per event (~50ms of bb startup). With the observer installed across 24 events, that adds up. Installing a hook in HTTP mode collapses dispatch latency to a few milliseconds because the JVM is already running.
-
-```bash
-cch serve &
-cch install event-log --global --http   # now fires against http://127.0.0.1:8888/hooks/event-log
-```
-
-**Dashboard** at `http://127.0.0.1:8888/` — server-rendered (no client JS), styled with Bulma 1.0 + Inter. Filter by repo, hook, event type, session, decision, or time range. Click a row to expand the full event payload. `?open=all` expands every row at once; refresh manually with the link in the meta area. Dark mode follows your OS preference.
-
-**Server routes:**
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/hooks/<name>` | Dispatches to the named hook's composed handler. Returns the same JSON shape command-mode produces. |
-| `GET`  | `/` | Dashboard HTML (events table + filters). |
-| `GET`  | `/health` | JSON liveness check and registered-hooks list. |
-
-Server binds to `127.0.0.1` only — never exposed beyond localhost.
-
-### Running `cch serve` as a service
-
-For HTTP-installed hooks to work reliably across reboots and crashes, `cch serve` needs to be a managed service. `cch install-service` writes the canonical unit/plist for your OS:
-
-```bash
+git clone <repository-url> cch
+cd cch
+just build
+scripts/install
+cch init
+cch install --all
+cch control install
 cch install-service
-
-# Linux — activate:
-systemctl --user enable --now cch
-
-# macOS — activate:
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.cch.server.plist
+# Run the OS activation command printed by cch install-service.
 ```
 
-Without this, HTTP-installed hooks fail with ECONNREFUSED any time the server isn't running. `cch install <hook> --http` probes the server at install time and prints a warning if it's not reachable, so you don't silently install into a broken state.
+`cch install --all` detects available providers and installs cch-owned lifecycle
+observation entries. `cch control install` adds automatic Claude/Codex session
+registration and their narrowly scoped MCP routing tools. Neither command
+enables a provider's proprietary Remote Control feature, copies provider
+credentials, or requires per-session pairing.
 
-Windows service support isn't shipped yet — if you need it, say so in an issue and we'll prioritize.
+Open the runner-local application at `http://127.0.0.1:8888/` after starting
+the installed service. Fleet operation additionally requires a deployed broker
+and a one-time runner pairing; deployment credentials and machine identities do
+not belong in this repository.
 
-## Writing Custom Hooks
+## Command surface
 
-### The Pattern
+| Command | Purpose |
+|---------|---------|
+| `cch init` | Initialize local state and project configuration |
+| `cch install --all` | Provision every supported provider found on this runner |
+| `cch uninstall` | Remove cch-owned provider configuration |
+| `cch list` | List built-in hooks and their state |
+| `cch log` | Query local execution events |
+| `cch attention` | Report time agents spent waiting for the operator |
+| `cch doctor` | Check local provider observation wiring |
+| `cch control install` | Install automatic session registration and routing tools |
+| `cch control pair` | Persist a one-time runner credential and install its service |
+| `cch control sessions` | List sanitized native session presence |
+| `cch control send` | Send ordinary text to a registered session |
+| `cch control doctor` | Check pairing, supervision, and native capabilities |
+| `cch serve` | Run the local dispatcher and web application |
+| `cch install-service` | Install OS-native supervision for the local server |
 
-Every hook follows a two-part structure:
+Run `cch <command> --help` or `cch control --help` for details.
 
-1. **Pure logic function** — takes data, returns a decision. No I/O. Independently testable.
-2. **`defhook` wrapper** — handles JSON protocol, middleware, and entry point generation.
+## Hooks and observations
 
-```clojure
-(ns hooks.my-custom-hook
-  (:require [cch.core :refer [defhook]]
-            [cch.protocol :as proto]))
+Hooks are local policy and observation functions. They run inside the long-lived
+cch server, so a JVM is not started for every provider event.
 
-;; 1. Pure logic — easy to test
-(defn check-something [file-path tool-name]
-  (when (and (= tool-name "Write")
-             (re-find #"migrations/" (or file-path "")))
-    {:decision :ask
-     :reason   "Writing to migrations/ — are you sure?"}))
+Built-in examples include:
 
-;; 2. Wire it up with defhook
-(defhook my-custom-hook
-  "Prompt before writing migration files."
-  {}
-  [input]
-  (check-something
-    (proto/extract-file-path input)
-    (:tool_name input)))
-```
+| Hook | Role |
+|------|------|
+| `scope-lock` | Ask before editing outside the configured worktree scope |
+| `protect-files` | Deny edits to configured sensitive files |
+| `command-guard` | Apply command policy before shell execution |
+| `push-gate` | Run configured quality gates before an agent pushes |
+| `context-governor` | Observe and manage context pressure |
+| `event-log` | Record supported lifecycle events locally |
 
-### Testing
-
-```clojure
-(ns hooks.my-custom-hook-test
-  (:require [clojure.test :refer [deftest is]]
-            [hooks.my-custom-hook :as hook]))
-
-(deftest test-allows-normal-writes
-  (is (nil? (hook/check-something "/repo/src/app.py" "Write"))))
-
-(deftest test-asks-for-migrations
-  (is (= :ask (:decision (hook/check-something "/repo/migrations/001.sql" "Write")))))
-```
-
-Run tests: `just test`
-
-### Hook Decisions
-
-Your hook function returns one of:
-
-| Return | Effect |
-|--------|--------|
-| `nil` | Allow (fastest — no output, exit 0) |
-| `{:decision :allow :reason "..."}` | Explicit allow with reason |
-| `{:decision :ask :reason "..."}` | Prompt user for permission |
-| `{:decision :deny :reason "..."}` | Block the tool call |
-
-### Claude Code Input (stdin JSON)
-
-The input map your hook receives includes:
-
-```clojure
-{:session_id      "abc123"
- :cwd             "/path/to/project"
- :tool_name       "Edit"           ; Edit, Write, Bash, Read, etc.
- :tool_input      {:file_path "/path/to/file.py"
-                   :old_string "..."
-                   :new_string "..."}
- :permission_mode "default"
- :hook_event_name "PreToolUse"
- :cch/hook-name   "my-custom-hook" ; injected by defhook
- }
-```
-
-## Configuration
-
-Two tiers, merged in order (project wins over global):
-
-| Tier | File | Purpose |
-|------|------|---------|
-| Global | `~/.config/cch/config.yaml` | User preferences across all projects |
-| Project | `.cch-config.yaml` | Shared project settings (commit this) |
-
-Hook-specific settings live under a `hooks:` section keyed by hook name, pre-commit-style.
-
-### Example: scope-lock narrowing
+Hook policy is configured globally in `~/.config/cch/config.yaml` or per project
+in `.cch-config.yaml`:
 
 ```yaml
-# .cch-config.yaml (at repo root, committed)
 hooks:
   scope-lock:
     allowed-paths:
       - src/
-      - .claude/
-```
-
-### Example: push-gate
-
-```yaml
-# .cch-config.yaml
-hooks:
+      - test/
   push-gate:
     gates:
       - just lint-all
       - just test
 ```
 
-Before Claude runs `git push`, cch runs each gate from the worktree root in order. A non-zero exit denies the push and surfaces the tail of the failing gate's output as the denial reason. No gates configured → pass-through. Only gates Claude-initiated pushes; you pushing from your own terminal is unaffected.
+Provider lifecycle payloads may include prompts, commands, paths, and other
+sensitive data. The complete event log stays in the runner's local SQLite
+database. Fleet federation publishes purpose-built activity and usage
+observations rather than copying the raw event tables.
 
-## Architecture
+## Native authority and security boundaries
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design — execution contexts, middleware chain, SQLite logging, and the settings.json management approach.
+- Provider logins remain on the runner that executes the provider CLI.
+- cch accepts ordinary text for agent-to-agent routing, not terminal input,
+  approval decisions, commands, or credentials.
+- Runners authenticate to the broker with one-time machine pairing credentials;
+  starting an agent does not create another login chore.
+- The hosted operator application has a separate human authentication boundary.
+- Broker storage contains presence, delivery state, aliases, and normalized
+  observations; it is not the source of truth for native session history.
+- Exact session URLs link back to native provider interfaces for transcripts,
+  approvals, and richer control.
+
+## Repository-name migration
+
+The project and repository were formerly named `claude-code-hooks`. The CLI,
+configuration directory, data directory, service names, and Clojure namespaces
+were already `cch`, so no local state migration is required.
+
+For an existing checkout:
+
+```bash
+git remote set-url origin git@github.com:<owner>/cch.git
+# Renaming the checkout directory is optional. If you do, refresh installed links:
+scripts/install
+```
+
+Existing Beads issue identifiers retain their historical prefix. They are
+stable record identifiers, not the current product name.
 
 ## Development
 
 ```bash
-# Run tests
 just test
-
-# Test a hook manually (subprocess, like Claude Code does)
-echo '{"cwd":"/repo","tool_input":{"file_path":"/etc/passwd"}}' \
-  | clj -M -m hooks.scope-lock
-
-# Query the event log
-sqlite3 ~/.local/share/cch/events.db "SELECT * FROM events ORDER BY id DESC LIMIT 10;"
+just lint-all
+clj -M:cli --help
 ```
 
-## Roadmap
-
-- [ ] **Dashboard** — httpkit web UI on localhost:7777 for real-time event viewing
-- [ ] **Dev server** — `cch dev` with nREPL + file watching + dashboard
-- [ ] **bbin distribution** — `bbin install` for global CLI installation
-- [ ] **More hooks** — protect-files, command-audit, format-on-save, slow-confirm
+This is a public repository. Tests, fixtures, documentation, issue records, and
+commit messages must use synthetic identities, hosts, paths, URLs, and secrets.

@@ -3,7 +3,7 @@
 Run the cch test suite and report results.
 
 ```bash
-cd ~/projects/claude-code-hooks && just test
+cd "$(git rev-parse --show-toplevel)" && just test
 ```
 
 If tests fail, read the failing test file and the corresponding source to diagnose. Fix issues and re-run until green.
