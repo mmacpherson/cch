@@ -64,7 +64,24 @@
              "  table_name      TEXT PRIMARY KEY,"
              "  last_shipped_id INTEGER NOT NULL DEFAULT 0,"
              "  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now'))"
-             ");")}])
+             ");")}
+   {:id "0006-usage-observations"
+    :up (str "CREATE TABLE IF NOT EXISTS usage_observations ("
+             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  event_id TEXT NOT NULL UNIQUE,"
+             "  schema_version INTEGER NOT NULL,"
+             "  observed_at INTEGER NOT NULL,"
+             "  agent TEXT NOT NULL,"
+             "  window_key TEXT NOT NULL CHECK (window_key IN ('five_hour','seven_day')),"
+             "  used_percentage REAL NOT NULL CHECK (used_percentage >= 0 AND used_percentage <= 100),"
+             "  resets_at INTEGER NOT NULL,"
+             "  publishable INTEGER NOT NULL DEFAULT 1 CHECK (publishable IN (0,1)),"
+             "  received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now'))"
+             ");"
+             "CREATE INDEX IF NOT EXISTS idx_usage_observations_forecast "
+             "ON usage_observations(agent, window_key, resets_at, observed_at);"
+             "CREATE INDEX IF NOT EXISTS idx_usage_observations_publish "
+             "ON usage_observations(publishable, id);")}])
 
 (defn migration-ids
   "Ordered ids of every defined migration. Public so tests and

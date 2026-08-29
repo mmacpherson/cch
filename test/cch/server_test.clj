@@ -418,7 +418,21 @@
                     (json/parse-string true)
                     first)]
           (is (= 19.0 (:used_pct r)))
-          (is (= (+ 1 122 800 191721) (:current_tokens r))))))))
+          (is (= (+ 1 122 800 191721) (:current_tokens r)))))
+      (testing "canonical quota data is also materialized narrowly"
+        (let [r (-> (p/sh ["sqlite3" "-json" *tmp-db*
+                            (str "SELECT agent, window_key, used_percentage, resets_at "
+                                 "FROM usage_observations "
+                                 "WHERE resets_at=1777518000 LIMIT 1;")])
+                    :out
+                    str/trim
+                    (json/parse-string true)
+                    first)]
+          (is (= {:agent "claude-code"
+                  :window_key "seven_day"
+                  :used_percentage 29.0
+                  :resets_at 1777518000}
+                 r)))))))
 
 (deftest test-context-snapshot-normalizes-agy-quota
   (testing "AGY's documented weekly quota shape becomes canonical 7d data"
@@ -452,7 +466,21 @@
         (is (< (Math/abs (- 6.22 (:used r))) 0.000001))
         (is (= (.getEpochSecond
                  (java.time.Instant/parse "2026-08-02T07:50:32Z"))
-               (:resets_at r)))))))
+               (:resets_at r))))
+      (let [r (-> (p/sh ["sqlite3" "-json" *tmp-db*
+                          (str "SELECT agent, window_key, used_percentage, resets_at "
+                               "FROM usage_observations "
+                               "WHERE agent='agy' AND resets_at="
+                               (.getEpochSecond
+                                 (java.time.Instant/parse "2026-08-02T07:50:32Z"))
+                               " LIMIT 1;")])
+                  :out
+                  str/trim
+                  (json/parse-string true)
+                  first)]
+        (is (= "agy" (:agent r)))
+        (is (= "seven_day" (:window_key r)))
+        (is (< (Math/abs (- 6.22 (:used_percentage r))) 0.000001))))))
 
 (deftest test-context-snapshot-coalesces-identical-agy-payloads
   (testing "repeated status-line emissions are acknowledged but stored once"

@@ -23,6 +23,7 @@
             [cch.db :as db]
             [cch.federation :as fed]
             [cch.migrate :as migrate]
+            [cch.usage-observation :as usage]
             [clojure.java.io :as io]
             [clojure.string :as str]
             [honey.sql :as sql]))
@@ -263,17 +264,36 @@
   "Insert a context window snapshot. Non-blocking, same write-path as log-event!.
   :agent defaults to 'claude-code'; pass 'codex' (etc.) for cross-CLI snapshots."
   [{:keys [session-id used-pct current-tokens window-size model-id payload agent]}]
-  (let [path   (db/db-path)
-        insert (format
-                 "INSERT INTO context_snapshots (agent, session_id, used_pct, current_tokens, window_size, model_id, payload, node) VALUES (%s,%s,%s,%s,%s,%s,%s,%s);"
-                 (sql-value (or agent "claude-code"))
-                 (sql-value session-id)
-                 (if used-pct (str used-pct) "NULL")
-                 (if current-tokens (str (long current-tokens)) "NULL")
-                 (if window-size (str (long window-size)) "NULL")
-                 (sql-value model-id)
-                 (sql-value payload)
-                 (sql-value (fed/node-name)))
+  (let [path        (db/db-path)
+        agent       (or agent "claude-code")
+        observed-at (System/currentTimeMillis)
+        legacy      (format
+                      "INSERT INTO context_snapshots (agent, session_id, used_pct, current_tokens, window_size, model_id, payload, node) VALUES (%s,%s,%s,%s,%s,%s,%s,%s);"
+                      (sql-value agent)
+                      (sql-value session-id)
+                      (if used-pct (str used-pct) "NULL")
+                      (if current-tokens (str (long current-tokens)) "NULL")
+                      (if window-size (str (long window-size)) "NULL")
+                      (sql-value model-id)
+                      (sql-value payload)
+                      (sql-value (fed/node-name)))
+        observations (usage/from-snapshot {:agent agent
+                                           :observed-at observed-at
+                                           :payload payload})
+        normalized   (apply str
+                            (for [{:keys [event-id schema-version observed-at agent
+                                         window used-percentage resets-at]}
+                                  observations]
+                              (format
+                                "INSERT OR IGNORE INTO usage_observations (event_id, schema_version, observed_at, agent, window_key, used_percentage, resets_at, publishable) VALUES (%s,%d,%d,%s,%s,%s,%d,1);"
+                                (sql-value event-id)
+                                schema-version
+                                observed-at
+                                (sql-value agent)
+                                (sql-value window)
+                                (str used-percentage)
+                                resets-at)))
+        insert       (str "BEGIN;" legacy normalized "COMMIT;")
         fallback-sql (str "PRAGMA busy_timeout=5000; " insert)]
     (try
       (ensure-db-once! path)

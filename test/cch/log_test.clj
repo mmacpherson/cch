@@ -5,6 +5,7 @@
             [cheshire.core :as json]
             [babashka.fs :as fs]
             [babashka.process :as p]
+            [clojure.set]
             [clojure.string]))
 
 (deftest test-ensure-db
@@ -16,7 +17,8 @@
         (is (fs/exists? db-path))
         ;; Verify tables exist
         (let [result (p/sh ["sqlite3" db-path ".tables"])]
-          (is (re-find #"events" (:out result)))))
+          (is (re-find #"events" (:out result)))
+          (is (re-find #"usage_observations" (:out result)))))
 
       (testing "idempotent — second call doesn't error"
         (log/ensure-db! db-path))
@@ -211,6 +213,62 @@
                       clojure.string/trim
                       Long/parseLong)]
             (is (= 25 n) "all queued inserts must reach the DB after stop-writer!")))
+        (finally
+          (fs/delete-tree tmp-dir))))))
+
+(deftest context-snapshot-dual-materializes-usage-observations
+  (testing "one queued capture preserves the legacy row and adds narrow rows"
+    (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-usage-writer-"}))
+          db      (str tmp-dir "/test.db")
+          payload (json/generate-string
+                    {:session_id "synthetic-session"
+                     :model {:id "synthetic-model"}
+                     :rate_limits
+                     {:five_hour {:used_percentage 9.25
+                                  :resets_at 1780001000}
+                      :seven_day {:used_percentage 31
+                                  :resets_at 1780100000}}})]
+      (try
+        (with-redefs [db/db-path (fn [] db)]
+          (log/ensure-db! db)
+          (log/start-writer!)
+          (try
+            (log/log-context-snapshot!
+              {:session-id "synthetic-session"
+               :model-id "synthetic-model"
+               :payload payload
+               :agent "codex"})
+            (finally
+              (log/stop-writer!)))
+          (let [legacy (-> (p/sh ["sqlite3" "-json" db
+                                  "SELECT session_id, model_id, payload, agent FROM context_snapshots;"])
+                           :out
+                           (json/parse-string true))
+                normalized (-> (p/sh ["sqlite3" "-json" db
+                                      (str "SELECT schema_version, agent, window_key, "
+                                           "used_percentage, resets_at, publishable "
+                                           "FROM usage_observations ORDER BY window_key;")])
+                               :out
+                               (json/parse-string true))
+                columns (-> (p/sh ["sqlite3" db
+                                   "SELECT name FROM pragma_table_info('usage_observations');"])
+                            :out
+                            clojure.string/split-lines
+                            set)]
+            (is (= [{:session_id "synthetic-session"
+                     :model_id "synthetic-model"
+                     :payload payload
+                     :agent "codex"}]
+                   legacy)
+                "legacy context snapshot behavior remains intact")
+            (is (= ["five_hour" "seven_day"] (mapv :window_key normalized)))
+            (is (= [9.25 31.0] (mapv :used_percentage normalized)))
+            (is (every? #(= 1 (:schema_version %)) normalized))
+            (is (every? #(= 1 (:publishable %)) normalized))
+            (is (empty? (clojure.set/intersection
+                          columns
+                          #{"session_id" "node" "account" "model_id" "payload"
+                            "cwd" "file_path"})))))
         (finally
           (fs/delete-tree tmp-dir))))))
 

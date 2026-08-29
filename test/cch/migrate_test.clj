@@ -55,7 +55,11 @@
             "agent migrations baselined; later migrations applied")
         (is (contains? (column-names db "events") "agent"))
         (is (contains? (column-names db "context_snapshots") "agent"))
-        (is (contains? (column-names db "events") "node"))))))
+        (is (contains? (column-names db "events") "node"))
+        (is (= #{"id" "event_id" "schema_version" "observed_at" "agent"
+                 "window_key" "used_percentage" "resets_at" "publishable"
+                 "received_at"}
+               (column-names db "usage_observations")))))))
 
 (deftest runs-pending-migrations-on-pre-existing-db-without-agent-cols
   (testing "DB that pre-dates the agent column gets both migrations applied"

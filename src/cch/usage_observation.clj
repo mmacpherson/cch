@@ -1,0 +1,123 @@
+(ns cch.usage-observation
+  "Privacy-safe, provider-neutral usage observations.
+
+  This is the narrow durable/wire shape used for cross-node forecasts. It is
+  deliberately derived from — rather than a copy of — provider status payloads:
+  no session, account, machine, repository, model, or raw payload identity is
+  retained."
+  (:require [cheshire.core :as json]
+            [clojure.string :as str])
+  (:import [java.math BigDecimal]
+           [java.nio.charset StandardCharsets]
+           [java.security MessageDigest]
+           [java.time Instant]))
+
+(def schema-version 1)
+
+(def ^:private windows
+  ["five_hour" "seven_day"])
+
+(defn- finite-number?
+  [value]
+  (and (number? value)
+       (Double/isFinite (double value))))
+
+(defn- epoch-millis
+  [value]
+  (try
+    (cond
+      (and (finite-number? value)
+           (pos? (double value))
+           (== (double value) (Math/floor (double value))))
+      (long value)
+
+      (and (string? value) (not (str/blank? value)))
+      (.toEpochMilli (Instant/parse value))
+
+      :else nil)
+    (catch Exception _ nil)))
+
+(defn- percentage
+  [value]
+  (when (and (finite-number? value)
+             (<= 0.0 (double value) 100.0))
+    (double value)))
+
+(defn- epoch-seconds
+  [value]
+  (when (and (finite-number? value)
+             (pos? (double value))
+             (== (double value) (Math/floor (double value))))
+    (long value)))
+
+(defn- agent-name
+  [value]
+  (let [candidate (cond
+                    (keyword? value) (name value)
+                    (string? value) value
+                    :else nil)]
+    (when (and candidate
+               (re-matches #"[a-z][a-z0-9._-]{0,63}" candidate))
+      candidate)))
+
+(defn- canonical-decimal
+  [value]
+  (-> (BigDecimal/valueOf (double value))
+      .stripTrailingZeros
+      .toPlainString))
+
+(defn- sha256
+  [value]
+  (let [digest (.digest (MessageDigest/getInstance "SHA-256")
+                        (.getBytes ^String value StandardCharsets/UTF_8))]
+    (apply str (map #(format "%02x" (bit-and (int %) 0xff)) digest))))
+
+(defn- event-id
+  [{:keys [observed-at agent window used-percentage resets-at]}]
+  (sha256
+    (str schema-version "\n"
+         observed-at "\n"
+         agent "\n"
+         window "\n"
+         (canonical-decimal used-percentage) "\n"
+         resets-at)))
+
+(defn- payload-map
+  [payload]
+  (cond
+    (map? payload) payload
+    (string? payload) (try
+                        (json/parse-string payload true)
+                        (catch Exception _ nil))
+    :else nil))
+
+(defn from-snapshot
+  "Derive zero to two validated usage observations from a status snapshot.
+
+  Input keys are `:agent`, `:observed-at` (epoch millis or ISO-8601), and
+  `:payload` (a map or JSON string with canonical `rate_limits`). Invalid
+  payloads and individual windows are ignored. Returned maps contain only the
+  public-safe semantic fields needed for forecasting."
+  [{:keys [agent observed-at payload]}]
+  (let [agent       (agent-name agent)
+        observed-at (epoch-millis observed-at)
+        payload     (payload-map payload)]
+    (if (and agent observed-at payload)
+      (->> windows
+           (keep (fn [window]
+                   (let [limit (or (get-in payload [:rate_limits (keyword window)])
+                                   (get-in payload ["rate_limits" window]))
+                         pct   (percentage (or (:used_percentage limit)
+                                               (get limit "used_percentage")))
+                         reset (epoch-seconds (or (:resets_at limit)
+                                                  (get limit "resets_at")))]
+                     (when (and pct reset)
+                       (let [observation {:schema-version schema-version
+                                          :observed-at observed-at
+                                          :agent agent
+                                          :window window
+                                          :used-percentage pct
+                                          :resets-at reset}]
+                         (assoc observation :event-id (event-id observation)))))))
+           vec)
+      [])))
