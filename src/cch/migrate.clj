@@ -100,6 +100,12 @@
    {:id "0009-replay-usage-backfill-with-sqlite-timestamps"
     :up (str "UPDATE usage_backfill_state SET last_context_id=0,"
              "updated_at=strftime('%Y-%m-%dT%H:%M:%f','now') "
+             "WHERE singleton_id=1;")}
+   ;; The learned prior consumes twelve completed seven-day windows. Replay
+   ;; after widening the normalized retention horizon from 35 to 91 days.
+   {:id "0010-replay-usage-backfill-for-prior-horizon"
+    :up (str "UPDATE usage_backfill_state SET last_context_id=0,"
+             "updated_at=strftime('%Y-%m-%dT%H:%M:%f','now') "
              "WHERE singleton_id=1;")}])
 
 (defn migration-ids

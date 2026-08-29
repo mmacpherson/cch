@@ -82,6 +82,31 @@
       (finally
         (fs/delete-tree directory)))))
 
+(deftest bounded-backfill-covers-the-twelve-week-prior-horizon
+  (let [directory (str (fs/create-temp-dir {:prefix "usage-prior-backfill-test-"}))
+        path (str directory "/events.db")
+        now 2000000000000
+        within-retention (str (java.time.Instant/ofEpochMilli
+                                (- now (* 84 24 60 60 1000))))
+        outside-retention (str (java.time.Instant/ofEpochMilli
+                                 (- now (* 92 24 60 60 1000))))
+        payload (cheshire.core/generate-string
+                  {:rate_limits
+                   {:seven_day {:used_percentage 81 :resets_at 2000604800}}})]
+    (try
+      (log/ensure-db! path)
+      (jdbc/execute!
+        {:dbtype "sqlite" :dbname path}
+        [(str "INSERT INTO context_snapshots "
+              "(timestamp,agent,session_id,payload) VALUES "
+              "(?,'claude-code','synthetic-within',?),"
+              "(?,'claude-code','synthetic-outside',?)")
+         within-retention payload outside-retention payload])
+      (is (= 1 (:inserted (usage-sync/backfill-once! path now 10))))
+      (is (= 1 (count (local-rows path))))
+      (finally
+        (fs/delete-tree directory)))))
+
 (deftest paired-runners-recover-and-exchange-without-echo
   (let [directory (str (fs/create-temp-dir {:prefix "usage-sync-test-"}))
         db-a (str directory "/a.db")

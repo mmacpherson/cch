@@ -199,6 +199,40 @@
               normalized (#'cch.forecast/source-forecast :normalized)]
           (is (= legacy normalized)))))))
 
+(deftest current-window-is-not-used-as-a-historical-final
+  (with-fresh-bg
+    (fn []
+      (let [path (db/db-path)
+            ds {:dbtype "sqlite" :dbname path}
+            now (-> (java.time.Instant/now) .getEpochSecond)
+            completed (- now 60)
+            current (+ now 3600)]
+        (doseq [[index reset pct] [[0 completed 72] [1 current 99]]]
+          (let [timestamp (str (java.time.Instant/ofEpochSecond (- now index)))
+                payload (json/generate-string
+                          {:rate_limits
+                           {:five_hour {:used_percentage pct
+                                        :resets_at reset}}})]
+            (jdbc/execute!
+              ds
+              [(str "INSERT INTO context_snapshots "
+                    "(timestamp,agent,session_id,payload) VALUES "
+                    "(?,'claude-code','synthetic-history',?)")
+               timestamp payload])
+            (jdbc/execute!
+              ds
+              [(str "INSERT INTO usage_observations "
+                    "(event_id,schema_version,observed_at,agent,window_key,"
+                    "used_percentage,resets_at,publishable) "
+                    "VALUES (?,1,?,'claude-code','five_hour',?,?,1)")
+               (str "synthetic-history-" index) (* (- now index) 1000)
+               pct reset])))
+        (doseq [source [:legacy :normalized]]
+          (is (= [72.0]
+                 (binding [cch.forecast/*usage-source* source]
+                   (#'cch.forecast/historical-final-pcts
+                     "claude-code" :five-hour)))))))))
+
 ;; ---------------------------------------------------------------------------
 ;; window-priors — both /usage and /forecast (statusline) MUST share this so
 ;; their projections agree. Regression: /usage used to call rate-bayes-

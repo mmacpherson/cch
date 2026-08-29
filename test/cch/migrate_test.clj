@@ -121,6 +121,25 @@
         (is (contains? (migrate/applied-ids db)
                        "0009-replay-usage-backfill-with-sqlite-timestamps"))))))
 
+(deftest prior-horizon-extension-replays-an-advanced-usage-backfill
+  (with-tmp-db
+    (fn [db]
+      (create-legacy-events-table! db)
+      (create-legacy-context-snapshots-table! db)
+      (migrate/apply-all! db)
+      (p/sh ["sqlite3" db
+             (str "INSERT INTO usage_backfill_state(singleton_id,last_context_id) "
+                  "VALUES(1,42) ON CONFLICT(singleton_id) DO UPDATE SET last_context_id=42;"
+                  "DELETE FROM schema_migrations WHERE id="
+                  "'0010-replay-usage-backfill-for-prior-horizon';")])
+      (migrate/apply-all! db)
+      (let [cursor (-> (p/sh ["sqlite3" db
+                              "SELECT last_context_id FROM usage_backfill_state WHERE singleton_id=1;"])
+                       :out str/trim)]
+        (is (= "0" cursor))
+        (is (contains? (migrate/applied-ids db)
+                       "0010-replay-usage-backfill-for-prior-horizon"))))))
+
 (deftest applied-ids-on-empty-tracking-table
   (with-tmp-db
     (fn [db]

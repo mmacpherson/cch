@@ -20,7 +20,10 @@
 (def ^:const default-ack-timeout-ms 2000)
 (def ^:const default-max-attempts 3)
 (def ^:const max-message-bytes (* 32 1024))
-(def ^:const default-usage-retention-ms (* 35 24 60 60 1000))
+;; Twelve completed seven-day windows feed the learned forecast prior; retain
+;; one additional week so a newly paired runner can reconstruct that prior and
+;; the current window from the broker alone.
+(def ^:const default-usage-retention-ms (* 91 24 60 60 1000))
 (def ^:const default-usage-future-skew-ms (* 5 60 1000))
 (def ^:const default-max-usage-observations 2000000)
 (def ^:const max-usage-batch-size 256)

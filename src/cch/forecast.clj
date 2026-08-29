@@ -208,7 +208,7 @@
       (str "SELECT final_pct FROM ("
            " SELECT MAX(used_percentage) AS final_pct"
            " FROM usage_observations"
-           " WHERE resets_at < strftime('%s','now')"
+           " WHERE resets_at < CAST(strftime('%s','now') AS INTEGER)"
            " AND window_key='" wk "' " (agent-clause agent)
            " GROUP BY resets_at ORDER BY resets_at DESC LIMIT 12"
            ") WHERE final_pct >= 10")
@@ -217,7 +217,11 @@
         (str "SELECT final_pct FROM ("
              "  SELECT MAX(CAST(" (ex "used_percentage") " AS REAL)) AS final_pct"
              "  FROM context_snapshots"
-             "  WHERE " (ex "resets_at") " < strftime('%s','now')"
+             ;; json_extract expressions have no column affinity. Cast the
+             ;; text returned by strftime so SQLite compares epoch numbers,
+             ;; rather than sorting every numeric reset before every text
+             ;; value and accidentally treating the current window as history.
+             "  WHERE " (ex "resets_at") " < CAST(strftime('%s','now') AS INTEGER)"
              "    AND " (ex "used_percentage") " IS NOT NULL"
              "    AND session_id NOT LIKE 'test%'"
              "    " (agent-clause agent)

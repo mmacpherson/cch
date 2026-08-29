@@ -13,7 +13,7 @@
 
 (def ^:const default-batch-size 200)
 (def ^:const default-backfill-batch-size 1000)
-(def ^:const default-backfill-retention-ms (* 35 24 60 60 1000))
+(def ^:const default-backfill-retention-ms (* 91 24 60 60 1000))
 
 (defonce ^:private ensured-paths (atom #{}))
 
