@@ -167,6 +167,17 @@
      (str "CREATE INDEX IF NOT EXISTS activity_observations_filter_idx ON "
           observations " (agent,action,observed_at DESC,cursor DESC)")]))
 
+(defn migration-9-statements
+  "Attribute hosted activity to the broker-authenticated runner. The column is
+  nullable so pre-migration observations remain readable until retention
+  removes them; runners cannot supply or override this value in the payload."
+  [schema]
+  (let [observations (table (schema-name schema) "activity_observations")]
+    [(str "ALTER TABLE " observations
+          " ADD COLUMN IF NOT EXISTS runner_id text")
+     (str "CREATE INDEX IF NOT EXISTS activity_observations_runner_idx ON "
+          observations " (runner_id,observed_at DESC,cursor DESC)")]))
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -231,7 +242,11 @@
         (when-not (contains? applied 8)
           (doseq [statement (migration-8-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (8)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (8)")]))
+        (when-not (contains? applied 9)
+          (doseq [statement (migration-9-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (9)")]))))
     true))
 
 (defn datasource
@@ -914,7 +929,7 @@
           max-count])))
 
 (defn- row->activity
-  [{:keys [event_id schema_version observed_at agent action tool_category
+  [{:keys [event_id schema_version observed_at agent action runner_id tool_category
            outcome duration_ms]}]
   (cond-> {:event-id (str/trim event_id)
            :schema-version schema_version
@@ -922,6 +937,7 @@
            :agent agent
            :action action
            :outcome outcome}
+    runner_id (assoc :runner-id runner_id)
     tool_category (assoc :tool-category tool_category)
     (some? duration_ms) (assoc :duration-ms duration_ms)))
 
@@ -946,12 +962,12 @@
                        (rows
                          tx
                          [(str "INSERT INTO " table-name
-                               " (event_id,schema_version,observed_at,agent,action,"
-                               "tool_category,outcome,duration_ms) VALUES (?,?,?,?,?,?,?,?)"
+                               " (event_id,schema_version,observed_at,agent,action,runner_id,"
+                               "tool_category,outcome,duration_ms) VALUES (?,?,?,?,?,?,?,?,?)"
                                " ON CONFLICT (event_id) DO NOTHING RETURNING cursor")
                           (:event-id observation) (:schema-version observation)
                           (:observed-at observation) (:agent observation)
-                          (:action observation) (:tool-category observation)
+                          (:action observation) runner-id (:tool-category observation)
                           (:outcome observation) (:duration-ms observation)]))))
                 0 observations)]
           (prune-activity! broker tx timestamp-value)
@@ -963,7 +979,7 @@
                               0)})))))
 
 (defn- recent-activity
-  [^PostgresBroker broker {:keys [limit agent action] :or {limit 200}}]
+  [^PostgresBroker broker {:keys [limit agent action runner-id] :or {limit 200}}]
   (when-not (and (integer? limit) (<= 1 limit memory/max-activity-read-limit))
     (throw (ex-info "limit is invalid" {:type :invalid-activity-query})))
   ;; Reuse the in-memory validator's allowlists without exposing SQL values.
@@ -971,13 +987,22 @@
     (throw (ex-info "agent is invalid" {:type :invalid-activity-query})))
   (when (and action (not (contains? activity/actions action)))
     (throw (ex-info "action is invalid" {:type :invalid-activity-query})))
+  (when (and runner-id (not (memory/valid-label? runner-id)))
+    (throw (ex-info "runner is invalid" {:type :invalid-activity-query})))
   (let [table-name (table (:schema broker) "activity_observations")
-        clauses (cond-> [] agent (conj "agent=?") action (conj "action=?"))
+        clauses (cond-> []
+                  agent (conj "agent=?")
+                  action (conj "action=?")
+                  runner-id (conj "runner_id=?"))
         sql (str "SELECT event_id,schema_version,observed_at,agent,action,"
-                 "tool_category,outcome,duration_ms FROM " table-name
+                 "runner_id,tool_category,outcome,duration_ms FROM " table-name
                  (when (seq clauses) (str " WHERE " (str/join " AND " clauses)))
                  " ORDER BY observed_at DESC,cursor DESC LIMIT ?")
-        params (cond-> [sql] agent (conj agent) action (conj action) true (conj limit))]
+        params (cond-> [sql]
+                 agent (conj agent)
+                 action (conj action)
+                 runner-id (conj runner-id)
+                 true (conj limit))]
     (transact
       (:datasource broker)
       (fn [tx]

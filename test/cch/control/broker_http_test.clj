@@ -95,7 +95,7 @@
                       :outcome "observed"}]
         (is (= {:accepted 1 :duplicates 0 :latest-cursor 1}
                (remote/publish-activity-observations! a [activity])))
-        (is (= [activity]
+        (is (= [(assoc activity :runner-id "runner-a")]
                (broker/recent-activity b {:limit 10}))))
       (is (= :unauthorized
              (try

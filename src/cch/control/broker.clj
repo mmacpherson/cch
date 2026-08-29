@@ -649,7 +649,8 @@
 
 (defn publish-activity!
   "Idempotently append privacy-safe activity. Authentication authorizes the
-  batch but runner identity is not attached to its observations."
+  batch; the broker attaches its authenticated runner identity rather than
+  trusting an identity field in the observation payload."
   [^Broker broker {:keys [runner-id token observations]}]
   (authorize! broker runner-id token)
   (let [timestamp (now broker)
@@ -671,7 +672,9 @@
                     [(-> state
                          (assoc :next-activity-cursor cursor)
                          (assoc-in [:activity-observations cursor]
-                                   (assoc observation :cursor cursor))
+                                   (assoc observation
+                                          :cursor cursor
+                                          :runner-id runner-id))
                          (assoc-in [:activity-event-cursors (:event-id observation)]
                                    cursor))
                      (inc accepted) duplicates])))
@@ -683,13 +686,15 @@
 
 (defn recent-activity
   "Internal operator read model. This method has no runner HTTP route."
-  [^Broker broker {:keys [limit agent action] :or {limit 200}}]
+  [^Broker broker {:keys [limit agent action runner-id] :or {limit 200}}]
   (when-not (and (integer? limit) (<= 1 limit max-activity-read-limit))
     (throw (ex-info "limit is invalid" {:type :invalid-activity-query})))
   (when (and agent (not (contains? activity/agents agent)))
     (throw (ex-info "agent is invalid" {:type :invalid-activity-query})))
   (when (and action (not (contains? activity/actions action)))
     (throw (ex-info "action is invalid" {:type :invalid-activity-query})))
+  (when (and runner-id (not (valid-label? runner-id)))
+    (throw (ex-info "runner is invalid" {:type :invalid-activity-query})))
   (locking broker
     (let [timestamp (now broker)
           state (prune-activity-state
@@ -699,7 +704,9 @@
           observations (->> (:activity-observations state)
                             vals
                             (filter #(and (or (nil? agent) (= agent (:agent %)))
-                                          (or (nil? action) (= action (:action %)))))
+                                          (or (nil? action) (= action (:action %)))
+                                          (or (nil? runner-id)
+                                              (= runner-id (:runner-id %)))))
                             (sort-by (juxt :observed-at :cursor) #(compare %2 %1))
                             (take limit)
                             (mapv #(dissoc % :cursor)))]

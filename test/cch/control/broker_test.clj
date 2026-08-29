@@ -46,7 +46,7 @@
    :schema-version 1 :observed-at observed-at :agent agent
    :action action :outcome outcome})
 
-(deftest activity-is-idempotent-bounded-and-has-no-runner-attribution
+(deftest activity-is-idempotent-bounded-and-broker-attributed
   (let [clock (atom 2000000000000)
         b (broker/new-broker runner-tokens {:now-fn #(deref clock)})
         first-event (activity "a" @clock "claude-code" "turn.started" "observed")
@@ -59,16 +59,28 @@
            (broker/publish-activity!
              b {:runner-id "runner-b" :token "synthetic-token-b"
                 :observations [first-event]})))
-    (is (= [second-event]
+    (is (= [(assoc second-event :runner-id "runner-a")]
            (api/recent-activity-observations b {:limit 10 :agent "codex"})))
+    (is (= [(assoc first-event :runner-id "runner-a")]
+           (api/recent-activity-observations
+             b {:limit 10 :runner-id "runner-a" :agent "claude-code"})))
+    (is (empty? (api/recent-activity-observations
+                  b {:limit 10 :runner-id "runner-b"})))
     (let [rendered (pr-str (api/recent-activity-observations b {:limit 10}))]
-      (is (not (str/includes? rendered "runner-a")))
+      (is (str/includes? rendered "runner-a"))
       (is (not (str/includes? rendered "synthetic-token"))))
     (is (= :invalid-activity-observation
            (try
              (broker/publish-activity!
                b {:runner-id "runner-a" :token "synthetic-token-a"
                   :observations [(assoc first-event :cwd "/private")]})
+             (catch clojure.lang.ExceptionInfo error
+               (:type (ex-data error))))))
+    (is (= :invalid-activity-observation
+           (try
+             (broker/publish-activity!
+               b {:runner-id "runner-a" :token "synthetic-token-a"
+                  :observations [(assoc first-event :runner-id "forged")]})
              (catch clojure.lang.ExceptionInfo error
                (:type (ex-data error))))))))
 

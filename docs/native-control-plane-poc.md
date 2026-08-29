@@ -227,12 +227,15 @@ The result contains no account, session, runner, machine, repository,
 transcript, credential, or raw provider-payload identity.
 
 The Events page reads a separate seven-day normalized activity stream. Each
-record is a closed, versioned shape containing only time, agent family, a
-coarse lifecycle action, optional coarse tool category, outcome, and bounded
-duration. Unknown keys fail validation. There is no central column for route,
-session, runner, account, hostname, repository, cwd, path, command, prompt,
-reason, transcript, credential, or raw payload. Source-local raw hook rows
-remain available only to the runner-local Events page.
+runner-supplied record is a closed, versioned shape containing only time, agent
+family, a coarse lifecycle action, optional coarse tool category, outcome, and
+bounded duration. Unknown keys fail validation. After authentication, the
+broker attaches the configured runner label for provenance and filtering; the
+runner cannot claim a different identity in its payload. There is no central
+column for route, session, account, self-reported hostname, repository, cwd,
+path, command, prompt, reason, transcript, credential, or raw payload.
+Source-local raw hook rows remain available only to the runner-local Events
+page.
 
 For a Claude session with Remote Control active, the adapter incrementally
 reads Claude's structured `bridge_status` transcript event, caches its dedicated
@@ -468,8 +471,9 @@ replication:
   coarse action, optional tool category, outcome, and bounded duration.
 - Policy-hook duplicates, unrecognized provider events, stale history, private
   context, and every field outside the allowlist are omitted before transport.
-- Publication is authenticated, idempotent, and cursor-based. Postgres retains
-  seven days with count and time bounds, and intentionally has no runner or
-  machine attribution on an activity row.
+- Publication is authenticated, idempotent, and cursor-based. The broker adds
+  the authenticated runner's configured label; it does not accept runner or
+  machine identity from the observation. Postgres retains seven days with
+  count and time bounds.
 - The human listener can query the bounded feed for Overview and Events. The
   runner JSON listener has no activity-read endpoint.
