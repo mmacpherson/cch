@@ -233,6 +233,39 @@
                    (#'cch.forecast/historical-final-pcts
                      "claude-code" :five-hour)))))))))
 
+(deftest latest-reset-follows-observation-time-not-replay-insert-order
+  (with-fresh-bg
+    (fn []
+      (let [ds {:dbtype "sqlite" :dbname (db/db-path)}
+            now (-> (java.time.Instant/now) .getEpochSecond)
+            observations [[now (+ now 7200) 31]
+                          [(- now 3600) (+ now 3600) 12]]]
+        ;; Insert newest first, then replay an older row. The older row has the
+        ;; larger local id but must not replace the current reset.
+        (doseq [[index [observed reset pct]] (map-indexed vector observations)]
+          (jdbc/execute!
+            ds
+            [(str "INSERT INTO context_snapshots "
+                  "(timestamp,agent,session_id,payload) VALUES "
+                  "(?,'claude-code','synthetic-replay-order',?)")
+             (str (java.time.Instant/ofEpochSecond observed))
+             (json/generate-string
+               {:rate_limits
+                {:five_hour {:used_percentage pct :resets_at reset}}})])
+          (jdbc/execute!
+            ds
+            [(str "INSERT INTO usage_observations "
+                  "(event_id,schema_version,observed_at,agent,window_key,"
+                  "used_percentage,resets_at,publishable) "
+                  "VALUES (?,1,?,'claude-code','five_hour',?,?,1)")
+             (str "synthetic-replay-order-" index) (* observed 1000)
+             pct reset]))
+        (doseq [source [:legacy :normalized]]
+          (is (= (+ now 7200)
+                 (binding [cch.forecast/*usage-source* source]
+                   (#'cch.forecast/latest-resets-at
+                     "claude-code" :five-hour)))))))))
+
 ;; ---------------------------------------------------------------------------
 ;; window-priors — both /usage and /forecast (statusline) MUST share this so
 ;; their projections agree. Regression: /usage used to call rate-bayes-

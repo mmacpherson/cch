@@ -69,7 +69,7 @@
                 (format
                   (str "SELECT resets_at FROM usage_observations "
                        "WHERE window_key='%s' AND used_percentage>0 %s"
-                       "ORDER BY id DESC LIMIT 1")
+                       "ORDER BY observed_at DESC,id DESC LIMIT 1")
                   wpath (agent-clause agent))
                 (format
                   (str "SELECT json_extract(payload, '$.rate_limits.%s.resets_at') AS resets_at "
@@ -77,7 +77,7 @@
                        "WHERE json_extract(payload, '$.rate_limits.%s.resets_at') IS NOT NULL "
                        "  AND json_extract(payload, '$.rate_limits.%s.used_percentage') > 0 "
                        "%s"
-                       "ORDER BY id DESC LIMIT 1")
+                       "ORDER BY timestamp DESC,id DESC LIMIT 1")
                   wpath wpath wpath (agent-clause agent)))]
     (some-> (db/query sql) first :resets_at long)))
 
