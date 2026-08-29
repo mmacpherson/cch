@@ -4,6 +4,7 @@
 (defprotocol ControlBroker
   (authorize-runner! [broker runner-id token])
   (register-runner! [broker request])
+  (active-runners [broker])
   (active-sessions [broker])
   (set-session-alias! [broker request])
   (set-operator-session-alias! [broker request])

@@ -18,7 +18,8 @@
                               (postgres/migration-3-statements "cch_control")
                               (postgres/migration-4-statements "cch_control")
                               (postgres/migration-5-statements "cch_control")
-                              (postgres/migration-6-statements "cch_control")))]
+                              (postgres/migration-6-statements "cch_control")
+                              (postgres/migration-7-statements "cch_control")))]
     (is (str/includes? ddl "content_sha256"))
     (is (str/includes? ddl "lease_expires_at"))
     (is (str/includes? ddl "awaiting-replay"))
@@ -26,6 +27,7 @@
     (is (str/includes? ddl "native_name"))
     (is (str/includes? ddl "usage_observations"))
     (is (str/includes? ddl "usage_observations_latest_idx"))
+    (is (str/includes? ddl "local_ui_url"))
     (is (str/includes? ddl "used_percentage"))
     (is (not (re-find #"(?i)\b(session_id|runner_id|account|hostname|path|payload)\b"
                       (str/join "\n" (postgres/migration-5-statements
@@ -314,7 +316,7 @@
                                    "\".schema_migrations")]
                              {:builder-fn rs/as-unqualified-lower-maps})]
               (is (every? true? results))
-              (is (= 6 (:count versions)))
+              (is (= 7 (:count versions)))
               (is (not-any? #{"body" "token" "credential" "transcript"}
                             (map :column_name columns))))))
         (finally

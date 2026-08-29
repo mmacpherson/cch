@@ -131,6 +131,14 @@
           " (agent,window_key,observed_at DESC,cursor DESC)"
           " WHERE used_percentage>0")]))
 
+(defn migration-7-statements
+  "Add optional operator-visible local UI bases to runner leases."
+  [schema]
+  (let [runners (table (schema-name schema) "runners")]
+    [(str "ALTER TABLE " runners
+          " ADD COLUMN IF NOT EXISTS local_ui_url text"
+          " CHECK (local_ui_url IS NULL OR char_length(local_ui_url) BETWEEN 1 AND 512)")]))
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -187,7 +195,11 @@
         (when-not (contains? applied 6)
           (doseq [statement (migration-6-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (6)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (6)")]))
+        (when-not (contains? applied 7)
+          (doseq [statement (migration-7-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (7)")]))))
     true))
 
 (defn datasource
@@ -287,7 +299,9 @@
            :expires-at (epoch-millis expires_at)}
     failure (assoc :failure failure)))
 
-(defn- register! [^PostgresBroker broker {:keys [runner-id token sessions lease-ms]}]
+(defn- register!
+  [^PostgresBroker broker
+   {:keys [runner-id token sessions lease-ms local-ui-url]}]
   (authorize! broker runner-id token)
   (when-not (memory/valid-label? runner-id)
     (throw (ex-info "runner_id is invalid" {:type :invalid-runner})))
@@ -295,6 +309,7 @@
         lease-ms (memory/clamp (or lease-ms (get-in broker [:options :lease-ms]))
                                1000 (* 5 60 1000))
         expires (+ timestamp-value lease-ms)
+        local-ui-url (memory/sanitize-local-ui-url! local-ui-url)
         sanitized (->> sessions
                        (keep memory/sanitize-session)
                        (filter :available)
@@ -324,11 +339,14 @@
                                       {:type :route-conflict :route conflict})))
                     (jdbc/execute!
                       tx [(str "INSERT INTO " runners
-                               " (runner_id,updated_at,lease_expires_at) VALUES (?,?,?)"
+                               " (runner_id,updated_at,lease_expires_at,local_ui_url)"
+                               " VALUES (?,?,?,?)"
                                " ON CONFLICT (runner_id) DO UPDATE SET"
                                " updated_at=EXCLUDED.updated_at,"
-                               " lease_expires_at=EXCLUDED.lease_expires_at")
-                          runner-id (timestamp timestamp-value) (timestamp expires)])
+                               " lease_expires_at=EXCLUDED.lease_expires_at,"
+                               " local_ui_url=EXCLUDED.local_ui_url")
+                          runner-id (timestamp timestamp-value) (timestamp expires)
+                          local-ui-url])
                     (jdbc/execute! tx [(str "DELETE FROM " routes " WHERE runner_id=?")
                                        runner-id])
                     (doseq [[route-id session] sanitized]
@@ -349,6 +367,25 @@
             (throw (ex-info "Route is already leased by another runner"
                             {:type :route-conflict} error))
             (throw error)))))))
+
+(defn- runners [^PostgresBroker broker]
+  (let [timestamp-value (now broker)
+        runners-table (table (:schema broker) "runners")
+        {:keys [value discard]}
+        (transact
+          (:datasource broker)
+          (fn [tx]
+            {:discard (expire-metadata! broker tx timestamp-value)
+             :value
+             (mapv (fn [{:keys [runner_id local_ui_url]}]
+                     (cond-> {:runner-id runner_id}
+                       local_ui_url (assoc :local-ui-url local_ui_url)))
+                   (rows tx [(str "SELECT runner_id,local_ui_url FROM "
+                                  runners-table
+                                  " WHERE lease_expires_at>? ORDER BY runner_id")
+                             (timestamp timestamp-value)]))}))]
+    (discard-bodies! broker discard)
+    value))
 
 (defn- sessions [^PostgresBroker broker]
   (let [timestamp-value (now broker)
@@ -914,6 +951,8 @@
     (authorize! broker runner-id token))
   (register-runner! [broker request]
     (register! broker request))
+  (active-runners [broker]
+    (runners broker))
   (active-sessions [broker]
     (sessions broker))
   (set-session-alias! [broker request]

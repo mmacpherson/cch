@@ -4,6 +4,7 @@
   surfaces for transcripts, terminal control, and approvals."
   (:require [cch.control.broker-api :as broker]
             [cch.control.naming :as naming]
+            [cch.control.usage-forecast :as usage-forecast]
             [cch.control.web-auth :as auth]
             [clojure.string :as str]
             [hiccup2.core :as hic])
@@ -107,16 +108,20 @@
            [:title (str title " · cch control")]
            [:style
             "
-:root{color-scheme:light dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--amber:#d29922;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:min(1100px,calc(100% - 28px));margin:0 auto;padding:28px 0 60px}header{display:flex;gap:18px;align-items:center;justify-content:space-between;margin-bottom:24px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 14px}.muted,small{color:var(--muted)}a{color:var(--blue)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:0 0 18px}.summary{display:flex;gap:20px;flex-wrap:wrap}.summary strong{font-size:22px;display:block}.sessions{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px}.session{border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}.session-top{display:flex;justify-content:space-between;gap:10px;align-items:center}.route{font:12px/1.4 ui-monospace,SFMono-Regular,monospace;word-break:break-all;color:var(--muted)}.badge{border-radius:999px;padding:3px 9px;font-size:12px;border:1px solid var(--line)}.badge-attention{color:#fff;background:#7a4b00;border-color:var(--amber)}.badge-working{color:#fff;background:#174f2a;border-color:var(--green)}.badge-ready{color:#fff;background:#17365d;border-color:var(--blue)}label{display:block;margin:0 0 6px;color:var(--muted)}select,textarea,.alias-form input[name=alias]{width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);padding:10px;font:inherit}.alias-form{margin-top:12px}.alias-form .actions{margin-top:0}.alias-form input[name=alias]{min-width:0;flex:1}textarea{min-height:120px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 2fr;gap:14px}.session-details{border-top:1px solid var(--line);margin-top:12px;padding-top:9px}.session-details summary{color:var(--muted);cursor:pointer;font-size:13px}.session-meta{display:grid;gap:7px;margin-top:10px}.session-meta small{display:block}.session-meta div:not(.route){min-width:0}@media(max-width:700px){.fields{grid-template-columns:1fr}header{align-items:flex-start}}button,.button{display:inline-block;border:1px solid #388bfd;border-radius:8px;background:#238636;color:white;padding:9px 14px;font:inherit;text-decoration:none;cursor:pointer}button.secondary{background:transparent;border-color:var(--line)}.actions{display:flex;gap:10px;align-items:center;margin-top:12px}.notice{border-left:3px solid var(--blue);padding:10px 12px;background:var(--panel);margin-bottom:18px}.error{border-color:var(--red);color:#ffb3ad}.status-delivered{border-color:var(--green)}.status-failed,.status-expired{border-color:var(--red)}code{font-family:ui-monospace,SFMono-Regular,monospace}.inline{display:inline}.provider{margin-top:10px}.empty{text-align:center;padding:28px;color:var(--muted)}"]]
+:root{color-scheme:light dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--amber:#d29922;--red:#f85149}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:min(1100px,calc(100% - 28px));margin:0 auto;padding:28px 0 60px}header{display:flex;gap:18px;align-items:center;justify-content:space-between;margin-bottom:24px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0 0 14px}.muted,small{color:var(--muted)}a{color:var(--blue)}.header-actions,.appnav,.local-links{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.appnav a{padding:7px 10px;border-radius:7px;text-decoration:none;border:1px solid var(--line)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:0 0 18px}.summary{display:flex;gap:20px;flex-wrap:wrap}.summary strong{font-size:22px;display:block}.sessions,.forecast-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:12px}.session,.forecast-card{border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}.forecast-value{font-size:28px;font-weight:700}.forecast-meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.session-top{display:flex;justify-content:space-between;gap:10px;align-items:center}.route{font:12px/1.4 ui-monospace,SFMono-Regular,monospace;word-break:break-all;color:var(--muted)}.badge{border-radius:999px;padding:3px 9px;font-size:12px;border:1px solid var(--line)}.badge-attention{color:#fff;background:#7a4b00;border-color:var(--amber)}.badge-working{color:#fff;background:#174f2a;border-color:var(--green)}.badge-ready{color:#fff;background:#17365d;border-color:var(--blue)}label{display:block;margin:0 0 6px;color:var(--muted)}select,textarea,.alias-form input[name=alias]{width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);padding:10px;font:inherit}.alias-form{margin-top:12px}.alias-form .actions{margin-top:0}.alias-form input[name=alias]{min-width:0;flex:1}textarea{min-height:120px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 2fr;gap:14px}.session-details{border-top:1px solid var(--line);margin-top:12px;padding-top:9px}.session-details summary{color:var(--muted);cursor:pointer;font-size:13px}.session-meta{display:grid;gap:7px;margin-top:10px}.session-meta small{display:block}.session-meta div:not(.route){min-width:0}@media(max-width:700px){.fields{grid-template-columns:1fr}.header-actions{justify-content:flex-end}header{align-items:flex-start}.forecast-meta{grid-template-columns:1fr}}button,.button{display:inline-block;border:1px solid #388bfd;border-radius:8px;background:#238636;color:white;padding:9px 14px;font:inherit;text-decoration:none;cursor:pointer}button.secondary{background:transparent;border-color:var(--line)}.actions{display:flex;gap:10px;align-items:center;margin-top:12px}.notice{border-left:3px solid var(--blue);padding:10px 12px;background:var(--panel);margin-bottom:18px}.error{border-color:var(--red);color:#ffb3ad}.status-delivered{border-color:var(--green)}.status-failed,.status-expired{border-color:var(--red)}code{font-family:ui-monospace,SFMono-Regular,monospace}.inline{display:inline}.provider{margin-top:10px}.empty{text-align:center;padding:28px;color:var(--muted)}"]]
           [:body
            [:main
             [:header
              [:div [:h1 "Multi-agent control"]
               [:small "Local execution · brokered presence and text routing"]]
              (when identity
-               [:form.inline {:method "post" :action "/logout"}
-                [:input {:type "hidden" :name "csrf" :value (:csrf identity)}]
-                [:button.secondary {:type "submit"} "Sign out"]])]
+               [:div.header-actions
+                [:nav.appnav
+                 [:a {:href "/"} "Agents"]
+                 [:a {:href "/usage"} "Usage"]]
+                [:form.inline {:method "post" :action "/logout"}
+                 [:input {:type "hidden" :name "csrf" :value (:csrf identity)}]
+                 [:button.secondary {:type "submit"} "Sign out"]]])]
             content]]])))
 
 (defn- primary-name [session]
@@ -160,6 +165,8 @@
                  :placeholder "Optional broker-visible name"}]
         [:button.secondary {:type "submit"} "Save"]]
        [:small "Visible to paired participants; avoid secrets or private paths."]]]]))
+
+(declare local-tools)
 
 (defn- switchboard-page [b identity {:keys [error message-id]}]
   (let [sessions (broker/active-sessions b)
@@ -218,7 +225,65 @@
                         :maxlength 8000
                         :placeholder "Ask this agent to inspect, review, or continue…"}]]]
           [:div.actions [:button {:type "submit"} "Send message"]]]
-         [:p.muted "A session must be active before a message can be routed."])])))
+         [:p.muted "A session must be active before a message can be routed."])]
+      (local-tools b))))
+
+(defn- agent-label [agent]
+  (case agent "claude-code" "Claude Code" (str/capitalize agent)))
+
+(defn- duration-label [seconds]
+  (let [seconds (max 0 (long seconds))
+        days (quot seconds 86400)
+        hours (quot (mod seconds 86400) 3600)
+        minutes (quot (mod seconds 3600) 60)]
+    (cond
+      (pos? days) (format "%dd %dh" days hours)
+      (pos? hours) (format "%dh %dm" hours minutes)
+      :else (format "%dm" minutes))))
+
+(defn- local-tools [b]
+  (let [runners (filter :local-ui-url (broker/active-runners b))]
+    [:section.panel
+     [:h2 "Local tools"]
+     [:p.muted "Hooks, raw events, configuration, and debugging stay on each runner and open directly; this application does not proxy them."]
+     (if (seq runners)
+       (for [{:keys [runner-id local-ui-url]} runners]
+         [:div.local-links
+          [:strong runner-id]
+          [:a {:href local-ui-url :target "_blank" :rel "noopener noreferrer"} "Overview"]
+          [:a {:href (str local-ui-url "/hooks") :target "_blank" :rel "noopener noreferrer"} "Hooks"]
+          [:a {:href (str local-ui-url "/events") :target "_blank" :rel "noopener noreferrer"} "Events"]
+          [:a {:href (str local-ui-url "/debug") :target "_blank" :rel "noopener noreferrer"} "Debug"]])
+       [:p.muted "No runner has advertised a reachable local UI URL."])]))
+
+(defn- usage-page [b identity]
+  (let [forecast (-> (broker/usage-forecast-inputs b)
+                     usage-forecast/from-read-model)
+        agents (:agents forecast)]
+    (page
+      "Usage" identity
+      [:section.panel
+       [:h2 "Usage & forecast"]
+       [:p.muted "Fleet-wide projections from normalized usage observations. No account, session, machine, repository, transcript, or raw provider payload is stored in this view."]
+       (if (some seq (vals agents))
+         [:div.forecast-grid
+          (for [[agent windows] agents
+                [window {:keys [current-pct projected-pct seconds-left
+                                sample-count band]}] windows]
+            [:article.forecast-card
+             [:div.session-top
+              [:strong (agent-label agent)]
+              [:span.badge (if (= window "five_hour") "5 hour" "7 day")]]
+             [:div.forecast-value (str current-pct "%")]
+             [:small (str "Projected " projected-pct "%")]
+             [:div.forecast-meta
+              [:div [:small "Resets in"] [:div (duration-label seconds-left)]]
+              [:div [:small "Samples"] [:div sample-count]]
+              (when band
+                [:div [:small "Projection band"]
+                 [:div (str (:lo band) "%–" (:hi band) "%")]])]])]
+         [:div.empty "No normalized usage observations are available yet."])]
+      (local-tools b))))
 
 (defn- error-page [status title message]
   (response status (page title nil [:section.panel [:h2 title] [:p message]])))
@@ -228,7 +293,7 @@
   valid Cloudflare Access assertion; runner credentials are never accepted."
   [b config]
   (fn [{:keys [request-method uri] :as request}]
-    (when (contains? #{"/" "/messages" "/sessions/alias" "/logout"} uri)
+    (when (contains? #{"/" "/usage" "/messages" "/sessions/alias" "/logout"} uri)
       (try
         (let [identity (auth/authenticate! config request)
               identity (assoc identity :csrf (auth/csrf-token config identity))]
@@ -237,6 +302,9 @@
             (response 200 (switchboard-page
                             b identity {:message-id (:message-id
                                                      (request-query request))}))
+
+            (and (= :get request-method) (= "/usage" uri))
+            (response 200 (usage-page b identity))
 
             (and (= :post request-method) (= "/messages" uri))
             (let [form (request-form request)]

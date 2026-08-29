@@ -130,11 +130,14 @@ URL that forwards to the broker's loopback listener:
 export CCH_CONTROL_BROKER_URL='https://broker-name.example-tailnet.ts.net'
 export CCH_CONTROL_RUNNER_ID='runner-a'
 export CCH_CONTROL_RUNNER_TOKEN='replace-with-random-token-a'
+# Optional HTTPS base for this machine's local cch pages:
+export CCH_CONTROL_LOCAL_UI_URL='https://runner-a.example-tailnet.ts.net'
 
 cch control pair
 ```
 
-`control pair` atomically stores the three values in an owner-only
+`control pair` atomically stores the three required values and optional local
+UI base in an owner-only
 `control-runner.json` outside the repository and installs the outbound runner
 as a systemd user service or macOS LaunchAgent. The token is not copied into
 provider MCP definitions or service files. Hooks, MCP processes, and the runner
@@ -198,15 +201,29 @@ Destination-side durable deduplication still prevents a replay from becoming a
 second native submission. Terminal metadata is retained for 24 hours by
 default and then removed, bounding the idempotency ledger.
 
-## Cloudflare Access-protected operator switchboard
+## Cloudflare Access-protected operator application
 
-The broker can also serve a small, server-rendered switchboard at `/`. It shows
-only the sanitized active route directory: agent family, opaque route id,
+The broker also serves a small, server-rendered application with shared Agents
+and Usage navigation. The Agents page shows only the sanitized active route
+directory: agent family, opaque route id,
 opaque runner id, bounded provider-advertised session name, native status, and
 a coarse ready/working/needs-you state. It has no transcript, prompt history,
 cwd, process id, socket, token, or message body view. A native action is shown
 only when the local adapter advertises a narrowly validated, exact session URL;
 generic provider home links are omitted.
+
+The Usage page computes fleet-wide current and projected percentages from the
+bounded normalized broker stream. Postgres performs latest-reset selection,
+monotone time bucketing, sample counts, and completed-window aggregation before
+the projection runs; the web request never loads the retained stream wholesale.
+The result contains no account, session, runner, machine, repository,
+transcript, credential, or raw provider-payload identity.
+
+When a paired runner has an optional `CCH_CONTROL_LOCAL_UI_URL`, both hosted
+pages link directly to that runner's Overview, Hooks, Events, and Debug pages.
+Those pages remain local: the hosted application neither fetches nor proxies
+their content. The URL is refreshed automatically with the machine lease, so
+starting agent sessions adds no setup step.
 For a Claude session with Remote Control active, the adapter incrementally
 reads Claude's structured `bridge_status` transcript event, caches its dedicated
 `claude.ai/code/session_...` URL in the machine-local operational store, and

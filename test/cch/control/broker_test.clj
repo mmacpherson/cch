@@ -26,6 +26,7 @@
 
 (defn- register-pair! [b]
   (broker/register! b {:runner-id "runner-a" :token "synthetic-token-a"
+                       :local-ui-url "https://runner-a.invalid/"
                        :sessions runner-a-sessions})
   (broker/register! b {:runner-id "runner-b" :token "synthetic-token-b"
                        :sessions runner-b-sessions}))
@@ -69,6 +70,22 @@
              (broker/register! b {:runner-id "runner-a" :token "wrong"
                                   :sessions []})
              (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))))
+
+(deftest active-runners-expose-only-validated-presentation-metadata
+  (let [b (broker/new-broker runner-tokens)]
+    (register-pair! b)
+    (is (= [{:runner-id "runner-a"
+             :local-ui-url "https://runner-a.invalid"}
+            {:runner-id "runner-b"}]
+           (api/active-runners b)))
+    (is (= :invalid-runner
+           (try
+             (broker/register!
+               b {:runner-id "runner-a" :token "synthetic-token-a"
+                  :local-ui-url "https://user:secret@runner.invalid"
+                  :sessions []})
+             (catch clojure.lang.ExceptionInfo error
+               (:type (ex-data error))))))))
 
 (deftest malformed-native-names-are-not-federated
   (let [b (broker/new-broker runner-tokens)

@@ -22,7 +22,23 @@
                (str (System/getProperty "user.home") "/.config"))
            "/cch/control-runner.json")))
 
-(defn- validate-config [{:keys [url runner-id token]}]
+(defn- validate-local-ui-url [value]
+  (when-not (str/blank? value)
+    (let [uri (try (URI. value) (catch Exception _ nil))
+          scheme (some-> uri .getScheme str/lower-case)
+          host (some-> uri .getHost str/lower-case)
+          loopback? (contains? #{"localhost" "127.0.0.1" "::1"} host)]
+      (when-not (and uri host
+                     (or (= "https" scheme)
+                         (and (= "http" scheme) loopback?))
+                     (nil? (.getUserInfo uri))
+                     (nil? (.getQuery uri))
+                     (nil? (.getFragment uri)))
+        (throw (ex-info "Local UI URL must use HTTPS (HTTP is allowed only on loopback)"
+                        {:type :invalid-runner-config})))
+      (str/replace value #"/+$" ""))))
+
+(defn- validate-config [{:keys [url runner-id token local-ui-url]}]
   (let [present (remove str/blank? [url runner-id token])]
     (cond
       (empty? present) nil
@@ -42,9 +58,11 @@
                       (and (= "http" (.getScheme uri)) loopback?))
           (throw (ex-info "Broker URL must use HTTPS (HTTP is allowed only on loopback)"
                           {:type :insecure-broker-url})))
-        {:url (str/replace url #"/+$" "")
-         :runner-id runner-id
-         :token token}))))
+        (let [local-ui-url (validate-local-ui-url local-ui-url)]
+          (cond-> {:url (str/replace url #"/+$" "")
+                   :runner-id runner-id
+                   :token token}
+            local-ui-url (assoc :local-ui-url local-ui-url)))))))
 
 (defn config-from-env
   "Return nil when remote routing is not configured. Partial or unsafe config
@@ -54,7 +72,8 @@
    (validate-config
      {:url (get env "CCH_CONTROL_BROKER_URL")
       :runner-id (get env "CCH_CONTROL_RUNNER_ID")
-      :token (get env "CCH_CONTROL_RUNNER_TOKEN")})))
+      :token (get env "CCH_CONTROL_RUNNER_TOKEN")
+      :local-ui-url (get env "CCH_CONTROL_LOCAL_UI_URL")})))
 
 (defn config-from-file
   "Read the durable owner-local pairing config, or nil when it is absent."
@@ -146,7 +165,9 @@
 
 (defn register! [config sessions]
   (request-json! config :post "/v1/runners/register"
-                 {:runner-id (:runner-id config) :sessions sessions}))
+                 (cond-> {:runner-id (:runner-id config) :sessions sessions}
+                   (:local-ui-url config)
+                   (assoc :local-ui-url (:local-ui-url config)))))
 
 (defn sessions [config]
   (:sessions (request-json! config :get "/v1/sessions" nil)))

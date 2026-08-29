@@ -4,6 +4,7 @@
             [cch.control.naming :as naming]
             [cch.control.switchboard :as switchboard]
             [cch.control.web-auth :as auth]
+            [cch.usage-observation :as usage]
             [clojure.string :as str]
             [clojure.test :refer [deftest is]])
   (:import [java.io ByteArrayInputStream StringWriter]
@@ -33,6 +34,7 @@
     (broker/register!
       b {:runner-id "runner-a"
          :token "synthetic-runner-token"
+         :local-ui-url "https://runner.invalid/"
          :sessions [{:id target :agent "claude" :status "waiting"
                      :native-url "https://claude.ai/code/session_synthetic123"
                      :available true :cwd "/private/not-federated"
@@ -95,6 +97,9 @@
         (is (str/includes? page "Native &lt;review&gt; · Claude · waiting"))
         (is (str/includes? page "Needs you"))
         (is (str/includes? page "Open this Claude session"))
+        (is (str/includes? page "href=\"/usage\""))
+        (is (str/includes? page "https://runner.invalid/hooks"))
+        (is (str/includes? page "this application does not proxy them"))
         (is (str/includes? page
                            "https://claude.ai/code/session_synthetic123"))
         (is (not (str/includes? page "href=\"https://claude.ai/code\"")))
@@ -104,6 +109,35 @@
         (is (= "no-store" (get-in response [:headers "Cache-Control"])))
         (is (str/includes? (get-in response [:headers "Content-Security-Policy"])
                            "frame-ancestors 'none'"))))))
+
+(deftest authenticated-usage-page-renders-only-normalized-forecast-data
+  (authenticated
+    (fn []
+      (let [b (registered-broker)
+            now (System/currentTimeMillis)
+            reset (quot (+ now 3600000) 1000)
+            observations
+            (mapv #(first
+                     (usage/from-snapshot
+                       {:agent "claude-code"
+                        :observed-at (+ now %1)
+                        :payload {:rate_limits
+                                  {:five_hour {:used_percentage %2
+                                               :resets_at reset}}}}))
+                  [-60000 0] [12 14])]
+        (broker/publish-usage!
+          b {:runner-id "runner-a" :token "synthetic-runner-token"
+             :observations observations})
+        (let [response ((switchboard/handler b config)
+                        (access-request :get "/usage"))
+              page (:body response)]
+          (is (= 200 (:status response)))
+          (is (str/includes? page "Usage &amp; forecast"))
+          (is (str/includes? page "Claude Code"))
+          (is (str/includes? page "14%"))
+          (is (str/includes? page "https://runner.invalid/events"))
+          (is (not (str/includes? page target)))
+          (is (= "no-store" (get-in response [:headers "Cache-Control"]))))))))
 
 (deftest duplicate-meaningful-names-show-mnemonics-for-disambiguation
   (authenticated

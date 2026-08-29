@@ -119,7 +119,23 @@
          (remote/config-from-env
            {"CCH_CONTROL_BROKER_URL" "http://127.0.0.1:8787/"
             "CCH_CONTROL_RUNNER_ID" "runner-a"
-            "CCH_CONTROL_RUNNER_TOKEN" "synthetic-token"}))))
+            "CCH_CONTROL_RUNNER_TOKEN" "synthetic-token"})))
+  (is (= "https://runner.invalid"
+         (:local-ui-url
+           (remote/config-from-env
+             {"CCH_CONTROL_BROKER_URL" "https://broker.invalid"
+              "CCH_CONTROL_RUNNER_ID" "runner-a"
+              "CCH_CONTROL_RUNNER_TOKEN" "synthetic-token"
+              "CCH_CONTROL_LOCAL_UI_URL" "https://runner.invalid/"}))))
+  (is (= :invalid-runner-config
+         (try
+           (remote/config-from-env
+             {"CCH_CONTROL_BROKER_URL" "https://broker.invalid"
+              "CCH_CONTROL_RUNNER_ID" "runner-a"
+              "CCH_CONTROL_RUNNER_TOKEN" "synthetic-token"
+              "CCH_CONTROL_LOCAL_UI_URL" "http://runner.invalid"})
+           (catch clojure.lang.ExceptionInfo error
+             (:type (ex-data error)))))))
 
 (deftest broker-token-config-is-explicit-and-never-defaulted
   (is (= {"runner-a" "synthetic-token"}

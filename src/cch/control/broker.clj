@@ -108,6 +108,26 @@
           value))
       (catch Exception _ nil))))
 
+(defn sanitize-local-ui-url!
+  "Validate an optional runner-local web base. The broker presents this URL to
+  an authenticated operator but never fetches or proxies it."
+  [value]
+  (when value
+    (when-not (and (string? value) (<= 1 (count value) 512))
+      (throw (ex-info "local_ui_url is invalid" {:type :invalid-runner})))
+    (let [uri (try (URI. value) (catch Exception _ nil))
+          scheme (some-> uri .getScheme str/lower-case)
+          host (some-> uri .getHost str/lower-case)
+          loopback? (contains? #{"localhost" "127.0.0.1" "::1"} host)]
+      (when-not (and uri host
+                     (or (= "https" scheme)
+                         (and (= "http" scheme) loopback?))
+                     (nil? (.getUserInfo uri))
+                     (nil? (.getQuery uri))
+                     (nil? (.getFragment uri)))
+        (throw (ex-info "local_ui_url is invalid" {:type :invalid-runner})))
+      (str/replace value #"/+$" ""))))
+
 (defn sanitize-session [{:keys [id status available native-url name]}]
   (when-let [agent (and (valid-label? id) (route-agent id))]
     (let [native-url (sanitized-native-url agent native-url)
@@ -168,13 +188,14 @@
 (defn register!
   "Replace a runner's leased route set with a sanitized presence snapshot.
   Only available Claude/Codex routes are advertised."
-  [^Broker broker {:keys [runner-id token sessions lease-ms]}]
+  [^Broker broker {:keys [runner-id token sessions lease-ms local-ui-url]}]
   (authorize! broker runner-id token)
   (when-not (valid-label? runner-id)
     (throw (ex-info "runner_id is invalid" {:type :invalid-runner})))
   (let [timestamp (now broker)
         lease-ms (clamp (or lease-ms (get-in broker [:options :lease-ms]))
                         1000 (* 5 60 1000))
+        local-ui-url (sanitize-local-ui-url! local-ui-url)
         sessions (->> sessions
                       (keep sanitize-session)
                       (filter :available)
@@ -196,6 +217,7 @@
         (let [without-old (update state :routes #(apply dissoc % old-route-ids))
               runner {:runner-id runner-id
                       :route-ids route-ids
+                      :local-ui-url local-ui-url
                       :updated-at timestamp
                       :expires-at (+ timestamp lease-ms)}
               routes (reduce-kv
@@ -214,6 +236,18 @@
            :runner-id runner-id
            :route-count (count route-ids)
            :expires-at (+ timestamp lease-ms)})))))
+
+(defn runners
+  "Return active runner presentation metadata without credentials."
+  [^Broker broker]
+  (expire! broker)
+  (->> (:runners @(:state broker))
+       vals
+       (map (fn [{:keys [runner-id local-ui-url]}]
+              (cond-> {:runner-id runner-id}
+                local-ui-url (assoc :local-ui-url local-ui-url))))
+       (sort-by :runner-id)
+       vec))
 
 (defn sessions
   "Return active sanitized presence. runner-id is an opaque routing label, not
@@ -574,6 +608,8 @@
     (authorize! b runner-id token))
   (register-runner! [b request]
     (register! b request))
+  (active-runners [b]
+    (runners b))
   (active-sessions [b]
     (sessions b))
   (set-session-alias! [b request]
