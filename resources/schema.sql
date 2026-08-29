@@ -102,6 +102,15 @@ CREATE TABLE IF NOT EXISTS usage_sync_state (
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
 );
 
+-- Incremental source cursor for bounded import from the legacy local snapshot
+-- table during the normalized-forecast migration. Only source-local rows are
+-- imported; the table can be removed after the compatibility path is retired.
+CREATE TABLE IF NOT EXISTS usage_backfill_state (
+  singleton_id    INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  last_context_id INTEGER NOT NULL DEFAULT 0 CHECK (last_context_id >= 0),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+);
+
 -- Covering expression indexes for the forecast's completed-window "finals"
 -- queries (cch.forecast/historical-finals-sql). Those GROUP BY resets_at and
 -- MAX(used_percentage) per window across ALL history — an unbounded scan that,

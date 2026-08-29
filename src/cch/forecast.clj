@@ -1,7 +1,7 @@
 (ns cch.forecast
   "Statusline data layer.
 
-  Pulls 5h and 7d rate-limit observations from context_snapshots and
+  Pulls 5h and 7d rate-limit observations from a normalized usage stream and
   hands them to cch.projections for Bayesian forecasts. The /forecast
   endpoint serves what statusline-command.sh consumes:
 
@@ -38,6 +38,17 @@
 
 (def ^:const default-agent "claude-code")
 
+(def ^:dynamic *usage-source*
+  "Compatibility selector used while normalized forecasts run beside the
+  legacy payload table. The root remains legacy until live parity passes."
+  (case (System/getenv "CCH_FORECAST_USAGE_SOURCE")
+    "normalized" :normalized
+    "legacy" :legacy
+    :legacy))
+
+(defn- normalized-source? []
+  (= :normalized *usage-source*))
+
 (defn- escape-sql-literal
   "Single-quote escape for SQL string literals. Defensive — agent strings
    come from HTTP headers and registry constants, never user prompts, but
@@ -54,14 +65,20 @@
   "The most recent resets_at for a given window, scoped to `agent`."
   [agent window-key]
   (let [wpath (window-sql-path window-key)
-        sql   (format
-                (str "SELECT json_extract(payload, '$.rate_limits.%s.resets_at') AS resets_at "
-                     "FROM context_snapshots "
-                     "WHERE json_extract(payload, '$.rate_limits.%s.resets_at') IS NOT NULL "
-                     "  AND json_extract(payload, '$.rate_limits.%s.used_percentage') > 0 "
-                     "%s"
-                     "ORDER BY id DESC LIMIT 1")
-                wpath wpath wpath (agent-clause agent))]
+        sql   (if (normalized-source?)
+                (format
+                  (str "SELECT resets_at FROM usage_observations "
+                       "WHERE window_key='%s' AND used_percentage>0 %s"
+                       "ORDER BY id DESC LIMIT 1")
+                  wpath (agent-clause agent))
+                (format
+                  (str "SELECT json_extract(payload, '$.rate_limits.%s.resets_at') AS resets_at "
+                       "FROM context_snapshots "
+                       "WHERE json_extract(payload, '$.rate_limits.%s.resets_at') IS NOT NULL "
+                       "  AND json_extract(payload, '$.rate_limits.%s.used_percentage') > 0 "
+                       "%s"
+                       "ORDER BY id DESC LIMIT 1")
+                  wpath wpath wpath (agent-clause agent)))]
     (some-> (db/query sql) first :resets_at long)))
 
 (defn- filtered-samples
@@ -71,20 +88,26 @@
   [agent since-iso window-key]
   (let [wpath  (window-sql-path window-key)
         bucket (bucket-secs window-key)
-        sql    (format
-                 (str
-                   "WITH samples AS ("
-                   "  SELECT"
-                   "    CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
-                   "    json_extract(payload, '$.rate_limits.%s.used_percentage') AS pct,"
-                   "    json_extract(payload, '$.rate_limits.%s.resets_at') AS resets_at"
-                   "  FROM context_snapshots"
-                   "  WHERE timestamp >= '%s'"
-                   "    AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
-                   "    AND session_id NOT LIKE 'test%%'"
-                   "    %s"
-                   "  ORDER BY timestamp ASC"
-                   "), "
+        source (if (normalized-source?)
+                 (format
+                   (str "SELECT CAST(observed_at / 1000 AS INTEGER) AS ts,"
+                        " used_percentage AS pct,resets_at"
+                        " FROM usage_observations"
+                        " WHERE observed_at >= CAST(strftime('%%s','%s') AS INTEGER) * 1000"
+                        " AND window_key='%s' %s"
+                        " ORDER BY observed_at ASC")
+                   since-iso wpath (agent-clause agent))
+                 (format
+                   (str "SELECT CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
+                        " json_extract(payload, '$.rate_limits.%s.used_percentage') AS pct,"
+                        " json_extract(payload, '$.rate_limits.%s.resets_at') AS resets_at"
+                        " FROM context_snapshots"
+                        " WHERE timestamp >= '%s'"
+                        " AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
+                        " AND session_id NOT LIKE 'test%%' %s"
+                        " ORDER BY timestamp ASC")
+                   wpath wpath since-iso wpath (agent-clause agent)))
+        sql    (str "WITH samples AS (" source "), "
                    "fresh AS ("
                    "  SELECT *,"
                    "    MAX(pct) OVER ("
@@ -101,15 +124,14 @@
                    "bucketed AS ("
                    "  SELECT *,"
                    "    ROW_NUMBER() OVER ("
-                   "      PARTITION BY resets_at, ts / %d"
+                   "      PARTITION BY resets_at, ts / " bucket
                    "      ORDER BY ts"
                    "    ) AS bucket_rn"
                    "  FROM monotone"
                    ") "
                    "SELECT ts, pct, resets_at FROM bucketed"
                    " WHERE bucket_rn = 1"
-                   " ORDER BY ts")
-                 wpath wpath since-iso wpath (agent-clause agent) bucket)]
+                   " ORDER BY ts")]
     (some->> (db/query sql)
              (mapv (fn [{:keys [ts pct resets_at]}]
                      {:ts        (long ts)
@@ -121,13 +143,19 @@
    sample display."
   [agent since-iso window-key]
   (let [wpath (window-sql-path window-key)
-        sql   (format
-                (str "SELECT COUNT(*) AS n FROM context_snapshots"
-                     " WHERE timestamp >= '%s'"
-                     " AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
-                     " AND session_id NOT LIKE 'test%%'"
-                     " %s")
-                since-iso wpath (agent-clause agent))]
+        sql   (if (normalized-source?)
+                (format
+                  (str "SELECT COUNT(*) AS n FROM usage_observations"
+                       " WHERE observed_at >= CAST(strftime('%%s','%s') AS INTEGER) * 1000"
+                       " AND window_key='%s' %s")
+                  since-iso wpath (agent-clause agent))
+                (format
+                  (str "SELECT COUNT(*) AS n FROM context_snapshots"
+                       " WHERE timestamp >= '%s'"
+                       " AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
+                       " AND session_id NOT LIKE 'test%%'"
+                       " %s")
+                  since-iso wpath (agent-clause agent)))]
     (some-> (db/query sql) first :n long)))
 
 (defn- epoch->iso [secs]
@@ -139,32 +167,7 @@
    treated independently. Returns :resets-at so the chart can avoid
    spanning a reset boundary when computing a lookback-window rate."
   [agent since-iso]
-  (let [sql (format
-              (str "WITH samples AS ("
-                   "  SELECT CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
-                   "    CAST(json_extract(payload, '$.rate_limits.five_hour.used_percentage') AS REAL) AS pct,"
-                   "    json_extract(payload, '$.rate_limits.five_hour.resets_at') AS resets_at"
-                   "  FROM context_snapshots"
-                   "  WHERE timestamp >= '%s'"
-                   "    AND json_extract(payload, '$.rate_limits.five_hour.used_percentage') IS NOT NULL"
-                   "    AND session_id NOT LIKE 'test%%'"
-                   "    %s"
-                   "  ORDER BY timestamp ASC"
-                   "), fresh AS ("
-                   "  SELECT *,"
-                   "    MAX(pct) OVER (PARTITION BY resets_at ORDER BY ts"
-                   "      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_max"
-                   "  FROM samples"
-                   "), monotone AS ("
-                   "  SELECT * FROM fresh WHERE pct >= COALESCE(prev_max, 0)"
-                   "), bucketed AS ("
-                   "  SELECT *, ROW_NUMBER() OVER (PARTITION BY resets_at, ts / 60 ORDER BY ts) AS rn"
-                   "  FROM monotone"
-                   ") SELECT ts, pct, resets_at FROM bucketed WHERE rn = 1 ORDER BY ts")
-              since-iso (agent-clause agent))]
-    (some->> (db/query sql)
-             (mapv (fn [{:keys [ts pct resets_at]}]
-                     {:ts (long ts) :pct (double pct) :resets-at (long resets_at)})))))
+  (filtered-samples agent since-iso :five-hour))
 
 (def ^:private prior-decay-lambda 0.85)
 
@@ -200,19 +203,28 @@
   {:seven-day (* 7.0 24.0) :five-hour 5.0})
 
 (defn- historical-finals-sql [agent window-key]
-  (let [wk (window-json-key window-key)
-        ex (fn [field] (str "json_extract(payload,'$.rate_limits." wk "." field "')"))]
-    (str "SELECT final_pct FROM ("
-         "  SELECT MAX(CAST(" (ex "used_percentage") " AS REAL)) AS final_pct"
-         "  FROM context_snapshots"
-         "  WHERE " (ex "resets_at") " < strftime('%s','now')"
-         "    AND " (ex "used_percentage") " IS NOT NULL"
-         "    AND session_id NOT LIKE 'test%'"
-         "    " (agent-clause agent)
-         "  GROUP BY " (ex "resets_at")
-         "  ORDER BY " (ex "resets_at") " DESC"
-         "  LIMIT 12"
-         ") WHERE final_pct >= 10")))
+  (let [wk (window-json-key window-key)]
+    (if (normalized-source?)
+      (str "SELECT final_pct FROM ("
+           " SELECT MAX(used_percentage) AS final_pct"
+           " FROM usage_observations"
+           " WHERE resets_at < strftime('%s','now')"
+           " AND window_key='" wk "' " (agent-clause agent)
+           " GROUP BY resets_at ORDER BY resets_at DESC LIMIT 12"
+           ") WHERE final_pct >= 10")
+      (let [ex (fn [field]
+                 (str "json_extract(payload,'$.rate_limits." wk "." field "')"))]
+        (str "SELECT final_pct FROM ("
+             "  SELECT MAX(CAST(" (ex "used_percentage") " AS REAL)) AS final_pct"
+             "  FROM context_snapshots"
+             "  WHERE " (ex "resets_at") " < strftime('%s','now')"
+             "    AND " (ex "used_percentage") " IS NOT NULL"
+             "    AND session_id NOT LIKE 'test%'"
+             "    " (agent-clause agent)
+             "  GROUP BY " (ex "resets_at")
+             "  ORDER BY " (ex "resets_at") " DESC"
+             "  LIMIT 12"
+             ") WHERE final_pct >= 10")))))
 
 (defn- historical-final-pcts
   "Final used_percentage for each completed `window-key` window, newest-first,
@@ -321,7 +333,7 @@
   ([] (current-window default-agent :seven-day))
   ([window-key] (current-window default-agent window-key))
   ([agent window-key]
-   (let [k                  [agent window-key]
+   (let [k                  [*usage-source* agent window-key]
          {:keys [ts data]}  (get @window-cache k {:ts 0 :data nil})
          now                (-> (Instant/now) .getEpochSecond)]
      (if (< (- now ts) 30)
@@ -343,17 +355,25 @@
    than 2 samples."
   [agent wpath resets-at now]
   (let [cutoff-iso (epoch->iso (- now burn-lookback-secs))
-        sql        (format
-                     (str "SELECT CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
-                          "  json_extract(payload, '$.rate_limits.%s.used_percentage') AS pct"
-                          " FROM context_snapshots"
-                          " WHERE timestamp >= '%s'"
-                          "   AND json_extract(payload, '$.rate_limits.%s.resets_at') = %d"
-                          "   AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
-                          "   AND session_id NOT LIKE 'test%%'"
-                          "   %s"
-                          " ORDER BY ts ASC")
-                     wpath cutoff-iso wpath resets-at wpath (agent-clause agent))
+        sql        (if (normalized-source?)
+                     (format
+                       (str "SELECT CAST(observed_at / 1000 AS INTEGER) AS ts,"
+                            " used_percentage AS pct FROM usage_observations"
+                            " WHERE observed_at >= CAST(strftime('%%s','%s') AS INTEGER) * 1000"
+                            " AND window_key='%s' AND resets_at=%d %s"
+                            " ORDER BY observed_at ASC")
+                       cutoff-iso wpath resets-at (agent-clause agent))
+                     (format
+                       (str "SELECT CAST(strftime('%%s', timestamp) AS INTEGER) AS ts,"
+                            "  json_extract(payload, '$.rate_limits.%s.used_percentage') AS pct"
+                            " FROM context_snapshots"
+                            " WHERE timestamp >= '%s'"
+                            "   AND json_extract(payload, '$.rate_limits.%s.resets_at') = %d"
+                            "   AND json_extract(payload, '$.rate_limits.%s.used_percentage') IS NOT NULL"
+                            "   AND session_id NOT LIKE 'test%%'"
+                            "   %s"
+                            " ORDER BY ts ASC")
+                       wpath cutoff-iso wpath resets-at wpath (agent-clause agent)))
         rows       (db/query sql)]
     (when (>= (count rows) 2)
       (let [oldest    (first rows)
@@ -421,6 +441,7 @@
                                :hi (Math/round (double (:hi band)))})))))))
 
 (def ^:private forecast-cache (atom nil))
+(def ^:private parity-cache (atom nil))
 (def ^:private bg-thread (atom nil))
 (def ^:private last-watermark (atom nil))
 
@@ -435,16 +456,95 @@
   longer need to signal; kept so existing call sites stay valid."
   [])
 
+(defn- source-forecast
+  [source]
+  (binding [*usage-source* source]
+    {:five_hour (compute-window-stats default-agent :five-hour
+                                      proj/rate-bayes-projection)
+     :seven_day (compute-window-stats default-agent :seven-day
+                                      proj/rate-bayes-projection)}))
+
+(defn- source-window-diagnostics
+  [source window-key]
+  (binding [*usage-source* source]
+    (let [now (-> (Instant/now) .getEpochSecond)
+          prior (window-priors default-agent window-key)
+          samples (or (raw-sample-count
+                        default-agent
+                        (epoch->iso (- now (span-secs window-key)))
+                        window-key)
+                      0)]
+      {:prior prior :samples samples})))
+
+(defn- absolute-delta [a b]
+  (when (and (number? a) (number? b))
+    (Math/abs (- (double a) (double b)))))
+
+(defn- window-parity
+  [window-key legacy normalized]
+  (let [legacy-stats (get legacy window-key)
+        normalized-stats (get normalized window-key)
+        legacy-diagnostics (source-window-diagnostics
+                             :legacy (if (= window-key :five_hour)
+                                       :five-hour :seven-day))
+        normalized-diagnostics (source-window-diagnostics
+                                 :normalized (if (= window-key :five_hour)
+                                               :five-hour :seven-day))
+        current-delta (absolute-delta (:current_pct legacy-stats)
+                                      (:current_pct normalized-stats))
+        projected-delta (absolute-delta (:projected_pct legacy-stats)
+                                        (:projected_pct normalized-stats))
+        reset-delta (absolute-delta (:secs_left legacy-stats)
+                                    (:secs_left normalized-stats))
+        mu-delta (absolute-delta
+                   (get-in legacy-diagnostics [:prior :prior-mu])
+                   (get-in normalized-diagnostics [:prior :prior-mu]))
+        sigma-delta (absolute-delta
+                      (get-in legacy-diagnostics [:prior :prior-sigma])
+                      (get-in normalized-diagnostics [:prior :prior-sigma]))
+        legacy-samples (:samples legacy-diagnostics)
+        normalized-samples (:samples normalized-diagnostics)
+        coverage (if (pos? legacy-samples)
+                   (/ (double normalized-samples) legacy-samples)
+                   (if (zero? normalized-samples) 1.0 0.0))
+        present-match (= (boolean legacy-stats) (boolean normalized-stats))
+        within? (and present-match
+                     (or (nil? current-delta) (<= current-delta 1.0))
+                     (or (nil? projected-delta) (<= projected-delta 2.0))
+                     (or (nil? reset-delta) (<= reset-delta 2.0))
+                     (or (nil? mu-delta) (<= mu-delta 0.05))
+                     (or (nil? sigma-delta) (<= sigma-delta 0.05))
+                     (>= coverage 0.90))]
+    {:present-match present-match
+     :current-pct-delta current-delta
+     :projected-pct-delta projected-delta
+     :reset-seconds-delta reset-delta
+     :prior-mu-delta mu-delta
+     :prior-sigma-delta sigma-delta
+     :legacy-samples legacy-samples
+     :normalized-samples normalized-samples
+     :sample-coverage-ratio coverage
+     :within-tolerance within?}))
+
+(defn- parity-summary [legacy normalized]
+  (let [windows {:five_hour (window-parity :five_hour legacy normalized)
+                 :seven_day (window-parity :seven_day legacy normalized)}]
+    {:computed-at (-> (Instant/now) .getEpochSecond)
+     :within-tolerance (every? :within-tolerance (vals windows))
+     :windows windows}))
+
 (defn- do-refresh!
   "Refresh the statusline forecast cache. Claude-only — the statusLine
   command is Claude Code's; Codex uses its own built-in status_line
   config. The /usage page's Codex tab pulls live data via current-window
   (its own per-[agent window-key] cache), not via this atom."
   []
-  (reset! forecast-cache
-          {:five_hour    (compute-window-stats default-agent :five-hour  proj/rate-bayes-projection)
-           :seven_day    (compute-window-stats default-agent :seven-day  proj/rate-bayes-projection)
-           :computed_at  (-> (Instant/now) .getEpochSecond)}))
+  (let [legacy (source-forecast :legacy)
+        normalized (source-forecast :normalized)
+        selected (if (= :normalized *usage-source*) normalized legacy)
+        computed-at (-> (Instant/now) .getEpochSecond)]
+    (reset! forecast-cache (assoc selected :computed_at computed-at))
+    (reset! parity-cache (parity-summary legacy normalized))))
 
 (defn- safe-refresh! []
   ;; Catch Throwable, not Exception — an Error (OOM, init failure, etc.)
@@ -455,12 +555,15 @@
            (println "cch.forecast: refresh failed:" (.getMessage t))))))
 
 (defn- snapshot-watermark
-  "Cheap change-detector for the refresh gate: the highest context_snapshots
-  id, or nil if unavailable. A single MAX(id) over the primary key —
-  sub-millisecond even on a large table — so an idle loop costs almost nothing."
+  "Cheap change-detector for both compatibility streams."
   []
-  (try (some-> (db/query "SELECT MAX(id) AS m FROM context_snapshots") first :m)
-       (catch Throwable _ nil)))
+  (try
+    (let [legacy (some-> (db/query "SELECT MAX(id) AS m FROM context_snapshots")
+                         first :m)
+          normalized (some-> (db/query "SELECT MAX(id) AS m FROM usage_observations")
+                             first :m)]
+      (when (or legacy normalized) [legacy normalized]))
+    (catch Throwable _ nil)))
 
 (defn- maybe-refresh!
   "Recompute only when new snapshots have arrived since the last refresh.
@@ -524,3 +627,8 @@
    all computation runs in the background thread."
   []
   @forecast-cache)
+
+(defn parity-status
+  "Aggregate, privacy-safe legacy/normalized forecast discrepancy metrics."
+  []
+  @parity-cache)

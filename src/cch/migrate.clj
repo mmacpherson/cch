@@ -87,6 +87,12 @@
              "  direction TEXT PRIMARY KEY CHECK (direction IN ('publish','pull')),"
              "  cursor INTEGER NOT NULL DEFAULT 0 CHECK (cursor >= 0),"
              "  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now'))"
+             ");")}
+   {:id "0008-usage-backfill-state"
+    :up (str "CREATE TABLE IF NOT EXISTS usage_backfill_state ("
+             "  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),"
+             "  last_context_id INTEGER NOT NULL DEFAULT 0 CHECK (last_context_id >= 0),"
+             "  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f','now'))"
              ");")}])
 
 (defn migration-ids

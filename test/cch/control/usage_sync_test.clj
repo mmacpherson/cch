@@ -6,6 +6,7 @@
             [cch.control.usage-sync :as usage-sync]
             [cch.log :as log]
             [cch.usage-observation :as usage]
+            [cheshire.core]
             [clojure.test :refer [deftest is testing]]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs])
@@ -51,6 +52,35 @@
     {:dbtype "sqlite" :dbname path}
     ["SELECT direction,cursor FROM usage_sync_state ORDER BY direction"]
     {:builder-fn rs/as-unqualified-maps}))
+
+(deftest bounded-backfill-is-local-only-and-idempotent
+  (let [directory (str (fs/create-temp-dir {:prefix "usage-backfill-test-"}))
+        path (str directory "/events.db")
+        now 2000000000000
+        timestamp (str (java.time.Instant/ofEpochMilli (- now 1000)))
+        payload (cheshire.core/generate-string
+                  {:rate_limits
+                   {:five_hour {:used_percentage 11 :resets_at 2000003600}
+                    :seven_day {:used_percentage 22 :resets_at 2000604800}}})]
+    (try
+      (log/ensure-db! path)
+      (jdbc/execute!
+        {:dbtype "sqlite" :dbname path}
+        [(str "INSERT INTO context_snapshots "
+              "(timestamp,agent,session_id,payload,node,origin_id) VALUES "
+              "(?,'codex','synthetic-local',?,NULL,NULL),"
+              "(?,'codex','synthetic-remote',?,'synthetic-node',7)")
+         timestamp payload timestamp payload])
+      (is (= {:snapshots 1 :observations 2 :inserted 2 :cursor 1}
+             (usage-sync/backfill-once! path now 10)))
+      (is (= {:snapshots 0 :observations 0 :inserted 0 :cursor 1}
+             (usage-sync/backfill-once! path now 10)))
+      (let [rows (local-rows path)]
+        (is (= 2 (count rows)))
+        (is (every? #(= 1 (:publishable %)) rows))
+        (is (= #{"five_hour" "seven_day"} (set (map :window_key rows)))))
+      (finally
+        (fs/delete-tree directory)))))
 
 (deftest paired-runners-recover-and-exchange-without-echo
   (let [directory (str (fs/create-temp-dir {:prefix "usage-sync-test-"}))

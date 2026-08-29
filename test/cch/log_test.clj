@@ -19,7 +19,8 @@
         (let [result (p/sh ["sqlite3" db-path ".tables"])]
           (is (re-find #"events" (:out result)))
           (is (re-find #"usage_observations" (:out result)))
-          (is (re-find #"usage_sync_state" (:out result)))))
+          (is (re-find #"usage_sync_state" (:out result)))
+          (is (re-find #"usage_backfill_state" (:out result)))))
 
       (testing "idempotent — second call doesn't error"
         (log/ensure-db! db-path))

@@ -6,7 +6,9 @@
                                    statusline-stats]]
             [cch.log :as log]
             [cch.projections]
-            [clojure.test :refer [deftest testing is]]))
+            [cheshire.core :as json]
+            [clojure.test :refer [deftest testing is]]
+            [next.jdbc :as jdbc]))
 
 ;; ---------------------------------------------------------------------------
 ;; weighted-prior-params — pure fn, no DB required
@@ -150,6 +152,52 @@
           (is (pos? @updates) "a tick must recompute after new data arrives")
           (finally
             (remove-watch cache ::tick)))))))
+
+(deftest normalized-and-legacy-query-paths-produce-the-same-forecast
+  (with-fresh-bg
+    (fn []
+      (let [path (db/db-path)
+            ds {:dbtype "sqlite" :dbname path}
+            now (-> (java.time.Instant/now) .getEpochSecond)
+            current-5h (+ now 7200)
+            current-7d (+ now (* 3 86400))
+            samples
+            [{:ts (- now 600) :five [current-5h 10] :seven [current-7d 20]}
+             {:ts (- now 300) :five [current-5h 12] :seven [current-7d 21]}
+             {:ts (- now 60) :five [current-5h 14] :seven [current-7d 22]}
+             {:ts (- now (* 2 3600)) :five [(- now 3600) 70]
+              :seven [(- now 86400) 80]}
+             {:ts (- now (* 7 3600)) :five [(- now (* 6 3600)) 60]
+              :seven [(- now (* 8 86400)) 75]}]]
+        (doseq [[index {:keys [ts five seven]}] (map-indexed vector samples)]
+          (let [[reset-5h pct-5h] five
+                [reset-7d pct-7d] seven
+                timestamp (str (java.time.Instant/ofEpochSecond ts))
+                payload (json/generate-string
+                          {:rate_limits
+                           {:five_hour {:used_percentage pct-5h
+                                        :resets_at reset-5h}
+                            :seven_day {:used_percentage pct-7d
+                                        :resets_at reset-7d}}})]
+            (jdbc/execute!
+              ds
+              [(str "INSERT INTO context_snapshots "
+                    "(timestamp,agent,session_id,payload) VALUES "
+                    "(?,'claude-code','synthetic-parity',?)")
+               timestamp payload])
+            (doseq [[window reset pct] [["five_hour" reset-5h pct-5h]
+                                        ["seven_day" reset-7d pct-7d]]]
+              (jdbc/execute!
+                ds
+                [(str "INSERT INTO usage_observations "
+                      "(event_id,schema_version,observed_at,agent,window_key,"
+                      "used_percentage,resets_at,publishable) "
+                      "VALUES (?,1,?,'claude-code',?,?,?,1)")
+                 (format "synthetic-%d-%s" index window)
+                 (* ts 1000) window pct reset]))))
+        (let [legacy (#'cch.forecast/source-forecast :legacy)
+              normalized (#'cch.forecast/source-forecast :normalized)]
+          (is (= legacy normalized)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; window-priors — both /usage and /forecast (statusline) MUST share this so
