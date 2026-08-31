@@ -47,12 +47,27 @@ mkdir -p "$HOME/.claude"
 cp "$repo/bin/statusline-command.sh" "$HOME/.claude/statusline-command.sh"
 chmod +x "$HOME/.claude/statusline-command.sh"
 
-# Restart the local dispatcher so it runs the freshly deployed runtime.
-if systemctl --user is-active cch.service &>/dev/null; then
-  systemctl --user restart cch.service
-  echo "  cch.service restarted"
-fi
+# Restart cch-owned services so they run the freshly deployed runtime. Every
+# long-lived cch process is the same jlink image chosen by subcommand, so a
+# redeploy that only restarts the dispatcher would leave the paired runner (and
+# any broker) executing the OLD jar. Bounce each unit that is actually active.
+restarted_units=()
+for unit in cch.service cch-control-runner.service cch-control-broker.service; do
+  if systemctl --user is-active "$unit" &>/dev/null; then
+    systemctl --user restart "$unit"
+    echo "  ${unit%.service} restarted"
+    restarted_units+=("$unit")
+  fi
+done
 
+# Per-session MCP subprocesses are spawned by the provider CLIs, not by systemd,
+# so a redeploy cannot bounce them. Point the operator at the refresh path.
+echo
+echo "Active agent sessions keep their previous cch MCP until refreshed:"
+echo "    Codex:  cch control refresh-mcp codex"
+echo "    Claude: run '/mcp reconnect cch' inside each active session"
+
+echo
 echo "Installed:"
 echo "  $bin/cch        -> execs $runtime_bin"
 echo "  $bin/cch-eval   -> $repo/bin/cch-eval"
