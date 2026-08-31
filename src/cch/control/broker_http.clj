@@ -13,9 +13,26 @@
               "Cache-Control" "no-store"}
     :body (json/generate-string value)}))
 
+;; The register listener accepts a larger body than the raw http-kit ceiling so
+;; that an oversized presence snapshot is rejected by the handler with a typed
+;; JSON error the runner can classify, instead of http-kit's bare plaintext 413.
+(def ^:const max-register-body-bytes (* 256 1024))
+
 (defn- read-json [request]
   (if-let [body (:body request)]
     (json/parse-string (slurp body) true)
+    {}))
+
+(defn- read-json-capped
+  "Read a JSON body, throwing a typed error when it exceeds max-bytes so the
+  handler returns a classified 413 rather than http-kit's pre-handler default."
+  [request max-bytes type]
+  (if-let [body (:body request)]
+    (let [raw (slurp body)]
+      (when (> (alength (.getBytes ^String raw "UTF-8")) max-bytes)
+        (throw (ex-info "Register presence snapshot exceeds the maximum body size"
+                        {:type type})))
+      (json/parse-string raw true))
     {}))
 
 (defn- bearer-token [request]
@@ -39,6 +56,7 @@
     :message-id-conflict 409
     :runner-not-registered 409
     :message-too-large 413
+    :register-too-large 413
     :usage-batch-too-large 413
     :invalid-usage-observation 422
     :invalid-usage-batch 422
@@ -63,7 +81,8 @@
         (json-response 200 (broker/broker-summary b))
 
         (and (= :post request-method) (= "/v1/runners/register" uri))
-        (let [payload (read-json request)]
+        (let [payload (read-json-capped request max-register-body-bytes
+                                        :register-too-large)]
           (json-response 200
                          (broker/register-runner!
                            b (merge payload (credentials request payload)))))
@@ -152,8 +171,11 @@
   overlay/reverse proxy; the default listener is loopback-only."
   [b {:keys [host port] :or {host "127.0.0.1" port 8787}}]
   (let [stop (httpkit/run-server (handler b)
+                                 ;; Hard ceiling sits above max-register-body-bytes so an
+                                 ;; oversized register reaches the handler and gets a typed
+                                 ;; 413; every other endpoint enforces its own smaller cap.
                                  {:ip host :port port
-                                  :max-body (* 64 1024)})]
+                                  :max-body (* 512 1024)})]
     {:stop stop :host host :port port}))
 
 (defn start-web!

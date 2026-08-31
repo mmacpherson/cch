@@ -19,9 +19,12 @@
 
 (defn- report-loop-error! [error]
   (binding [*out* *err*]
-    (println (str "cch control runner: "
-                  (or (some-> error ex-data :type name) "unexpected-error")
-                  ": " (.getMessage error)))))
+    (let [data (ex-data error)
+          status (:status data)]
+      (println (str "cch control runner: "
+                    (or (some-> data :type name) "unexpected-error")
+                    (when status (str " (HTTP " status ")"))
+                    ": " (.getMessage error))))))
 
 (defn tick!
   "Run one reconnect-safe exchange. Dependencies are explicit so the transport

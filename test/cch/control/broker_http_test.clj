@@ -105,6 +105,29 @@
       (finally
         ((:stop server) :timeout 100)))))
 
+(deftest oversized-register-is-rejected-with-a-typed-413
+  ;; An over-cap presence snapshot must reach the handler and return a classified
+  ;; JSON 413, not http-kit's pre-handler plaintext 413 (which the runner could
+  ;; only log as an untyped "Broker rejected request").
+  (let [port (free-port)
+        b (broker/new-broker {"runner-a" "synthetic-token-a"})
+        server (broker-http/start! b {:port port})
+        a (config port "runner-a" "synthetic-token-a")
+        big-name (apply str (repeat (* 300 1024) "x"))
+        oversized [{:id "codex:10000000-0000-0000-0000-00000000000a"
+                    :agent "codex" :status "idle" :available true
+                    :name big-name}]]
+    (try
+      (is (= {:type :register-too-large :status 413}
+             (try (remote/register! a oversized)
+                  (catch clojure.lang.ExceptionInfo error
+                    (select-keys (ex-data error) [:type :status]))))
+          "the runner receives a typed, classifiable rejection")
+      (is (= "registered" (:status (remote/register! a sessions-a)))
+          "a normal register still succeeds afterward")
+      (finally
+        ((:stop server) :timeout 100)))))
+
 (deftest runner-config-requires-complete-encrypted-or-loopback-transport
   (testing "unset is an intentional local-only mode"
     (is (nil? (remote/config-from-env {}))))

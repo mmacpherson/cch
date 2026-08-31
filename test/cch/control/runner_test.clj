@@ -100,6 +100,16 @@
       (is (= [live-a live-b] @registered)
           "stale sessions are dropped before registering"))))
 
+(deftest report-loop-error-surfaces-http-status
+  ;; A broker rejection carries an HTTP status in ex-data; the operator-facing
+  ;; log must show it so a typed 413/409 is diagnosable, not a bare message.
+  (let [report! @(ns-resolve 'cch.control.runner 'report-loop-error!)
+        sink (java.io.StringWriter.)]
+    (binding [*err* sink]
+      (report! (ex-info "Register presence snapshot exceeds the maximum body size"
+                        {:type :register-too-large :status 413})))
+    (is (re-find #"register-too-large \(HTTP 413\)" (str sink)))))
+
 (deftest polling-loop-reports-distinct-errors-and-recovers
   (let [calls (atom 0)
         reported (atom [])
