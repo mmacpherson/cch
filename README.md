@@ -108,8 +108,39 @@ not belong in this repository.
 | `cch control doctor` | Check pairing, supervision, and native capabilities |
 | `cch serve` | Run the local dispatcher and web application |
 | `cch install-service` | Install OS-native supervision for the local server |
+| `cch control broker` | Run the central broker (Postgres-backed) |
+| `cch install-broker-service` | Install a systemd user unit for the broker |
 
 Run `cch <command> --help` or `cch control --help` for details.
+
+## Deploy the broker
+
+Fleet operation needs one broker reachable by every paired runner. It is the
+same artifact as everything else — `cch control broker` — configured entirely
+through environment variables, so the repository ships the generic deploy
+primitives while your secrets and host identities stay out of it.
+
+1. Provide configuration. Copy
+   [`resources/cch-control-broker.env.example`](resources/cch-control-broker.env.example)
+   to `~/.config/cch-control-broker.env` and fill in the Postgres connection,
+   the accepted runner tokens, and (optionally) the Cloudflare-Access web
+   switchboard. Every variable the broker reads is documented there.
+
+2. Pick a supervision path:
+   - **Runtime + systemd** (simple hosts): `cch install-broker-service`
+     (optionally `--host`/`--port`), then run the printed
+     `systemctl --user enable --now cch-control-broker`.
+   - **Container** (isolated server deploys): build the image from the
+     [`Containerfile`](Containerfile) and run it with the broker subcommand;
+     [`resources/service/cch-control-broker.container`](resources/service/cch-control-broker.container)
+     is a hardened podman Quadlet to install under
+     `~/.config/containers/systemd/`.
+
+3. Verify `http://<host>:<port>/health` reports `status: ok` and the expected
+   runner count, then complete `cch control pair` on each runner.
+
+Both paths read the same env file, so an environment-specific wrapper only has
+to supply that file and choose a path.
 
 ## Hooks and observations
 

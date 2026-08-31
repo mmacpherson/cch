@@ -16,6 +16,7 @@
             [cch.doctor :as doctor]
             [cch.server :as server]
             [cli.control-cmd :as control-cmd]
+            [cli.broker-service :as broker-service]
             [cli.init :as init]
             [cli.install :as install]
             [cli.list-cmd :as list-cmd]
@@ -71,7 +72,13 @@
    ["install-service"   {:desc "Install OS-native auto-start for `cch serve`"
                          :fn   #'service-cmd/run}]
    ["uninstall-service" {:desc "Remove the auto-start unit/plist"
-                         :fn   #'service-cmd/run-uninstall}]])
+                         :fn   #'service-cmd/run-uninstall}]
+   ["install-broker-service"   {:desc "Install a systemd user unit for `cch control broker`"
+                                :fn   #'broker-service/run
+                                :opts [[nil "--host HOST" "Loopback listener host"]
+                                       [nil "--port PORT" "Listener port" :parse-fn parse-long]]}]
+   ["uninstall-broker-service" {:desc "Remove the broker systemd user unit"
+                                :fn   #'broker-service/run-uninstall}]])
 
 (defn- lookup [cmd]
   (some (fn [[n spec]] (when (= n cmd) spec)) commands))
@@ -86,7 +93,7 @@
   (println)
   (println "Commands:")
   (doseq [[name {:keys [desc]}] commands]
-    (println (format "  %-18s %s" name desc)))
+    (println (format "  %-24s %s" name desc)))
   (println)
   (println "Run 'cch <command> --help' for details."))
 
