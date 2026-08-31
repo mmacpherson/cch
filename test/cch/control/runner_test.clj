@@ -82,6 +82,24 @@
       (is (= [(route "codex" "b")] @registered))
       (is (empty? @acked)))))
 
+(deftest tick-registers-only-available-local-presence
+  ;; list-local-sessions returns every discovered session, including stale/dead
+  ;; ones. Publishing those both misrepresents fleet presence and can push the
+  ;; register payload past the broker's request-body cap, which rejects the
+  ;; whole register (413). The runner must advertise only live presence.
+  (let [registered (atom nil)
+        live-a (route "codex" "a")
+        live-b (assoc (route "claude" "b") :available true)
+        stale  (assoc (route "codex" "c") :available false :status "stale")]
+    (with-redefs [remote/register! (fn [_ sessions] (reset! registered sessions))
+                  remote/poll! (constantly [])]
+      (runner/tick! {:runner-id "runner-a"}
+                    {:list-local-sessions
+                     #(hash-map :sessions [live-a stale live-b] :errors [])
+                     :deliver-local! identity})
+      (is (= [live-a live-b] @registered)
+          "stale sessions are dropped before registering"))))
+
 (deftest polling-loop-reports-distinct-errors-and-recovers
   (let [calls (atom 0)
         reported (atom [])

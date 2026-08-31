@@ -27,8 +27,14 @@
   "Run one reconnect-safe exchange. Dependencies are explicit so the transport
   and native delivery boundary can be exercised without real agent sessions."
   [config {:keys [list-local-sessions deliver-local!]}]
-  (let [presence (list-local-sessions)]
-    (remote/register! config (:sessions presence))
+  (let [presence (list-local-sessions)
+        ;; Publish only live presence. list-local-sessions returns every
+        ;; discovered session, including stale/dead ones; registering all of
+        ;; them both misrepresents fleet presence and can push the payload past
+        ;; the broker's request-body cap, which rejects the whole register (413)
+        ;; so nothing lands and the runner silently vanishes from the fleet.
+        live-sessions (filterv :available (:sessions presence))]
+    (remote/register! config live-sessions)
     (reduce
       (fn [result {:keys [message-id source target body]}]
         (try
