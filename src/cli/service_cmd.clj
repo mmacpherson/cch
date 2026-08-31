@@ -24,10 +24,11 @@
 (defn- home-dir []
   (System/getProperty "user.home"))
 
-(defn- cch-repo-symlink
-  "Absolute path to the cch repo symlink that `cch init` creates."
+(defn- cch-runtime-bin
+  "Absolute path to the self-contained runtime launcher that `just install`
+  deploys. `cch serve` runs this, not `clj` from a repo checkout."
   []
-  (str (home-dir) "/.local/share/cch/repo"))
+  (str (home-dir) "/.local/share/cch/runtime/bin/cch"))
 
 (def ^:private uid
   "Memoized user UID — used for macOS `launchctl bootstrap gui/<uid>`."
@@ -81,13 +82,14 @@
 ;; --- Preconditions ---
 
 (defn- preflight!
-  "Verifies the cch repo symlink exists. Aborts with a helpful error if
-  not, so install-service never writes a broken unit."
+  "Verifies the self-contained runtime is deployed. Aborts with a helpful
+  error if not, so install-service never writes a unit that points at a
+  missing launcher."
   []
-  (when-not (fs/exists? (cch-repo-symlink))
+  (when-not (fs/exists? (cch-runtime-bin))
     (binding [*out* *err*]
-      (println "Error: cch repo symlink missing at" (cch-repo-symlink))
-      (println "Run `cch init` first to create it."))
+      (println "Error: cch runtime missing at" (cch-runtime-bin))
+      (println "Run `just build && just install` first to deploy it."))
     (System/exit 1)))
 
 ;; --- Commands ---

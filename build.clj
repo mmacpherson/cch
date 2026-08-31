@@ -59,6 +59,7 @@
    "java.sql"            ;; sqlite-jdbc
    "java.xml"            ;; clj-yaml/snakeyaml
    "jdk.crypto.ec"       ;; TLS EC keys
+   "jdk.httpserver"      ;; com.sun.net.httpserver — plumcp MCP server (control mcp)
    "jdk.unsupported"     ;; sun.misc.Unsafe (clojure runtime)
    "jdk.zipfs"])         ;; jar/classpath FS provider
 

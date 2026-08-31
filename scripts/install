@@ -1,24 +1,45 @@
 #!/usr/bin/env bash
-# Install the cch + cch-eval shims into a chosen bin directory.
-# Usage: scripts/install [bin-dir]   (default: ~/bin)
+# Install the cch launcher + cch-eval dev shim into a chosen bin directory.
+#
+# cch runs from the self-contained jlink runtime (bundled JRE + uberjar) under
+# ~/.local/share/cch/runtime. Every cch process — `serve`, `control runner`,
+# `control mcp`, `control broker` — is the same artifact, chosen by subcommand.
+# The launcher is a thin exec wrapper around that runtime, so nothing depends on
+# the location of this repo checkout (no repo symlink, no `clj` on the hot path).
+#
+# Usage: scripts/install [bin-dir]   (default: ~/.local/bin)
 set -euo pipefail
 
-bin="${1:-$HOME/bin}"
+bin="${1:-$HOME/.local/bin}"
 bin="${bin/#\~/$HOME}"
 repo="$(cd "$(dirname "$0")/.." && pwd)"
+share="$HOME/.local/share/cch"
+runtime_dst="$share/runtime"
+runtime_bin="$runtime_dst/bin/cch"
 
-mkdir -p "$bin" "$HOME/.local/share/cch"
+mkdir -p "$bin" "$share"
 
-# cch — bash shim. cd into the repo so clj picks up our deps.edn
-# regardless of the user's CWD.
+# Runtime: deploy the jlink'd image built by `just build`.
+runtime_src="$repo/target/cch-runtime"
+if [[ ! -d "$runtime_src" ]]; then
+  echo "Error: runtime image not found at $runtime_src" >&2
+  echo "Build it first:  just build" >&2
+  exit 1
+fi
+rsync -a --delete "$runtime_src/" "$runtime_dst/"
+echo "  $runtime_dst  (deployed from target/cch-runtime)"
+
+# cch — thin launcher that execs the bundled runtime. NOT a symlink: the runtime
+# launcher locates its JRE and uberjar relative to its own real path, so it must
+# be invoked where it actually lives.
 cat > "$bin/cch" <<EOF
 #!/usr/bin/env bash
-cd "\$HOME/.local/share/cch/repo" || exit 1
-exec clj -M:cli "\$@"
+exec "$runtime_bin" "\$@"
 EOF
 chmod +x "$bin/cch"
 
-# cch-eval — symlink so edits in the repo flow through immediately.
+# cch-eval — dev-only eval helper; symlink so repo edits flow through. It is not
+# on any service's critical path, so a stale link never affects the control plane.
 ln -sf "$repo/bin/cch-eval" "$bin/cch-eval"
 
 # statusline-command.sh — copy to ~/.claude so Claude Code picks it up.
@@ -26,27 +47,16 @@ mkdir -p "$HOME/.claude"
 cp "$repo/bin/statusline-command.sh" "$HOME/.claude/statusline-command.sh"
 chmod +x "$HOME/.claude/statusline-command.sh"
 
-# Repo symlink: ~/.local/share/cch/repo → this checkout.
-ln -sfn "$repo" "$HOME/.local/share/cch/repo"
-
-# Runtime: deploy the jlink'd runtime if it was built (just build).
-runtime_src="$repo/target/cch-runtime"
-runtime_dst="$HOME/.local/share/cch/runtime"
-if [[ -d "$runtime_src" ]]; then
-  mkdir -p "$runtime_dst"
-  rsync -a --delete "$runtime_src/" "$runtime_dst/"
-  echo "  ~/.local/share/cch/runtime  (deployed from target/cch-runtime)"
-  if systemctl --user is-active cch.service &>/dev/null; then
-    systemctl --user restart cch.service
-    echo "  cch.service restarted"
-  fi
+# Restart the local dispatcher so it runs the freshly deployed runtime.
+if systemctl --user is-active cch.service &>/dev/null; then
+  systemctl --user restart cch.service
+  echo "  cch.service restarted"
 fi
 
 echo "Installed:"
-echo "  $bin/cch        (bash shim)"
+echo "  $bin/cch        -> execs $runtime_bin"
 echo "  $bin/cch-eval   -> $repo/bin/cch-eval"
 echo "  ~/.claude/statusline-command.sh  (copied)"
-echo "  ~/.local/share/cch/repo  -> $repo"
 
 if ! command -v cch >/dev/null 2>&1; then
   echo

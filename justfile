@@ -69,13 +69,12 @@ doctor:
         exit 1
     fi
 
-# Install cch + cch-eval shims (default: ~/bin).
-# Use:  just install ~/.local/bin
-install bin="~/bin":
+# Deploy the runtime + cch launcher (default: ~/.local/bin). Run `just build` first.
+install bin="~/.local/bin":
     scripts/install {{bin}}
 
-# Remove the cch + cch-eval shims from `bin` (default: ~/bin).
-uninstall bin="~/bin":
+# Remove the cch + cch-eval shims from `bin` (default: ~/.local/bin).
+uninstall bin="~/.local/bin":
     scripts/uninstall {{bin}}
 
 # Build standalone runtime image (target/cch-runtime/)

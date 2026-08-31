@@ -18,8 +18,11 @@
           rendered (#'svc/render-template "service/cch.service.template")]
       ;; Template has no {{HOME}} tokens — render-template's replace is a no-op.
       (is (= raw rendered))
-      (is (str/includes? rendered "WorkingDirectory=%h/.local/share/cch/repo")
+      (is (str/includes? rendered "WorkingDirectory=%h/.local/share/cch")
           "systemd %h must be in the rendered unit")
+      (is (str/includes? rendered
+                         "ExecStart=%h/.local/share/cch/runtime/bin/cch serve")
+          "serve must run the self-contained runtime, not clj from the repo")
       (is (str/includes? rendered "Restart=on-failure")
           "Restart policy must be present"))))
 
