@@ -17,14 +17,15 @@
 (defn- fake-transport []
   (->FakeTransport
     (atom [{:id 1 :result {}}
-           {:id 2 :result
-            {:data [{:id "thread-1"
-                     :cwd "/synthetic/project"
-                     :status {:type "idle"}
-                     :canAcceptDirectInput nil
-                     :cliVersion "0.149.0"
-                     :source "cli"}]}}
-           {:id 3 :result {:queuedSubmission {}}}])
+           {:id 2 :result {:data ["thread-1"]}}
+           {:id 3 :result
+            {:thread {:id "thread-1"
+                      :cwd "/synthetic/project"
+                      :status {:type "idle"}
+                      :canAcceptDirectInput nil
+                      :cliVersion "0.149.0"
+                      :source "cli"}}}
+           {:id 4 :result {:queuedSubmission {}}}])
     (atom [])))
 
 (defn- refresh-transport [servers]

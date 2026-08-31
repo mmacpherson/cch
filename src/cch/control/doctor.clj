@@ -9,7 +9,7 @@
             [clojure.string :as str]))
 
 (def required-codex-methods
-  #{"thread/list" "thread/queue/add"})
+  #{"thread/loaded/list" "thread/read" "thread/queue/add"})
 
 (defn- command-version [run-command command]
   (try

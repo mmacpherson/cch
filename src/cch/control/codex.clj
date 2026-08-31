@@ -115,16 +115,32 @@
      (when-not available?
        "thread is a parent-owned subagent and rejects direct input")}))
 
+(defn- loaded-thread-ids
+  "Enumerate the app-server's currently loaded (live) thread ids. Codex 0.151+
+  reports running threads only through `thread/loaded/list`; `thread/list`
+  returns state-DB rollouts, which are all `notLoaded` and therefore exclude
+  live agent sessions. The listing is cursor-paginated."
+  [client]
+  (loop [cursor nil ids []]
+    (let [{:keys [data nextCursor]}
+          (rpc! client "thread/loaded/list"
+                (cond-> {} cursor (assoc :cursor cursor)))
+          ids (into ids data)]
+      (if (and nextCursor (seq data))
+        (recur nextCursor ids)
+        ids))))
+
+(defn- read-thread
+  "Fetch one loaded thread's detail. A thread can unload between listing and
+  read; treat that race as gone rather than failing the whole refresh."
+  [client id]
+  (try
+    (:thread (rpc! client "thread/read" {:threadId id}))
+    (catch clojure.lang.ExceptionInfo _ nil)))
+
 (defn sessions-with-client [client]
-  (->> (rpc! client "thread/list"
-             {:limit 200
-              :sortKey "updated_at"
-              :sortDirection "desc"
-              :useStateDbOnly true})
-       :data
-       ;; A saved rollout is not a running agent. Keep only daemon-owned
-       ;; threads; unavailable loaded threads remain visible for diagnosis.
-       (remove #(= "notLoaded" (status-name (:status %))))
+  (->> (loaded-thread-ids client)
+       (keep #(read-thread client %))
        (mapv public-thread)))
 
 (defn sessions []
