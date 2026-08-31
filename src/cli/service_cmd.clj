@@ -26,9 +26,16 @@
 
 (defn- cch-runtime-bin
   "Absolute path to the self-contained runtime launcher that `just install`
-  deploys. `cch serve` runs this, not `clj` from a repo checkout."
+  deploys. On Linux `cch serve` runs this, not `clj` from a repo checkout."
   []
   (str (home-dir) "/.local/share/cch/runtime/bin/cch"))
+
+(defn- cch-repo-symlink
+  "Absolute path to the repo symlink the macOS launchd plist still relies on.
+  macOS has not been migrated to the self-contained runtime yet, so its unit
+  launches `clj` from this checkout."
+  []
+  (str (home-dir) "/.local/share/cch/repo"))
 
 (def ^:private uid
   "Memoized user UID — used for macOS `launchctl bootstrap gui/<uid>`."
@@ -82,15 +89,22 @@
 ;; --- Preconditions ---
 
 (defn- preflight!
-  "Verifies the self-contained runtime is deployed. Aborts with a helpful
-  error if not, so install-service never writes a unit that points at a
-  missing launcher."
-  []
-  (when-not (fs/exists? (cch-runtime-bin))
-    (binding [*out* *err*]
-      (println "Error: cch runtime missing at" (cch-runtime-bin))
-      (println "Run `just build && just install` first to deploy it."))
-    (System/exit 1)))
+  "Verifies the launcher the unit will reference actually exists, so
+  install-service never writes a unit that points at a missing target.
+  Linux runs the self-contained runtime; macOS still launches `clj` from the
+  repo checkout via the symlink (pending runtime support there)."
+  [os]
+  (let [[target hint]
+        (if (= os :macos)
+          [(cch-repo-symlink)
+           "Run `cch init` in the repo to create the repo symlink first."]
+          [(cch-runtime-bin)
+           "Run `just build && just install` first to deploy the runtime."])]
+    (when-not (fs/exists? target)
+      (binding [*out* *err*]
+        (println "Error: cch launcher prerequisite missing at" target)
+        (println hint))
+      (System/exit 1))))
 
 ;; --- Commands ---
 
@@ -105,7 +119,7 @@
         (println "and macOS (launchd LaunchAgents) right now.")
         (println "Detected OS:" (System/getProperty "os.name")))
       (System/exit 1))
-    (preflight!)
+    (preflight! os)
     (let [{:keys [label path template activate disable logs]} (platform-info os)
           rendered (render-template template)]
       (fs/create-dirs (fs/parent path))

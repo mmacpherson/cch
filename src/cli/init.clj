@@ -4,10 +4,45 @@
             [cch.log :as log]
             [cch.config :as config]
             [babashka.fs :as fs]
+            [clojure.java.io :as io]
             [clojure.string :as str]))
+
+(defn- macos? []
+  (str/includes? (str/lower-case (System/getProperty "os.name")) "mac"))
+
+(defn- detect-repo-root
+  "Find the repo root from schema.sql on the classpath, so it works
+  regardless of cwd."
+  []
+  (when-let [schema-url (io/resource "schema.sql")]
+    (let [schema-path (str schema-url)]
+      (when (str/starts-with? schema-path "file:")
+        (str (fs/parent (fs/parent (subs schema-path 5))))))))
+
+(defn- ensure-repo-symlink!
+  "Create ~/.local/share/cch/repo → the checkout. Only macOS needs this: its
+  launchd units still launch `clj` from the repo. Linux runs the
+  self-contained runtime and needs no symlink."
+  [repo-root]
+  (let [xdg  (or (System/getenv "XDG_DATA_HOME")
+                 (str (System/getProperty "user.home") "/.local/share"))
+        link (str xdg "/cch/repo")]
+    (fs/create-dirs (str xdg "/cch"))
+    (if (fs/exists? link)
+      (println "  Repo symlink exists:" link)
+      (do
+        (fs/create-sym-link link repo-root)
+        (println "  Created repo symlink:" link "→" repo-root)))))
 
 (defn run [_options _arguments]
   (println "Initializing cch...")
+
+  ;; macOS still launches services via `clj` from this checkout; keep the repo
+  ;; symlink it relies on. Linux runs the runtime and needs no symlink.
+  (when (macos?)
+    (if-let [repo-root (detect-repo-root)]
+      (ensure-repo-symlink! repo-root)
+      (println "  WARNING: could not detect cch repo root for the macOS symlink")))
 
   ;; Ensure global config exists
   (let [global-path (config/global-config-path)
