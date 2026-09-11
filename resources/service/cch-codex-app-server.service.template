@@ -7,6 +7,11 @@ After=network-online.target
 Type=simple
 Environment="CODEX_HOME={{CODEX_HOME}}"
 Environment="PATH={{PATH}}"
+# Owner-only file holding CCH_MCP_TOKEN so the shared app-server can reach the
+# cch HTTP MCP endpoint. Kept out of this (world-readable) unit deliberately.
+# The leading '-' makes a missing file non-fatal: the app-server still starts
+# (only cch MCP auth would fail) rather than the whole service refusing to boot.
+EnvironmentFile=-{{ENV_FILE}}
 ExecStart="{{CODEX_BIN}}" app-server --listen unix://
 Restart=on-failure
 RestartSec=2

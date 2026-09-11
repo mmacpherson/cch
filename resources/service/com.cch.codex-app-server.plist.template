@@ -10,6 +10,8 @@
     <string>{{CODEX_HOME}}</string>
     <key>PATH</key>
     <string>{{PATH}}</string>
+    <key>CCH_MCP_TOKEN</key>
+    <string>{{MCP_TOKEN}}</string>
   </dict>
   <key>ProgramArguments</key>
   <array>

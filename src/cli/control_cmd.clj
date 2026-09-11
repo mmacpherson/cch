@@ -9,6 +9,8 @@
             [cch.control.codex :as codex]
             [cch.control.core :as control]
             [cch.control.doctor :as control-doctor]
+            [cch.control.mcp-http :as mcp-http]
+            [cch.control.mcp-tokens :as mcp-tokens]
             [cch.control.remote :as remote]
             [cch.control.runner :as runner]
             [cch.control.web-auth :as web-auth]
@@ -86,6 +88,14 @@
       (.update digest (byte-array [(byte 0)])))
     (format "%064x" (BigInteger. 1 (.digest digest)))))
 
+(defn claude-http-add-args
+  "Argv to register cch as an HTTP MCP server for Claude Code, carrying the
+  bearer token inline as an Authorization header. The shared-endpoint
+  equivalent of the stdio `--` command form."
+  [url token]
+  ["claude" "mcp" "add" "--scope" "user" "--transport" "http" "cch" url
+   "--header" (str "Authorization: Bearer " token)])
+
 (defn- mcp-commands [agent codex-home cch-bin pairing-path revision]
   (case agent
     :claude
@@ -126,33 +136,31 @@
                        :action action})))
     result))
 
-(defn- install-mcp! [agent codex-home cch-bin pairing-path revision]
+(defn- install-mcp! [agent codex-home cch-bin pairing-path revision tokens]
   (let [command (name agent)]
     (when (command-available? command)
-      (let [{:keys [get remove add]}
+      (let [{:keys [get remove]}
             (mcp-commands agent codex-home cch-bin pairing-path revision)
-            present? (configured? command (rest get))]
-        ;; Provider CLIs may sanitize inherited environment variables before
-        ;; spawning MCP servers. Reconcile the cch-owned entry so both agents
-        ;; can always resolve the shared Codex socket, including relocated
-        ;; CODEX_HOME installations.
+            present? (configured? command (rest get))
+            url (mcp-http/endpoint-url)]
+        ;; Reconcile the cch-owned entry: agents now share one HTTP MCP endpoint
+        ;; on `cch serve` instead of each spawning a stdio JVM. The stdio path
+        ;; (cch control mcp) remains as a documented fallback.
         (when present?
           (run-mcp-command! agent :remove remove))
         (if (= :codex agent)
           (do
             ;; `codex mcp add` does not expose the upstream allowlist and
             ;; approval settings. Own the complete cch table so no broad
-            ;; provider-level approval policy is needed.
-            (codex-settings/install-control-mcp!
+            ;; provider-level approval policy is needed. Codex reads the bearer
+            ;; token from CCH_MCP_TOKEN in the shared app-server's environment.
+            (codex-settings/install-control-mcp-http!
               (str codex-home "/config.toml")
-              {:command cch-bin
-               :args ["control" "mcp"]
-               :env {"CODEX_HOME" codex-home
-                     "CCH_MCP_CALLER" "codex"
-                     "CCH_CONTROL_PAIRING_PATH" pairing-path
-                     "CCH_MCP_REVISION" revision}})
+              {:url url})
             (run-mcp-command! agent :validate get))
-          (run-mcp-command! agent :install add))
+          (run-mcp-command! agent :install
+                            (claude-http-add-args
+                              url (mcp-tokens/token-for tokens "claude"))))
         (if present? :updated :installed)))))
 
 (defn- print-runner-service-status! [{:keys [status path]}]
@@ -187,14 +195,17 @@
     (settings/add-control-mcp-permissions! path)
     (println "Installed automatic Claude session registration in" path)
     (println "Pre-authorized only cch's four native control tools for Claude")
-    (doseq [agent [:claude :codex]
-            :let [status (install-mcp! agent codex-home cch-bin pairing-path
-                                       revision)]]
-      (println (format "%-7s MCP: %s" (name agent)
-                       (case status
-                         :installed "installed"
-                         :updated "configuration reconciled"
-                         nil "CLI not found; skipped"))))
+    ;; Mint (or reuse) the per-agent bearer tokens once; both agents point at
+    ;; the shared HTTP MCP endpoint on `cch serve`.
+    (let [tokens (mcp-tokens/ensure-tokens!)]
+      (doseq [agent [:claude :codex]
+              :let [status (install-mcp! agent codex-home cch-bin pairing-path
+                                         revision tokens)]]
+        (println (format "%-7s MCP: %s" (name agent)
+                         (case status
+                           :installed "installed"
+                           :updated "configuration reconciled"
+                           nil "CLI not found; skipped")))))
     (when (command-available? "codex")
       (install-codex-binding-hook! codex-home cch-bin)
       (println "Codex caller binding hook: installed"))

@@ -7,10 +7,12 @@
 (deftest render-unit-runs-only-the-local-unix-socket
   (let [unit (service/render-unit "/usr/bin/codex"
                                   "/home/example/.config/codex"
-                                  "/home/example/bin:/usr/bin")]
+                                  "/home/example/bin:/usr/bin"
+                                  "/home/example/.local/share/cch/codex-mcp.env")]
     (is (str/includes? unit "ExecStart=\"/usr/bin/codex\" app-server --listen unix://"))
     (is (str/includes? unit "Environment=\"CODEX_HOME=/home/example/.config/codex\""))
     (is (str/includes? unit "Environment=\"PATH=/home/example/bin:/usr/bin\""))
+    (is (str/includes? unit "EnvironmentFile=-/home/example/.local/share/cch/codex-mcp.env"))
     (is (str/includes? unit "Restart=on-failure"))
     (is (not (str/includes? unit "--remote-control"))
         "the POC must not enroll in Codex Remote Control")
@@ -20,19 +22,24 @@
 (deftest render-unit-escapes-systemd-values
   (let [unit (service/render-unit "/opt/100%/co\"dex"
                                   "/home/u/code%x"
-                                  "/home/u/100%/bin")]
+                                  "/home/u/100%/bin"
+                                  "/home/u/100%/env")]
     (is (str/includes? unit "/opt/100%%/co\\\"dex"))
     (is (str/includes? unit "/home/u/code%%x"))
-    (is (str/includes? unit "/home/u/100%%/bin"))))
+    (is (str/includes? unit "/home/u/100%%/bin"))
+    (is (str/includes? unit "EnvironmentFile=-/home/u/100%%/env"))))
 
 (deftest render-plist-runs-package-managed-codex-with-complete-environment
   (let [plist (service/render-plist "/opt/homebrew/bin/codex"
                                     "/Users/example/.config/codex"
                                     "/Users/example"
-                                    "/opt/homebrew/bin:/usr/bin")]
+                                    "/opt/homebrew/bin:/usr/bin"
+                                    "secret-token-xyz")]
     (is (str/includes? plist "<string>/opt/homebrew/bin/codex</string>"))
     (is (str/includes? plist "<string>/Users/example/.config/codex</string>"))
     (is (str/includes? plist "<string>/opt/homebrew/bin:/usr/bin</string>"))
+    (is (str/includes? plist "<key>CCH_MCP_TOKEN</key>"))
+    (is (str/includes? plist "<string>secret-token-xyz</string>"))
     (is (str/includes? plist "<string>app-server</string>"))
     (is (not (str/includes? plist "--remote-control")))))
 
@@ -76,7 +83,8 @@
         unit-path (service/service-path home)
         unit (service/render-unit "/usr/bin/codex"
                                   "/home/example/.config/codex"
-                                  "/usr/bin")
+                                  "/usr/bin"
+                                  (service/env-file-path home))
         calls (atom [])
         ready (atom [])]
     (try
@@ -138,7 +146,8 @@
         unit-path (service/service-path home)
         unit (service/render-unit "/usr/bin/codex"
                                   "/home/example/.config/codex"
-                                  "/usr/bin")
+                                  "/usr/bin"
+                                  (service/env-file-path home))
         calls (atom [])]
     (try
       (fs/create-dirs (fs/parent unit-path))
@@ -161,6 +170,29 @@
                  service/service-name]
                 ["/usr/bin/systemctl" "--user" "start" service/service-name]]
                @calls)))
+      (finally
+        (fs/delete-tree home)))))
+
+(deftest install-writes-owner-only-token-env-file-and-references-it
+  (let [home (str (fs/create-temp-dir {:prefix "cch-codex-token-"}))]
+    (try
+      (let [result (service/install!
+                     {:os-name "Linux"
+                      :home home
+                      :codex-home "/home/example/.config/codex"
+                      :path "/usr/bin"
+                      :mcp-token "codex-bearer-123"
+                      :resolve-command (fn [command _] (str "/usr/bin/" command))
+                      :run-command (fn [_] {:exit 0 :out "" :err ""})
+                      :wait-ready (fn [_] true)})
+            env-file (service/env-file-path home)]
+        (is (contains? #{:installed :started :updated-restart-required :unchanged}
+                       (:status result)))
+        (is (fs/exists? env-file))
+        (is (= "CCH_MCP_TOKEN=codex-bearer-123\n" (slurp env-file)))
+        (is (= "rw-------" (fs/posix->str (fs/posix-file-permissions env-file))))
+        (is (str/includes? (slurp (service/service-path home))
+                           (str "EnvironmentFile=-" env-file))))
       (finally
         (fs/delete-tree home)))))
 

@@ -23,6 +23,8 @@
             [cch.config :as config]
             [cch.agents.agy :as agy]
             [cch.config-db :as cdb]
+            [cch.control.mcp-http :as mcp-http]
+            [cch.control.mcp-tokens :as mcp-tokens]
             [cch.db :as db]
             [cch.events :as events]
             [cch.forecast :as forecast]
@@ -1163,6 +1165,12 @@
       (and (= request-method :post) dispatch-event)
       (handle-dispatch event-idx dispatch-event req)
 
+      ;; Shared MCP endpoint: the four cch tools over streamable HTTP, so
+      ;; agent sessions share this JVM instead of each spawning one. Auth is
+      ;; enforced inside handle. See cch.control.mcp-http / claude-code-hooks-wf5.
+      (contains? #{"/mcp" "/mcp/"} uri)
+      (mcp-http/handle req)
+
       (and (= request-method :get) (= uri "/health"))
       (handle-health hooks)
 
@@ -1255,6 +1263,12 @@
   (registry/validate-registry!)
   (log/start-writer!)
   (db/open-db!)
+  ;; Provision bearer tokens so the shared /mcp endpoint is live once serve is
+  ;; up. Best-effort: a token failure must not prevent the dispatcher booting.
+  (try (mcp-tokens/ensure-tokens!)
+       (catch Exception e
+         (println (format "cch.server: MCP token provisioning skipped (%s)"
+                          (.getMessage e)))))
   (let [hooks     (build-registry)
         event-idx (build-event-index hooks)
         nrepl     (start-nrepl! nrepl-port)

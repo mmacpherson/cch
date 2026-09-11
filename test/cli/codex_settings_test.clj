@@ -57,6 +57,38 @@
     (is (not (str/includes? text "approval_policy"))
         "global Codex approval policy is untouched")))
 
+(deftest render-control-mcp-http-block-points-at-endpoint-with-token-env
+  (let [text (cs/render-control-mcp-http-block
+               {:url "http://127.0.0.1:8888/mcp"})]
+    (is (str/includes? text "[mcp_servers.cch]"))
+    (is (str/includes? text "url = \"http://127.0.0.1:8888/mcp\""))
+    (is (str/includes? text "bearer_token_env_var = \"CCH_MCP_TOKEN\""))
+    (is (str/includes? text
+                       (str "enabled_tools = [\"list_sessions\", \"get_session\", "
+                            "\"send_message\", \"set_session_alias\"]")))
+    (is (str/includes? text "default_tools_approval_mode = \"approve\""))
+    (is (str/includes? text "required = true"))
+    (testing "no token value and no stdio launch config leak into the file"
+      (is (not (str/includes? text "command =")))
+      (is (not (str/includes? text "[mcp_servers.cch.env]"))))))
+
+(deftest install-control-mcp-http-replaces-any-prior-cch-block
+  (with-tmp
+    (fn [tmp]
+      (spit tmp "model = \"gpt-5.5\"\n")
+      ;; A prior stdio block must be cleanly replaced by the HTTP one (no dupes).
+      (cs/install-control-mcp! tmp {:command "/opt/cch/bin/cch"
+                                    :args ["control" "mcp"]
+                                    :env {"CCH_MCP_CALLER" "codex"}})
+      (cs/install-control-mcp-http! tmp {:url "http://127.0.0.1:8888/mcp"})
+      (cs/install-control-mcp-http! tmp {:url "http://127.0.0.1:8888/mcp"})
+      (let [contents (slurp tmp)]
+        (is (str/starts-with? contents "model = \"gpt-5.5\"\n"))
+        (is (= 1 (count (re-seq #"# cch:begin cch-control-mcp" contents))))
+        (is (str/includes? contents "url = \"http://127.0.0.1:8888/mcp\""))
+        (is (not (str/includes? contents "control\", \"mcp"))
+            "the stdio launch args are gone")))))
+
 (deftest install-control-mcp-preserves-user-content-and-is-idempotent
   (with-tmp
     (fn [tmp]

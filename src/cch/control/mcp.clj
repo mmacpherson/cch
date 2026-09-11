@@ -2,20 +2,29 @@
   "PluMCP stdio facade for cch's native session directory and router."
   (:require [cch.control.codex-binding :as codex-binding]
             [cch.control.core :as control]
+            [cch.control.mcp-idle :as idle]
             [cheshire.core :as json]
             [clojure.string :as str]
             [plumcp.core.api.entity-gen :as eg]
             [plumcp.core.api.entity-support :as es]
             [plumcp.core.api.mcp-server :as ms]
             [plumcp.core.impl.var-support :as vs]
-            [plumcp.core.server.server-support :as ss]))
+            [plumcp.core.server.server-support :as ss]
+            [plumcp.core.support.traffic-logger :as stl]))
 
 (defn- tool-result [value]
   (-> value json/generate-string eg/make-text-content vector
       eg/make-call-tool-result))
 
+(def ^:dynamic *caller-override*
+  "Per-request caller identity for the shared HTTP transport. The stdio child
+  identifies its caller via the CCH_MCP_CALLER env var (one process per
+  caller); the shared /mcp endpoint instead binds this per request from the
+  authenticated bearer token. nil falls back to the env var."
+  nil)
+
 (defn caller-agent []
-  (System/getenv "CCH_MCP_CALLER"))
+  (or *caller-override* (System/getenv "CCH_MCP_CALLER")))
 
 (def ^:private send-message-keys
   #{:target :route :message :message_id :message-id
@@ -172,11 +181,37 @@
    (vs/make-tool-from-var #'send-message)
    (vs/make-tool-from-var #'set-session-alias)])
 
-(def server-options
-  (ss/make-server-options
-    {:primitives {:tools tools}
-     :info (es/make-info "cch native control plane" "0.2.0"
-                         "Local native Claude/Codex session routing")}))
+(defn build-server-options
+  "Build the plumcp server options, optionally overriding the traffic logger
+  (used to attach the idle watchdog's activity tap)."
+  ([] (build-server-options nil))
+  ([traffic-logger]
+   (ss/make-server-options
+     (cond-> {:primitives {:tools tools}
+              :info (es/make-info "cch native control plane" "0.2.0"
+                                  "Local native Claude/Codex session routing")}
+       traffic-logger (assoc :traffic-logger traffic-logger)))))
+
+(def server-options (build-server-options))
 
 (defn -main [& _]
-  (ms/run-mcp-server (merge {:transport :stdio} server-options)))
+  ;; A per-thread stdio child that its provider never reaps would leak a whole
+  ;; JVM per dead thread. Exit after a bounded idle window; the provider
+  ;; relaunches on demand. See cch.control.mcp-idle / claude-code-hooks-9qz.
+  (let [timeout-ms (idle/parse-timeout-ms (System/getenv "CCH_MCP_IDLE_TIMEOUT_MS"))
+        options (if timeout-ms
+                  (let [activity (atom (System/currentTimeMillis))]
+                    (idle/start-watchdog!
+                      {:activity activity
+                       :timeout-ms timeout-ms
+                       :on-idle (fn []
+                                  (binding [*out* *err*]
+                                    (println "cch control mcp: exiting after"
+                                             (quot timeout-ms 1000)
+                                             "s idle with no client traffic"))
+                                  (System/exit 0))})
+                    (build-server-options
+                      (idle/activity-logger stl/compact-server-traffic-logger
+                                            #(reset! activity (System/currentTimeMillis)))))
+                  server-options)]
+    (ms/run-mcp-server (merge {:transport :stdio} options))))

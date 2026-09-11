@@ -124,6 +124,31 @@
          (str/join "\n" env-lines) "\n"
          "# cch:end cch-control-mcp\n")))
 
+(def control-mcp-token-env-var
+  "Env var Codex reads the bearer token from (its config stores only the name,
+  not the token). The value must be present in the Codex app-server's
+  environment."
+  "CCH_MCP_TOKEN")
+
+(defn render-control-mcp-http-block
+  "Render the cch-owned Codex MCP server as a streamable-HTTP server pointing
+  at the shared `cch serve` endpoint. Codex reads the bearer token from the
+  env var named here, so no token value is written into config.toml. Approval
+  and the tool allowlist stay scoped to this server."
+  [{:keys [url]}]
+  (let [quoted (fn [value]
+                 (str "\"" (escape-toml-string value) "\""))
+        array-value (fn [values]
+                      (str "[" (str/join ", " (map quoted values)) "]"))]
+    (str "# cch:begin cch-control-mcp\n"
+         "[mcp_servers.cch]\n"
+         "url = " (quoted url) "\n"
+         "bearer_token_env_var = " (quoted control-mcp-token-env-var) "\n"
+         "enabled_tools = " (array-value control-mcp-tools) "\n"
+         "default_tools_approval_mode = \"approve\"\n"
+         "required = true\n"
+         "# cch:end cch-control-mcp\n")))
+
 (defn- block-pattern
   "Regex matching one named cch block. Consumes one leading newline (the
   separator inserted by `upsert-block`) and the block's own trailing
@@ -168,10 +193,10 @@
     (write-config! path updated)
     updated))
 
-(defn install-control-mcp!
-  "Atomically install the complete, allowlisted cch MCP server block. Any
-  prior cch-owned version is replaced while unrelated TOML is preserved."
-  [path config]
+(defn- install-mcp-block!
+  "Atomically replace the cch-owned MCP server block, preserving unrelated
+  TOML. `render` produces the full sentinel-wrapped block from `config`."
+  [path config render]
   (let [contents (read-config path)
         stripped (strip-block contents "cch-control-mcp")
         sep (cond
@@ -179,9 +204,22 @@
               (str/ends-with? stripped "\n\n") ""
               (str/ends-with? stripped "\n") "\n"
               :else "\n\n")
-        updated (str stripped sep (render-control-mcp-block config))]
+        updated (str stripped sep (render config))]
     (write-config! path updated)
     updated))
+
+(defn install-control-mcp!
+  "Atomically install the complete, allowlisted cch MCP server block (stdio
+  transport — the fallback). Any prior cch-owned version is replaced while
+  unrelated TOML is preserved."
+  [path config]
+  (install-mcp-block! path config render-control-mcp-block))
+
+(defn install-control-mcp-http!
+  "Atomically install the cch MCP server block as a streamable-HTTP server
+  pointing at the shared endpoint. Replaces any prior cch-owned block."
+  [path config]
+  (install-mcp-block! path config render-control-mcp-http-block))
 
 (defn remove-hook!
   "Atomically remove a single cch block by name."

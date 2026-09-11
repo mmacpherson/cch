@@ -1,55 +1,59 @@
 (ns cli.control-cmd-test
   (:require [cch.subprocess :as subprocess]
             [cch.control.codex :as codex]
+            [cch.control.mcp-http :as mcp-http]
             [cli.codex-settings :as codex-settings]
             [cli.control-cmd :as control-cmd]
             [clojure.test :refer [deftest is testing]]))
 
+(deftest claude-http-add-args-registers-http-transport-with-bearer-header
+  (let [args (control-cmd/claude-http-add-args "http://127.0.0.1:8888/mcp" "tok-abc")]
+    (is (= ["claude" "mcp" "add" "--scope" "user" "--transport" "http" "cch"
+            "http://127.0.0.1:8888/mcp"
+            "--header" "Authorization: Bearer tok-abc"]
+           args))
+    (testing "the token rides a header, not a subprocess env/arg"
+      (is (not (some #{"--env"} args))))))
+
 (deftest install-mcp-reconciles-provider-environment
-  (doseq [[agent expected-remove expected-add]
-          [[:claude
-            ["claude" "mcp" "remove" "cch" "--scope" "user"]
-            ["claude" "mcp" "add" "--scope" "user" "cch"
-             "--env" "CODEX_HOME=/home/example/.config/codex"
-             "--env" "CCH_MCP_CALLER=claude"
-             "--env" "CCH_CONTROL_PAIRING_PATH=/home/example/.config/cch/control-runner.json"
-             "--env" "CCH_MCP_REVISION=revision-1"
-             "--" "/opt/cch/bin/cch" "control" "mcp"]]
-           [:codex
-            ["codex" "mcp" "remove" "cch"]
-            nil]]]
-    (testing (name agent)
-      (let [calls (atom [])
-            installed (atom nil)]
-        (with-redefs [subprocess/run
-                      (fn [argv]
-                        (swap! calls conj argv)
-                        {:exit 0 :out "" :err ""})
-                      codex-settings/install-control-mcp!
-                      (fn [path config]
-                        (reset! installed [path config]))]
-          (is (= :updated
-                 (#'control-cmd/install-mcp!
-                   agent "/home/example/.config/codex" "/opt/cch/bin/cch"
-                   "/home/example/.config/cch/control-runner.json"
-                   "revision-1")))
-          (is (= (cond-> [[(name agent) "--version"]
-                          [(name agent) "mcp" "get" "cch"]
-                          expected-remove]
-                   expected-add (conj expected-add)
-                   (= :codex agent) (conj ["codex" "mcp" "get" "cch"]))
-                 @calls))
-          (if (= :codex agent)
-            (is (= ["/home/example/.config/codex/config.toml"
-                    {:command "/opt/cch/bin/cch"
-                     :args ["control" "mcp"]
-                     :env {"CODEX_HOME" "/home/example/.config/codex"
-                           "CCH_MCP_CALLER" "codex"
-                           "CCH_CONTROL_PAIRING_PATH"
-                           "/home/example/.config/cch/control-runner.json"
-                           "CCH_MCP_REVISION" "revision-1"}}]
-                   @installed))
-            (is (nil? @installed))))))))
+  ;; Both agents now point at the shared HTTP endpoint: Claude via `mcp add
+  ;; --transport http` with a bearer header, Codex via the url MCP block.
+  (let [tokens {"codex-tok" "codex" "claude-tok" "claude"}
+        url "http://127.0.0.1:8888/mcp"]
+    (doseq [[agent expected-remove expected-add]
+            [[:claude
+              ["claude" "mcp" "remove" "cch" "--scope" "user"]
+              ["claude" "mcp" "add" "--scope" "user" "--transport" "http" "cch"
+               url "--header" "Authorization: Bearer claude-tok"]]
+             [:codex
+              ["codex" "mcp" "remove" "cch"]
+              nil]]]
+      (testing (name agent)
+        (let [calls (atom [])
+              installed (atom nil)]
+          (with-redefs [subprocess/run
+                        (fn [argv]
+                          (swap! calls conj argv)
+                          {:exit 0 :out "" :err ""})
+                        mcp-http/endpoint-url (constantly url)
+                        codex-settings/install-control-mcp-http!
+                        (fn [path config]
+                          (reset! installed [path config]))]
+            (is (= :updated
+                   (#'control-cmd/install-mcp!
+                     agent "/home/example/.config/codex" "/opt/cch/bin/cch"
+                     "/home/example/.config/cch/control-runner.json"
+                     "revision-1" tokens)))
+            (is (= (cond-> [[(name agent) "--version"]
+                            [(name agent) "mcp" "get" "cch"]
+                            expected-remove]
+                     expected-add (conj expected-add)
+                     (= :codex agent) (conj ["codex" "mcp" "get" "cch"]))
+                   @calls))
+            (if (= :codex agent)
+              (is (= ["/home/example/.config/codex/config.toml" {:url url}]
+                     @installed))
+              (is (nil? @installed)))))))))
 
 (deftest install-mcp-adds-when-not-configured
   (let [calls (atom [])
@@ -63,14 +67,14 @@
                              1
                              0)
                      :out "" :err "not found"})
-                  codex-settings/install-control-mcp!
+                  codex-settings/install-control-mcp-http!
                   (fn [path config]
                     (reset! installed [path config]))]
       (is (= :installed
              (#'control-cmd/install-mcp!
                :codex "/home/example/.codex" "/opt/cch/bin/cch"
                "/home/example/.config/cch/control-runner.json"
-               "revision-1")))
+               "revision-1" {"codex-tok" "codex" "claude-tok" "claude"})))
       (is (= [["codex" "--version"]
               ["codex" "mcp" "get" "cch"]
               ["codex" "mcp" "get" "cch"]]

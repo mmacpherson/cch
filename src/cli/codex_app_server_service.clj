@@ -5,6 +5,7 @@
   not use Codex's experimental standalone daemon manager, updater loop, or
   proprietary Remote Control transport."
   (:require [babashka.fs :as fs]
+            [cch.control.mcp-tokens :as mcp-tokens]
             [cch.control.unix-websocket :as websocket]
             [cch.subprocess :as subprocess]
             [cli.codex-settings :as codex-settings]
@@ -52,13 +53,15 @@
       (str/replace "%" "%%")))
 
 (defn render-unit
-  "Render a unit for an absolute Codex binary, CODEX_HOME, and user PATH."
-  [codex-bin codex-home path]
+  "Render a unit for an absolute Codex binary, CODEX_HOME, user PATH, and the
+  owner-only EnvironmentFile that carries CCH_MCP_TOKEN."
+  [codex-bin codex-home path env-file]
   (-> (io/resource "service/cch-codex-app-server.service.template")
       slurp
       (str/replace "{{CODEX_BIN}}" (escape-systemd-value codex-bin))
       (str/replace "{{CODEX_HOME}}" (escape-systemd-value codex-home))
-      (str/replace "{{PATH}}" (escape-systemd-value path))))
+      (str/replace "{{PATH}}" (escape-systemd-value path))
+      (str/replace "{{ENV_FILE}}" (escape-systemd-value env-file))))
 
 (defn- escape-xml [value]
   (-> (str value)
@@ -68,13 +71,14 @@
       (str/replace "\"" "&quot;")
       (str/replace "'" "&apos;")))
 
-(defn render-plist [codex-bin codex-home home path]
+(defn render-plist [codex-bin codex-home home path mcp-token]
   (-> (io/resource "service/com.cch.codex-app-server.plist.template")
       slurp
       (str/replace "{{CODEX_BIN}}" (escape-xml codex-bin))
       (str/replace "{{CODEX_HOME}}" (escape-xml codex-home))
       (str/replace "{{HOME}}" (escape-xml home))
-      (str/replace "{{PATH}}" (escape-xml path))))
+      (str/replace "{{PATH}}" (escape-xml path))
+      (str/replace "{{MCP_TOKEN}}" (escape-xml (or mcp-token "")))))
 
 (defn service-path
   ([home] (service-path :linux home))
@@ -86,6 +90,30 @@
 
 (defn socket-path [codex-home]
   (str codex-home "/app-server-control/app-server-control.sock"))
+
+(defn env-file-path
+  "Owner-only file the systemd unit sources CCH_MCP_TOKEN from. Under the cch
+  data dir, alongside the token store."
+  [home]
+  (str (or (not-empty (System/getenv "XDG_DATA_HOME"))
+           (str home "/.local/share"))
+       "/cch/codex-mcp.env"))
+
+(defn remove-env-file!
+  "Delete the token EnvironmentFile if present. Safe because the unit
+  references it with a leading '-' (missing file is non-fatal)."
+  ([] (remove-env-file! (env-file-path (System/getProperty "user.home"))))
+  ([path] (fs/delete-if-exists path)))
+
+(defn- write-env-file!
+  "Atomically write `CCH_MCP_TOKEN=<token>` with owner-only permissions."
+  [path token]
+  (let [dir (fs/parent path)]
+    (when dir (fs/create-dirs dir))
+    (let [tmp (str path ".tmp")]
+      (spit tmp (str "CCH_MCP_TOKEN=" token "\n"))
+      (try (fs/set-posix-file-permissions tmp "rw-------") (catch Exception _ nil))
+      (fs/move tmp path {:replace-existing true}))))
 
 (defn- wait-ready!
   "Wait up to ten seconds for a complete WebSocket upgrade, not just a socket file."
@@ -135,12 +163,15 @@
           (fs/delete-if-exists temporary))))))
 
 (defn- install-linux!
-  [{:keys [home codex-home path resolve-command run-command wait-ready codex-bin]}]
+  [{:keys [home codex-home path resolve-command run-command wait-ready codex-bin
+           mcp-token]}]
   (let [systemctl-bin (or (resolve-command "systemctl" path)
                           (throw (ex-info "Cannot install Codex app-server service: systemctl is not on PATH"
                                           {:type :systemctl-unavailable})))
         unit-path (service-path :linux home)
-        unit (render-unit codex-bin codex-home path)
+        env-file (env-file-path home)
+        _ (when mcp-token (write-env-file! env-file mcp-token))
+        unit (render-unit codex-bin codex-home path env-file)
         changed? (not= unit (when (fs/exists? unit-path) (slurp unit-path)))
         systemctl #(into [systemctl-bin "--user"] %)
         active? (command-succeeds?
@@ -164,12 +195,13 @@
      :codex-home codex-home}))
 
 (defn- install-macos!
-  [{:keys [home codex-home path resolve-command run-command wait-ready codex-bin uid]}]
+  [{:keys [home codex-home path resolve-command run-command wait-ready codex-bin uid
+           mcp-token]}]
   (let [launchctl-bin (or (resolve-command "launchctl" path)
                           (throw (ex-info "Cannot install Codex app-server service: launchctl is not on PATH"
                                           {:type :launchctl-unavailable})))
         plist-path (service-path :macos home)
-        plist (render-plist codex-bin codex-home home path)
+        plist (render-plist codex-bin codex-home home path mcp-token)
         changed? (not= plist (when (fs/exists? plist-path) (slurp plist-path)))
         domain (str "gui/" uid)
         target (str domain "/" macos-label)
@@ -209,7 +241,9 @@
                 :run-command subprocess/run
                 :wait-ready wait-ready!
                 :uid (when (= :macos os)
-                       (str/trim (:out (subprocess/run ["id" "-u"]))))})))
+                       (str/trim (:out (subprocess/run ["id" "-u"]))))
+                :mcp-token (mcp-tokens/token-for (mcp-tokens/ensure-tokens!)
+                                                 "codex")})))
   ([{:keys [os-name path resolve-command] :as environment}]
    (let [os (host-os os-name)]
      (if (= :unsupported os)
