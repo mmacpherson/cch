@@ -1,7 +1,8 @@
 (ns cch.control.mcp-http-test
   (:require [cch.control.mcp :as mcp]
             [cch.control.mcp-http :as mcp-http]
-            [clojure.test :refer [deftest is testing]]))
+            [clojure.test :refer [deftest is testing]]
+            [plumcp.core.deps.runtime :as rt]))
 
 (deftest parse-tokens-reads-token-to-caller-map
   (testing "a JSON object of token -> caller"
@@ -44,11 +45,27 @@
       (is (= "Bearer" (get-in (mcp-http/handle {} delegate)
                               [:headers "WWW-Authenticate"]))))))
 
-(deftest handle-binds-caller-and-delegates-on-valid-token
+(deftest handle-attaches-caller-to-request-runtime-and-delegates
+  ;; The caller must reach the tool as request data (the runtime bag), not a
+  ;; thread-local binding — plumcp dispatches the tool on another thread.
   (with-redefs [mcp-http/load-tokens (constantly {"codex-tok" "codex"})]
     (let [seen (atom :unset)
-          delegate (fn [_] (reset! seen mcp/*caller-override*) {:status 200 :body "ok"})
+          delegate (fn [req]
+                     (reset! seen (get (rt/get-runtime req) mcp/runtime-caller-key))
+                     {:status 200 :body "ok"})
           resp (mcp-http/handle {:headers {"authorization" "Bearer codex-tok"}} delegate)]
       (is (= 200 (:status resp)))
-      (is (= "codex" @seen) "the caller kind is bound for the tool call")
-      (is (nil? mcp/*caller-override*) "the binding does not leak past the request"))))
+      (is (= "codex" @seen) "caller is stashed in the request runtime bag"))))
+
+(deftest caller-binding-methods-wrapper-binds-from-runtime-on-handler-thread
+  (let [seen (atom :unset)
+        methods {"tools/call" (fn [_msg] (reset! seen mcp/*caller-override*) :ok)}
+        wrapped (mcp/caller-binding-methods-wrapper methods)
+        handler (get wrapped "tools/call")]
+    (testing "binds *caller-override* from the message runtime"
+      (is (= :ok (handler (rt/upsert-runtime {} {mcp/runtime-caller-key "codex"}))))
+      (is (= "codex" @seen)))
+    (testing "no runtime key (stdio path) leaves the binding untouched"
+      (reset! seen :unset)
+      (is (= :ok (handler {})))
+      (is (nil? @seen)))))

@@ -19,6 +19,7 @@
             [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.string :as str]
+            [plumcp.core.deps.runtime :as rt]
             [plumcp.core.server.http-ring :as hring]))
 
 (def default-port
@@ -111,8 +112,11 @@
   ([req delegate]
    (if-let [tokens (load-tokens)]
      (if-let [caller (resolve-caller tokens req)]
-       (binding [mcp/*caller-override* caller]
-         (delegate req))
+       ;; Carry the caller in plumcp's per-request runtime bag rather than a
+       ;; thread-local binding: plumcp dispatches the tool on a session-worker
+       ;; thread, so a binding here would not reach it. mcp/caller-binding-
+       ;; methods-wrapper reads this key and binds *caller-override* there.
+       (delegate (rt/upsert-runtime req {mcp/runtime-caller-key caller}))
        {:status 401
         :headers {"WWW-Authenticate" "Bearer" "Content-Type" "text/plain"}
         :body "unauthorized"})

@@ -8,6 +8,7 @@
             [plumcp.core.api.entity-gen :as eg]
             [plumcp.core.api.entity-support :as es]
             [plumcp.core.api.mcp-server :as ms]
+            [plumcp.core.deps.runtime :as rt]
             [plumcp.core.impl.var-support :as vs]
             [plumcp.core.server.server-support :as ss]
             [plumcp.core.support.traffic-logger :as stl]))
@@ -23,8 +24,30 @@
   authenticated bearer token. nil falls back to the env var."
   nil)
 
+(def runtime-caller-key
+  "Key under which the HTTP transport stashes the resolved caller in plumcp's
+  per-request runtime bag. Carried as data (not a thread-local), so it survives
+  plumcp dispatching the tool on a session-worker thread — where a transport
+  thread `binding` would be lost."
+  ::caller)
+
 (defn caller-agent []
   (or *caller-override* (System/getenv "CCH_MCP_CALLER")))
+
+(defn caller-binding-methods-wrapper
+  "plumcp :mcp-methods-wrapper: wrap every request-method handler to bind
+  *caller-override* from the per-request runtime, on the handler's own thread.
+  Absent runtime key (the stdio transport) leaves the env-var path untouched."
+  [methods]
+  (update-vals
+    methods
+    (fn [handler]
+      (fn [message]
+        (let [caller (when (rt/has-runtime? message)
+                       (get (rt/get-runtime message) runtime-caller-key))]
+          (if caller
+            (binding [*caller-override* caller] (handler message))
+            (handler message)))))))
 
 (def ^:private send-message-keys
   #{:target :route :message :message_id :message-id
@@ -183,13 +206,16 @@
 
 (defn build-server-options
   "Build the plumcp server options, optionally overriding the traffic logger
-  (used to attach the idle watchdog's activity tap)."
+  (used to attach the idle watchdog's activity tap). The caller-binding methods
+  wrapper is always installed so the shared HTTP transport can recover the
+  per-request caller identity."
   ([] (build-server-options nil))
   ([traffic-logger]
    (ss/make-server-options
      (cond-> {:primitives {:tools tools}
               :info (es/make-info "cch native control plane" "0.2.0"
-                                  "Local native Claude/Codex session routing")}
+                                  "Local native Claude/Codex session routing")
+              :mcp-methods-wrapper caller-binding-methods-wrapper}
        traffic-logger (assoc :traffic-logger traffic-logger)))))
 
 (def server-options (build-server-options))
