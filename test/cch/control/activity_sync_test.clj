@@ -17,19 +17,26 @@
 (deftest exporter-advances-only-after-ack-and-never-sends-raw-fields
   (let [directory (str (fs/create-temp-dir {:prefix "activity-sync-test-"}))
         path (str directory "/events.db")
-        published (atom nil)]
+        published (atom nil)
+        ;; Timestamps must stay inside the publish-retention window
+        ;; (activity-sync/publish-retention-buffer-ms, 6 days) or tick! jumps
+        ;; them as stale history. Derive from now so the test doesn't rot as
+        ;; real time advances past a hardcoded date.
+        t0 (str (.minusSeconds (java.time.Instant/now) 120))
+        t1 (str (.minusSeconds (java.time.Instant/now) 60))]
     (try
       (log/ensure-db! path)
       (jdbc/execute!
         {:dbtype "sqlite" :dbname path}
         [(str "INSERT INTO events(timestamp,agent,session_id,hook_name,event_type,"
               "tool_name,file_path,cwd,decision,reason,elapsed_ms,extra) VALUES "
-              "('2026-08-29T12:00:00Z','claude-code','private-session',"
+              "(?,'claude-code','private-session',"
               "'event-log','PostToolUse','Edit','/private/file','/private',"
               "'allow','private reason',2.5,'{\"prompt\":\"private\"}'),"
-              "('2026-08-29T12:00:01Z','claude-code','private-session',"
+              "(?,'claude-code','private-session',"
               "'scope-lock','PreToolUse','Edit','/private/file','/private',"
-              "'allow','private reason',1.0,'{}')")])
+              "'allow','private reason',1.0,'{}')")
+         t0 t1])
       (with-redefs [remote/publish-activity-observations!
                     (fn [_ observations]
                       (reset! published observations)
@@ -46,12 +53,16 @@
 
 (deftest failed-publication-does-not-advance-the-source-cursor
   (let [directory (str (fs/create-temp-dir {:prefix "activity-retry-test-"}))
-        path (str directory "/events.db")]
+        path (str directory "/events.db")
+        ;; Recent timestamp so the row is published (and the failure propagates)
+        ;; rather than jumped as stale history — see the note in the test above.
+        ts (str (.minusSeconds (java.time.Instant/now) 60))]
     (try
       (log/ensure-db! path)
       (jdbc/execute!
         {:dbtype "sqlite" :dbname path}
-        ["INSERT INTO events(timestamp,agent,hook_name,event_type) VALUES ('2026-08-29T12:00:00Z','claude-code','event-log','SessionStart')"])
+        ["INSERT INTO events(timestamp,agent,hook_name,event_type) VALUES (?,'claude-code','event-log','SessionStart')"
+         ts])
       (with-redefs [remote/publish-activity-observations!
                     (fn [& _] (throw (ex-info "offline" {:type :offline})))]
         (is (= :offline
