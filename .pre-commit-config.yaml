@@ -27,6 +27,10 @@ repos:
         entry: clj-kondo --lint
         language: system
         files: '\.(clj|cljc|edn)$'
+        # Serial: pre-commit otherwise splits files across parallel clj-kondo
+        # processes that contend on .clj-kondo/.cache and crash with
+        # "cache is locked by other thread or process".
+        require_serial: true
 
       - id: clj-test
         name: clj test

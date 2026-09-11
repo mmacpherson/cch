@@ -1,7 +1,7 @@
 (ns cch.forecast-test
   (:require [babashka.fs :as fs]
             [cch.db :as db]
-            [cch.forecast :refer [weighted-prior-params signal-new-data!
+            [cch.forecast :refer [weighted-prior-params
                                    start-bg-refresh! stop-bg-refresh!
                                    statusline-stats]]
             [cch.log :as log]

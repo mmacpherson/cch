@@ -5,4 +5,5 @@
  :linters {:unresolved-var {:exclude [hooks.scope-lock/composed
                                       hooks.protect-files/composed
                                       hooks.command-audit/composed
-                                      hooks.event-log/composed]}}}
+                                      hooks.event-log/composed
+                                      hooks.codex-usage-capture/handler-fn]}}}

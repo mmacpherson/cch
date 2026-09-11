@@ -13,7 +13,8 @@
   crosses the process boundary."
   (:require [cch.db :as db]
             [cch.projections :as proj]
-            [cch.settings :as settings])
+            [cch.settings :as settings]
+            [clojure.string :as str])
   (:import (java.time Instant)))
 
 ;; --- Query building ---
@@ -55,7 +56,7 @@
    come from HTTP headers and registry constants, never user prompts, but
    we treat them as untrusted regardless."
   [s]
-  (clojure.string/replace (str s) "'" "''"))
+  (str/replace (str s) "'" "''"))
 
 (defn- agent-clause
   "AND fragment that scopes a query to the given agent."

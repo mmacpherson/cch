@@ -7,7 +7,7 @@
 
 (defn- create-legacy-events-table! [db]
   (p/sh ["sqlite3" db
-         (str "CREATE TABLE events (id INTEGER PRIMARY KEY, hook_name TEXT, event_type TEXT);")]))
+         "CREATE TABLE events (id INTEGER PRIMARY KEY, hook_name TEXT, event_type TEXT);"]))
 
 (defn- create-legacy-context-snapshots-table! [db]
   (p/sh ["sqlite3" db

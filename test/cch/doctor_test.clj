@@ -69,11 +69,11 @@
 (deftest enabled-code-hooks-filters-to-enabled-code-hooks
   (let [rows [{:hook-name "command-guard" :enabled true}    ; real code hook
               {:hook-name "scope-lock"    :enabled false}   ; code hook, disabled
-              {:hook-name "not-a-hook"    :enabled true}]]  ; unknown → excluded
-    (let [enabled (doctor/enabled-code-hooks rows)]
-      (is (contains? enabled "command-guard"))
-      (is (not (contains? enabled "scope-lock")) "disabled excluded")
-      (is (not (contains? enabled "not-a-hook")) "non-code excluded"))))
+              {:hook-name "not-a-hook"    :enabled true}]   ; unknown → excluded
+        enabled (doctor/enabled-code-hooks rows)]
+    (is (contains? enabled "command-guard"))
+    (is (not (contains? enabled "scope-lock")) "disabled excluded")
+    (is (not (contains? enabled "not-a-hook")) "non-code excluded")))
 
 ;; ---------------------------------------------------------------------------
 ;; Report model.
@@ -102,10 +102,10 @@
 
 (deftest problems-fails-on-down-server-and-unwired-agent
   (let [box    {:server {:reachable? false} :hooks {:enabled #{}}}
-        agents [{:agent "codex" :present? true :installed? false}]]
-    (let [probs (doctor/problems box agents)]
-      (is (some #(str/includes? % "not reachable") probs))
-      (is (some #(str/includes? % "codex present but cch not wired") probs))))
+        agents [{:agent "codex" :present? true :installed? false}]
+        probs  (doctor/problems box agents)]
+    (is (some #(str/includes? % "not reachable") probs))
+    (is (some #(str/includes? % "codex present but cch not wired") probs)))
   (testing "no problems when server up and everything present is wired"
     (let [box    {:server {:reachable? true} :hooks {:enabled #{}}}
           agents [{:agent "codex" :present? true :installed? true
