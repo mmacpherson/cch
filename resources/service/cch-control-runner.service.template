@@ -7,6 +7,9 @@ After=network-online.target
 Type=simple
 Environment="PATH={{PATH}}"
 Environment="CCH_CONTROL_PAIRING_PATH={{PAIRING_PATH}}"
+# Cap glibc malloc arenas: this low-thread JVM has a tiny heap, so per-thread
+# arenas add tens of MB of RSS fragmentation for no throughput benefit here.
+Environment="MALLOC_ARENA_MAX=2"
 ExecStart="{{CCH_BIN}}" control runner
 Restart=on-failure
 RestartSec=3

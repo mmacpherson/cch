@@ -24,7 +24,9 @@
                          "ExecStart=%h/.local/share/cch/runtime/bin/cch serve")
           "serve must run the self-contained runtime, not clj from the repo")
       (is (str/includes? rendered "Restart=on-failure")
-          "Restart policy must be present"))))
+          "Restart policy must be present")
+      (is (str/includes? rendered "MALLOC_ARENA_MAX=2")
+          "glibc malloc arenas are capped to bound RSS fragmentation"))))
 
 (deftest macos-template-has-home-baked-in
   (testing "launchd plist — {{HOME}} gets substituted with user.home at render time"
@@ -37,7 +39,9 @@
       (is (str/includes? rendered (str home "/.local/share/cch/serve.log"))
           "home directory is baked into the log path")
       (is (str/includes? rendered "<key>RunAtLoad</key>")
-          "plist preserves the KeepAlive/RunAtLoad keys"))))
+          "plist preserves the KeepAlive/RunAtLoad keys")
+      (is (str/includes? rendered "<key>MALLOC_ARENA_MAX</key>")
+          "glibc malloc arenas are capped to bound RSS fragmentation"))))
 
 (deftest macos-template-runs-clj-server
   (testing "launchd plist invokes `clj -M:server`, matching the systemd unit and the bash shim"

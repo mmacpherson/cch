@@ -10,6 +10,8 @@
     <string>{{PATH}}</string>
     <key>CCH_CONTROL_PAIRING_PATH</key>
     <string>{{PAIRING_PATH}}</string>
+    <key>MALLOC_ARENA_MAX</key>
+    <string>2</string>
   </dict>
   <key>ProgramArguments</key>
   <array>

@@ -6,6 +6,9 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/cch/repo
+# Cap glibc malloc arenas: this low-thread JVM has a tiny heap, so per-thread
+# arenas add tens of MB of RSS fragmentation for no throughput benefit here.
+Environment="MALLOC_ARENA_MAX=2"
 ExecStart=%h/.local/share/cch/runtime/bin/cch serve
 Restart=on-failure
 RestartSec=3
