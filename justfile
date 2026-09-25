@@ -90,6 +90,10 @@ bench *args:
 usage-backtest:
     clj -M -e "(require 'cch.usage-backtest) (cch.usage-backtest/run)"
 
+# Compare pooled activity-profile variants on the same replay
+usage-backtest-pooling:
+    clj -M -e "(require 'cch.usage-backtest) (cch.usage-backtest/run-pooling)"
+
 # Remove generated files
 clean:
     rm -rf .cpcache .nrepl-port target

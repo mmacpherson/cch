@@ -105,7 +105,25 @@
     (testing "a heavier intensity state (larger beta, so smaller rate lambda) raises the forecast"
       (is (> (:median (m/predict [6.0 90.0 3.0 1.0] theta 20.0 fut true)) (:median p))))
     (testing "seeded, so identical inputs give identical output"
-      (is (= p (m/predict st theta 20.0 fut true))))))
+      (is (= (dissoc p :draws) (dissoc (m/predict st theta 20.0 fut true) :draws))))))
+
+(deftest crps-matches-closed-forms
+  (testing "a point forecast scores its absolute error"
+    (is (< (Math/abs (- 3.0 (m/crps (double-array (repeat 100 10.0)) 13.0 100.0))) 1e-12)))
+  (testing "uniform draws on [0,1] against 0.5: 1/4 - 1/6 = 1/12"
+    (let [n 2001 xs (double-array (map #(/ (double %) (dec n)) (range n)))]
+      (is (< (Math/abs (- (/ 1.0 12.0) (m/crps xs 0.5 100.0))) 1e-3))))
+  (testing "draws beyond the cap score as the cap"
+    (is (< (m/crps (double-array (repeat 10 250.0)) 100.0 100.0) 1e-12))))
+
+(deftest shrinkage-interpolates-between-cell-and-target
+  (let [stats {:usage (vec (repeat 168 2.0)) :exposure (vec (repeat 168 1.0))}
+        spiky (assoc stats :usage (assoc (vec (repeat 168 0.0)) 10 336.0))
+        target (vec (repeat 168 1.0))]
+    (is (= target (m/shrunk-rates stats target 5.0)) "a flat cell stays flat")
+    (is (= 168.0 (nth (m/shrunk-rates spiky target 0.0) 10)) "k = 0 is the cell alone")
+    (is (< (nth (m/shrunk-rates spiky target 1000.0) 10) 1.2) "large k approaches the target")
+    (is (= target (m/pooled-rates [stats stats])))))
 
 (deftest future-blocks-split-at-anchor-hour
   (let [prof (vec (repeat 168 1.0))

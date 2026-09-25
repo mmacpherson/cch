@@ -156,29 +156,63 @@
 
 ;; --- activity profile ---
 
+(defn bin-stats
+  "Per hour-of-week bin totals from an hour series:
+  {:usage [168 doubles] :exposure [168 doubles]}, exposure in live hours."
+  [series ^ZoneId zone]
+  (let [usage (double-array 168) expo (double-array 168)]
+    (doseq [[h [live y]] series
+            :let [k (hour-of-week zone h)]]
+      (aset usage k (+ (aget usage k) (double y)))
+      (aset expo k (+ (aget expo k) (double live))))
+    {:usage (vec usage) :exposure (vec expo)}))
+
+(defn smooth-profile
+  "Circularly smooth (Gaussian, sigma 1.5h) a 168-bin rate vector, floor it
+  so no hour is impossible, and normalize to mean 1."
+  [rate]
+  (let [kern (let [ws (mapv #(Math/exp (* -0.5 (Math/pow (/ % 1.5) 2))) (range -6 7))
+                   s (reduce + ws)]
+               (mapv #(/ % s) ws))
+        sm (mapv (fn [k] (reduce + (map-indexed (fn [j w] (* w (nth rate (mod (+ k j -6) 168)))) kern)))
+                 (range 168))
+        mean (/ (reduce + sm) 168.0)]
+    (if (pos? mean)
+      (let [floored (mapv #(max % (* 0.02 mean)) sm)
+            m2 (/ (reduce + floored) 168.0)]
+        (mapv #(/ % m2) floored))
+      (vec (repeat 168 1.0)))))
+
+(defn- normalized-usage
+  "Bin usage divided by the cell's overall rate, so cells measured in
+  different units (5h vs 7d percent, providers) are comparable."
+  [{:keys [usage exposure]}]
+  (let [rate (/ (reduce + usage) (max 1e-9 (reduce + exposure)))]
+    (if (pos? rate) (mapv #(/ % rate) usage) (vec (repeat 168 0.0)))))
+
+(defn pooled-rates
+  "Exposure-weighted mean normalized rate per bin across cells' bin-stats:
+  a shared shape (mean ~1) to shrink toward."
+  [stats]
+  (let [num (apply mapv + (map normalized-usage stats))
+        den (apply mapv + (map :exposure stats))]
+    (mapv (fn [n d] (if (pos? d) (/ n d) 0.0)) num den)))
+
+(defn shrunk-rates
+  "Empirical-Bayes shrinkage of one cell's normalized bin rates toward
+  `target` (mean ~1), with pseudo-exposure `k` hours per bin: k = 0 is the
+  cell alone, large k is the target."
+  [stats target k]
+  (mapv (fn [u e f] (let [d (+ e k)] (if (pos? d) (/ (+ u (* k f)) d) f)))
+        (normalized-usage stats) (:exposure stats) target))
+
 (defn profile
   "Hour-of-week activity profile (length 168, mean 1): usage per live hour
   in each local hour-of-week bin, circularly smoothed (Gaussian, sigma 1.5h)
   and floored so no hour is impossible."
   [series ^ZoneId zone]
-  (let [inc (double-array 168) expo (double-array 168)]
-    (doseq [[h [live y]] series
-            :let [k (hour-of-week zone h)]]
-      (aset inc k (+ (aget inc k) (double y)))
-      (aset expo k (+ (aget expo k) (double live))))
-    (let [rate (mapv (fn [k] (if (pos? (aget expo k)) (/ (aget inc k) (aget expo k)) 0.0))
-                     (range 168))
-          kern (let [ws (mapv #(Math/exp (* -0.5 (Math/pow (/ % 1.5) 2))) (range -6 7))
-                     s (reduce + ws)]
-                 (mapv #(/ % s) ws))
-          sm (mapv (fn [k] (reduce + (map-indexed (fn [j w] (* w (nth rate (mod (+ k j -6) 168)))) kern)))
-                   (range 168))
-          mean (/ (reduce + sm) 168.0)]
-      (if (pos? mean)
-        (let [floored (mapv #(max % (* 0.02 mean)) sm)
-              m2 (/ (reduce + floored) 168.0)]
-          (mapv #(/ % m2) floored))
-        (vec (repeat 168 1.0))))))
+  (let [{:keys [usage exposure]} (bin-stats series zone)]
+    (smooth-profile (mapv (fn [u e] (if (pos? e) (/ u e) 0.0)) usage exposure))))
 
 (defn mass
   "Profile mass (hour units) over [t0, t1)."
@@ -276,7 +310,8 @@
 
 (defn predict
   "Monte Carlo predictive of demand at the end of `fut` given current window
-  pct `x`. Returns {:median :lo :hi :p-cap} with a 90% band (5th–95th)."
+  pct `x`. Returns {:median :lo :q25 :q75 :hi :p-cap :draws}: a 90% band
+  (5th–95th), a 50% band, and the sorted draws."
   [[al be a b] [kappa] x fut on-now? & {:keys [n seed] :or {n 4000 seed 1}}]
   (let [r (num/rng seed)
         draws (double-array n)]
@@ -293,8 +328,25 @@
     (java.util.Arrays/sort draws)
     {:median (num/quantile draws 0.5)
      :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25)
+     :q75 (num/quantile draws 0.75)
      :hi (num/quantile draws 0.95)
-     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)}))
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))
+
+(defn crps
+  "Continuous ranked probability score of sorted Monte Carlo `draws`
+  against observation `y` (lower is better), after capping draws at `cap`.
+  The meter stops at the cap, so a capped window is scored on the capped
+  variable, which keeps the score proper for censored outcomes."
+  [^doubles draws y cap]
+  (let [n (alength draws)
+        x (double-array (map #(min (double cap) %) draws))
+        e-xy (/ (areduce x i acc 0.0 (+ acc (Math/abs (- (aget x i) (double y))))) n)
+        ;; E|X - X'| for sorted samples: (2/n^2) * sum (2i - n - 1) x_i, 1-based i
+        e-xx (/ (* 2.0 (areduce x i acc 0.0 (+ acc (* (- (* 2.0 (inc i)) n 1.0) (aget x i)))))
+                (* (double n) n))]
+    (- e-xy (* 0.5 e-xx))))
 
 (defn future-pieces
   "Sub-intervals of [t, t-end) at `step-secs` resolution (a divisor or
@@ -378,11 +430,12 @@
 
 (defn fit-model
   "Fit the activity profile and theta from hourly aggregate `rows` observed
-  before `now`. `x0` warm-starts the optimizer."
-  [rows spec zone now & {:keys [x0]}]
+  before `now`. `x0` warm-starts the optimizer; `profile-override` supplies
+  a profile estimated elsewhere (e.g. pooled across agents)."
+  [rows spec zone now & {:keys [x0 profile-override]}]
   (let [wins (windows rows spec)
         series (hour-series wins now)
-        prof (profile series zone)
+        prof (or profile-override (profile series zone))
         lookback (:fit-lookback-secs spec)
         fit-series (if lookback
                      (into (sorted-map) (filter #(>= (key %) (- now lookback)) series))

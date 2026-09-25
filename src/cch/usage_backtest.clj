@@ -141,7 +141,7 @@
 (defn run
   "Print backtest metrics for each agent/window with enough history."
   [& _]
-  (doseq [agent ["claude-code" "codex"]
+  (doseq [agent ["claude-code" "codex" "agy"]
           window-key [:seven-day :five-hour]
           :let [rows (replay agent window-key)]
           :when (seq rows)
@@ -157,3 +157,114 @@
                        (:n s) (:rate-mae s) (* 100 (:rate-cov s)) (:model-mae s) (* 100 (:model-cov s)))))
     (let [s (summarize rows)]
       (println (format "  P(cap) Brier %.4f vs climatology %.4f" (:brier s) (:brier-climatology s))))))
+
+;; --- profile pooling experiment ---
+;;
+;; Same replay, but the activity profile comes from a pooling variant while
+;; theta, on/off behavior, and the filtered state stay per agent/window.
+;; Variants are compared on identical checkpoints.
+
+(def ^:private cells
+  (for [agent ["claude-code" "codex" "agy"] window-key [:seven-day :five-hour]]
+    [agent window-key]))
+
+(def ^:private variants
+  "Profile variants: [label target k]. Target :agent pools the agent's 5h
+  and 7d cells; :fleet pools every cell; :two-level shrinks the agent pool
+  toward the fleet (with k2) before shrinking the cell toward it."
+  [["independent" nil 0]
+   ["agent-shared" :agent ##Inf]
+   ["fleet-shared" :fleet ##Inf]
+   ["agent k=4" :agent 4] ["agent k=12" :agent 12] ["agent k=36" :agent 36]
+   ["fleet k=4" :fleet 4] ["fleet k=12" :fleet 12] ["fleet k=36" :fleet 36]
+   ["two-level 12/12" [:two-level 12] 12] ["two-level 36/12" [:two-level 12] 36]])
+
+(defn- variant-profile
+  "Smoothed profile for `cell` at time t under `variant`; nil = independent."
+  [stats-at cell t [_ target k]]
+  (when target
+    (let [own (stats-at cell t)
+          agent-cells (filter #(= (first %) (first cell)) cells)
+          pooled (fn [cs] (m/pooled-rates (keep #(stats-at % t) cs)))
+          as-stats (fn [cs] {:usage (apply mapv + (map #(:usage (stats-at % t)) cs))
+                             :exposure (apply mapv + (map #(:exposure (stats-at % t)) cs))})
+          target-rates (cond
+                         (= target :agent) (pooled agent-cells)
+                         (= target :fleet) (pooled cells)
+                         :else (m/shrunk-rates (as-stats agent-cells) (pooled cells) (second target)))]
+      (m/smooth-profile
+        (if (Double/isInfinite (double k)) target-rates (m/shrunk-rates own target-rates k))))))
+
+(defn- cell-data [zone now [agent window-key :as cell]]
+  (let [obs (raw-observations agent window-key)
+        {:keys [rows-before]} (history obs)
+        spec (m/specs window-key)]
+    {:cell cell :spec spec :obs obs :rows-before rows-before
+     :wins (m/windows (rows-before now) spec)
+     :stats (memoize (fn [t] (m/bin-stats (m/hour-series (m/windows (rows-before t) spec) t) zone)))}))
+
+(defn- replay-variant
+  [{:keys [cell spec obs rows-before wins]} stats-at variant now zone]
+  (let [[_ window-key] cell
+        {:keys [checkpoint-secs refit min-train]} (plan window-key)
+        done? (fn [w] (or (:cap w) (< (:eff-end w) (- now 3600))))
+        refit-time (fn [w] (case refit
+                             :per-window (:start w)
+                             :weekly (* 604800 (quot (:start w) 604800))))
+        fit-at (memoize (fn [t] (m/fit-model (rows-before t) spec zone t
+                                             :profile-override (variant-profile stats-at cell t variant))))]
+    (vec
+      (for [[i w] (map-indexed vector wins)
+            :when (and (>= i min-train) (done? w))
+            :let [model (fit-at (refit-time w))
+                  final (m/cum-at w (inc (:eff-end w)))
+                  capped? (boolean (:cap w))
+                  wobs (window-obs obs spec w)]
+            t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
+            :let [g (m/forecast model (rows-before t) spec zone t (:eff-end w) (pct-at wobs t) :path? false)
+                  in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))]]
+        {:win i
+         :crps (m/crps (:draws g) final 100.0)
+         :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
+         :cov50 (in? (:q25 g) (:q75 g))
+         :cov90 (in? (:lo g) (:hi g))
+         :brier (Math/pow (- (:p-cap g) (if capped? 1.0 0.0)) 2)}))))
+
+(defn- mean [xs] (if (seq xs) (/ (reduce + 0.0 xs) (count xs)) Double/NaN))
+
+(defn- paired-delta
+  "Mean CRPS difference vs `base` rows (same checkpoints), with a standard
+  error clustered by window (checkpoints within a window are correlated)."
+  [rows base]
+  (let [by-win (->> (map (fn [r b] [(:win r) (- (:crps r) (:crps b))]) rows base)
+                    (group-by first)
+                    vals
+                    (map #(mean (map second %))))
+        n (count by-win)
+        m (mean by-win)
+        sd (Math/sqrt (/ (reduce + (map #(Math/pow (- % m) 2) by-win)) (max 1 (dec n))))]
+    {:delta (/ (reduce + (map #(- (:crps %1) (:crps %2)) rows base)) (max 1 (count rows)))
+     :se (/ sd (Math/sqrt (max 1 n)))}))
+
+(defn run-pooling
+  "Print the profile pooling experiment for every agent/window with history."
+  [& _]
+  (let [now (quot (System/currentTimeMillis) 1000)
+        zone (ZoneId/systemDefault)
+        data (into {} (map (fn [c] [c (cell-data zone now c)]) cells))
+        stats-at (fn [cell t] (when-let [d (data cell)] ((:stats d) t)))]
+    (doseq [cell cells
+            :let [d (data cell)
+                  results (into {} (pmap (fn [v] [(first v) (replay-variant d stats-at v now zone)]) variants))
+                  base (results "independent")]
+            :when (seq base)]
+      (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
+                       (count base) (count (distinct (map :win base)))))
+      (println (format "  %-16s %7s %16s %6s %6s %6s %7s" "variant" "CRPS" "dCRPS (+-se)" "MAE" "cov50" "cov90" "Brier"))
+      (doseq [[label] variants
+              :let [rows (results label)
+                    {:keys [delta se]} (paired-delta rows base)
+                    frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) rows))))]]
+        (println (format "  %-16s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
+                         label (mean (map :crps rows)) delta se (mean (map :err rows))
+                         (frac :cov50) (frac :cov90) (mean (map :brier rows))))))))
