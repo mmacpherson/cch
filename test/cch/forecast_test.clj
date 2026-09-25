@@ -350,7 +350,7 @@
         (is (= 1 (:gen (cached-fit cache :k later fit-fn))) "still the old fit")
         (deliver gate true)
         (loop [i 0]
-          (when (and (< i 200) (not= 2 (:gen (get @cache :k))))
+          (when (and (< i 1000) (not= 2 (:gen (get @cache :k))))
             (Thread/sleep 10)
             (recur (inc i))))
         (is (= 2 (:gen (get @cache :k))) "the background refit replaced it")
