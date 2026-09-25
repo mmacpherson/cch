@@ -878,14 +878,26 @@
                 " WHERE agent=? AND window_key=? AND resets_at<?"
                 " GROUP BY resets_at ORDER BY resets_at DESC LIMIT 12"
                 ") completed WHERE final_pct>=10 ORDER BY resets_at DESC")
-           agent window-key (quot now-ms 1000)])]
+           agent window-key (quot now-ms 1000)])
+        hourly
+        (rows
+          tx
+          [(str "SELECT resets_at,(observed_at/3600000)*3600 AS hour,"
+                " max(used_percentage) AS pct"
+                " FROM " observations-table
+                " WHERE agent=? AND window_key=?"
+                " GROUP BY resets_at,hour ORDER BY hour,resets_at")
+           agent window-key])]
     {:resets-at resets-at
      :sample-count (long (or (:sample_count (first samples)) 0))
      :samples (mapv (fn [{:keys [observed_at used_percentage]}]
                       {:observed-at observed_at
                        :used-percentage (double used_percentage)})
                     samples)
-     :historical-finals (mapv #(double (:final_pct %)) finals)}))
+     :historical-finals (mapv #(double (:final_pct %)) finals)
+     :hourly (mapv (fn [{:keys [resets_at hour pct]}]
+                     {:resets-at (long resets_at) :hour (long hour) :pct (double pct)})
+                   hourly)}))
 
 (defn- usage-inputs
   "Internal bounded read model for the authenticated human listener."

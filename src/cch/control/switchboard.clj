@@ -439,8 +439,8 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
         data (some-> (get-in forecast [:agents agent window-name :page-data])
                      (assoc :agent agent))
         subtitle (if (= window :five-hour)
-                   "5-hour rate-limit window · fleet-wide projection with 90% credible interval"
-                   "7-day rate-limit window · fleet-wide projection with 90% credible interval")]
+                   "5-hour rate-limit window · fleet-wide forecast to reset, with 50% and 90% ranges"
+                   "7-day rate-limit window · fleet-wide forecast to reset, with 50% and 90% ranges")]
     (page
       "usage" :usage identity
       [:p.page-subtitle subtitle]

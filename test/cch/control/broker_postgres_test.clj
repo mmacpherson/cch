@@ -140,6 +140,9 @@
            (str/includes? sql "SELECT final_pct")
            [{:final_pct 81.0} {:final_pct 76.0}]
 
+           (str/includes? sql "AS hour")
+           [{:resets_at reset :hour (* 3600 (quot now 3600000)) :pct 14.0}]
+
            :else []))}
       (fn []
         (let [model (inputs-var b)
@@ -147,6 +150,10 @@
           (is (= 2 (:sample-count input)))
           (is (= [12.0 14.0] (mapv :used-percentage (:samples input))))
           (is (= [81.0 76.0] (:historical-finals input)))
+          (is (= [{:resets-at reset :hour (* 3600 (quot now 3600000)) :pct 14.0}]
+                 (:hourly input)))
+          (is (some #(str/includes? % "GROUP BY resets_at,hour") @statements)
+              "hourly history is aggregated in Postgres")
           (is (some #(str/includes? % "row_number() OVER") @statements)
               "samples are time-bucketed in Postgres, not loaded wholesale"))))))
 

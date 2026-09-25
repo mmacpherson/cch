@@ -51,3 +51,34 @@
                      :historical-finals [90.0 80.0]}}}})]
     (is (= {} (get-in result [:agents "codex"])))
     (is (not (str/includes? (pr-str result) "90.0")))))
+
+(deftest uses-the-usage-model-once-hourly-history-covers-enough-windows
+  (let [now 2000000000000
+        now-s (quot now 1000)
+        hour 3600
+        ;; Six completed 5h windows, one every 12h, each used 20% over its
+        ;; first three hours, then a current window started an hour ago.
+        past (for [k (range 1 7)
+                   :let [end (- now-s (* k 12 hour))
+                         start (- end (* 5 hour))]
+                   j (range 3)]
+               {:resets-at end :hour (+ start (* j hour)) :pct (* 7.0 (inc j))})
+        current-reset (+ now-s (* 4 hour))
+        hourly (vec (sort-by :hour (conj past {:resets-at current-reset
+                                              :hour (- now-s hour) :pct 10.0})))
+        model {:generated-at now
+               :agents
+               {"claude-code"
+                {"five_hour"
+                 {:resets-at current-reset
+                  :sample-count 1
+                  :samples [{:observed-at (- now 60000) :used-percentage 10.0}]
+                  :historical-finals [21.0 21.0 21.0 21.0 21.0 21.0]
+                  :hourly hourly}}}}
+        projected (get-in (usage-forecast/from-read-model model)
+                          [:agents "claude-code" "five_hour"])
+        projection (get-in projected [:page-data :projection])]
+    (is (= :gamma-process (:method projection)))
+    (is (seq (:path projection)) "the fan chart gets a path")
+    (is (<= 10.0 (:projected-pct projected)))
+    (is (number? (:p-cap projected)))))

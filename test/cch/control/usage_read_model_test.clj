@@ -33,8 +33,14 @@
     (is (= [9.0 10.0 12.0] (mapv :used-percentage (:samples input))))
     (is (= 12 (count (:historical-finals input))))
     (is (= #{:generated-at :agents} (set (keys result))))
-    (is (= #{:resets-at :sample-count :samples :historical-finals}
+    (is (= #{:resets-at :sample-count :samples :historical-finals :hourly}
            (set (keys input))))
+    (testing "hourly history is hour-level maxima per reset"
+      (is (every? #(= #{:resets-at :hour :pct} (set (keys %))) (:hourly input)))
+      (is (every? #(zero? (mod (:hour %) 3600)) (:hourly input)))
+      (is (= 12.0 (->> (:hourly input) (filter #(= current-reset (:resets-at %)))
+                       (map :pct) (reduce max))))
+      (is (= 15 (count (distinct (map :resets-at (:hourly input)))))))
     (is (every? #(= #{:observed-at :used-percentage} (set (keys %)))
                 (:samples input)))
     (testing "no source identity can enter the read model"

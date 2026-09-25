@@ -2,7 +2,7 @@
   "Bounded, privacy-safe forecast inputs derived from normalized observations.
 
   The result contains only agent/window kinds, reset times, percentage samples,
-  aggregate counts, and completed-window finals. It is an internal web read
+  aggregate counts, completed-window finals, and hourly percentage maxima. It is an internal web read
   model, not a runner API, and never carries source runner or machine identity."
   (:require [clojure.string :as str]))
 
@@ -53,6 +53,20 @@
        (keep (fn [{:keys [final]}] (when (>= final 10.0) final)))
        vec))
 
+(defn- hourly-maxima
+  "Hourly max percentage per reset across the retained history — the usage
+  model's input. Hour-level aggregates only: no per-observation timing and
+  no source identity."
+  [observations]
+  (->> observations
+       (reduce (fn [m {:keys [observed-at resets-at used-percentage]}]
+                 (update m [resets-at (* 3600 (quot observed-at 3600000))]
+                         (fnil max 0.0) (double used-percentage)))
+               {})
+       (map (fn [[[reset hour] pct]] {:resets-at reset :hour hour :pct pct}))
+       (sort-by (juxt :hour :resets-at))
+       vec))
+
 (defn pair-input
   "Build one bounded window input from already normalized observations."
   [observations now-ms window-key]
@@ -68,7 +82,8 @@
          :sample-count (count current)
          :samples (monotone-samples current bucket-seconds)
          :historical-finals (historical-finals observations
-                                                (quot now-ms 1000))}))))
+                                                (quot now-ms 1000))
+         :hourly (hourly-maxima observations)}))))
 
 (defn from-observations
   "Build the complete hosted read model from retained normalized rows."

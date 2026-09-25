@@ -389,6 +389,7 @@
       (is (= reset (:resets-at input)))
       (is (= 2 (:sample-count input)))
       (is (= [12.0 14.0] (mapv :used-percentage (:samples input))))
+      (is (= [14.0] (mapv :pct (:hourly input))) "one hour, its maximum")
       (is (not (str/includes? (pr-str model) "runner-a")))
       (is (not (str/includes? (pr-str model) "synthetic-token-a"))))))
 
