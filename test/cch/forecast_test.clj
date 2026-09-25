@@ -196,8 +196,16 @@
                  (format "synthetic-%d-%s" index window)
                  (* ts 1000) window pct reset]))))
         (let [legacy (#'cch.forecast/source-forecast :legacy)
-              normalized (#'cch.forecast/source-forecast :normalized)]
-          (is (= legacy normalized)))))))
+              normalized (#'cch.forecast/source-forecast :normalized)
+              ;; Each source reads the clock, so secs_left can differ by a
+              ;; second when the two computations straddle a tick (the
+              ;; production parity check tolerates 2s for the same reason).
+              without-clock (fn [f] (into {} (map (fn [[k v]] [k (dissoc v :secs_left)]) f)))]
+          (is (= (without-clock legacy) (without-clock normalized)))
+          (doseq [k [:five_hour :seven_day]]
+            (is (<= (Math/abs (- (get-in legacy [k :secs_left])
+                                 (get-in normalized [k :secs_left])))
+                    1))))))))
 
 (deftest current-window-is-not-used-as-a-historical-final
   (with-fresh-bg
