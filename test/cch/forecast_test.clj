@@ -3,7 +3,7 @@
             [cch.db :as db]
             [cch.forecast :refer [weighted-prior-params
                                    start-bg-refresh! stop-bg-refresh!
-                                   statusline-stats]]
+                                   statusline-stats cached-fit]]
             [cch.log :as log]
             [cch.projections]
             [cheshire.core :as json]
@@ -330,3 +330,28 @@
         (is (= 3.75 (:prior-mu pi))
             "/usage's 5h projection must use the 5h prior, not the 7d default")
         (is (= 1.3 (:prior-sigma pi)))))))
+
+(deftest cached-fit-serves-stale-fits-while-refitting-in-the-background
+  (let [cache (atom {})
+        calls (atom [])
+        gate (promise)
+        fit-fn (fn [previous]
+                 (swap! calls conj (:gen previous))
+                 (when previous @gate)
+                 {:fitted-at 1000 :gen (inc (or (:gen previous) 0))})]
+    (testing "the first fit is synchronous"
+      (is (= 1 (:gen (cached-fit cache :k 1000 fit-fn)))))
+    (testing "a fresh fit is reused"
+      (is (= 1 (:gen (cached-fit cache :k 2000 fit-fn))))
+      (is (= [nil] @calls)))
+    (testing "an expired fit is served immediately; one refit starts"
+      (let [later (+ 1000 86400 1)]
+        (is (= 1 (:gen (cached-fit cache :k later fit-fn))))
+        (is (= 1 (:gen (cached-fit cache :k later fit-fn))) "still the old fit")
+        (deliver gate true)
+        (loop [i 0]
+          (when (and (< i 200) (not= 2 (:gen (get @cache :k))))
+            (Thread/sleep 10)
+            (recur (inc i))))
+        (is (= 2 (:gen (get @cache :k))) "the background refit replaced it")
+        (is (= [nil 1] @calls) "exactly one background refit, warm-started")))))

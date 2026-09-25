@@ -277,8 +277,8 @@
 ;; cch.usage-model forecasts demand at the reset from the whole usage history
 ;; in absolute time. It needs hourly aggregates of every window, so those are
 ;; cached and extended incrementally: each refresh re-reads only the last
-;; cached hour onward. A fit is reused for 24 hours; the next refresh after
-;; that refits, warm-started from the previous parameters.
+;; cached hour onward. A fit is reused for 24 hours, then refit in the
+;; background while the old one keeps serving (see cached-fit).
 
 (def ^:private hourly-cache (atom {}))
 (def ^:private model-cache (atom {}))
@@ -307,18 +307,45 @@
     (swap! hourly-cache assoc k {:by-key merged :through through})
     (mapv (fn [[[r h] pct]] {:resets-at r :hour h :pct pct}) merged)))
 
-(defn- fitted-model
-  "Fit for [agent window-key], reused for 24 hours, then refit on the next
-  call (warm-started from the previous fit)."
-  [agent window-key rows now]
-  (let [k [(db/db-path) agent window-key]
-        cached (get @model-cache k)]
-    (if (and cached (< (- now (:fitted-at cached)) refit-secs))
+(def ^:private refits-in-flight (atom #{}))
+
+(defn cached-fit
+  "Model fit for key `k` from `cache` (an atom of key -> fit). With no fit
+  yet, fit now. A fit older than 24 hours is still served while a background
+  refit, warm-started from it, replaces it, so no request waits on the
+  optimizer. At most one refit per key runs at a time. `fit-fn` takes the
+  previous fit (or nil) and returns a new one."
+  [cache k now fit-fn]
+  (let [cached (get @cache k)]
+    (cond
+      (nil? cached)
+      (let [fit (fit-fn nil)]
+        (swap! cache assoc k fit)
+        fit)
+
+      (< (- now (:fitted-at cached)) refit-secs)
       cached
-      (let [fit (model/fit-model rows (model/specs window-key) (ZoneId/systemDefault) now
-                                 :x0 (:x cached))]
-        (swap! model-cache assoc k fit)
-        fit))))
+
+      :else
+      (let [[before _] (swap-vals! refits-in-flight conj k)]
+        (when-not (contains? before k)
+          (future
+            (try
+              (swap! cache assoc k (fit-fn cached))
+              (catch Throwable t
+                (binding [*out* *err*]
+                  (println "cch.forecast: usage-model refit failed:" (.getMessage t))))
+              (finally
+                (swap! refits-in-flight disj k)))))
+        cached))))
+
+(defn- fitted-model
+  "Fit for [agent window-key]; see cached-fit."
+  [agent window-key rows now]
+  (cached-fit model-cache [(db/db-path) agent window-key] now
+              (fn [previous]
+                (model/fit-model rows (model/specs window-key) (ZoneId/systemDefault) now
+                                 :x0 (:x previous)))))
 
 (defn- model-projection
   "Gamma-process forecast of demand at `resets-at`, shaped like the rate

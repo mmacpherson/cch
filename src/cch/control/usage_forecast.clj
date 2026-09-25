@@ -4,7 +4,8 @@
   Uses the gamma-process usage model (cch.usage-model) once an agent/window
   has enough completed windows in the read model's hourly history, and the
   rate-Bayes projection before that. Fits are lazy: the first projection
-  that needs one fits it, and it is reused for 24 hours per agent/window.
+  that needs one fits it; after 24 hours it is refit in the background
+  while the old fit keeps serving (cch.forecast/cached-fit).
   Hour-of-week profiles use the JVM's default zone, the same zone the Usage
   page labels its axes in; set TZ on the broker service to the operator's
   local zone."
@@ -25,8 +26,6 @@
   "Completed windows needed before the model replaces the rate projection."
   5)
 
-(def ^:private refit-secs 86400)
-
 (def ^:private model-cache (atom {}))
 
 (defn- model-projection
@@ -37,13 +36,10 @@
         completed (count (filter #(< (:eff-end %) now) (model/windows hourly spec)))]
     (when (>= completed min-model-windows)
       (let [zone (ZoneId/systemDefault)
-            k [agent window-key]
-            cached (get @model-cache k)
-            fitted (if (and cached (< (- now (:fitted-at cached)) refit-secs))
-                     cached
-                     (let [fit (model/fit-model hourly spec zone now :x0 (:x cached))]
-                       (swap! model-cache assoc k fit)
-                       fit))
+            fitted (forecast/cached-fit
+                     model-cache [agent window-key] now
+                     (fn [previous]
+                       (model/fit-model hourly spec zone now :x0 (:x previous))))
             {:keys [median lo hi p-cap path]}
             (model/forecast fitted hourly spec zone now resets-at last-pct)]
         {:method :gamma-process
