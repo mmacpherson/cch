@@ -374,3 +374,88 @@
         (println (format "  %-12s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
                          label (mean (map :crps scored)) delta se (mean (map :err scored))
                          (frac :cov50) (frac :cov90) (mean (map :brier scored))))))))
+
+;; --- momentum experiment (claude-code-hooks-w7v) ---
+;;
+;; Does carrying state from hour to hour help? Arms share the replay, the
+;; checkpoints, and the production (fleet-EB) profile; only the block
+;; resolution and the discount differ.
+
+(def ^:private hourly-overrides
+  "7d at hourly resolution: the 5h window's block settings and start point."
+  (-> (m/specs :five-hour)
+      (select-keys [:block-hours :anchor-hour :min-mass :filter-lookback-secs :x0])
+      (assoc :fit-lookback-secs nil)))
+
+(def ^:private no-memory {5 -30.0})
+
+(defn- momentum-arms [window-key]
+  (case window-key
+    :seven-day [["A daily" {} nil] ["B hourly+mem" hourly-overrides nil] ["C hourly, d=0" hourly-overrides no-memory]]
+    :five-hour [["B hourly+mem" {} nil] ["C hourly, d=0" {} no-memory]]))
+
+(defn- replay-arm
+  [{:keys [cell obs rows-before wins]} profile-at [_ overrides fixed] now zone]
+  (let [[_ window-key] cell
+        spec (merge (m/specs window-key) overrides)
+        {:keys [checkpoint-secs refit min-train]} (plan window-key)
+        done? (fn [w] (or (:cap w) (< (:eff-end w) (- now 3600))))
+        refit-time (fn [w] (case refit
+                             :per-window (:start w)
+                             :weekly (* 604800 (quot (:start w) 604800))))
+        fit-at (memoize (fn [t] (m/fit-model (rows-before t) spec zone t
+                                             :profile-override (profile-at cell t) :fixed fixed)))]
+    (vec
+      (for [[i w] (map-indexed vector wins)
+            :when (and (>= i min-train) (done? w))
+            :let [model (fit-at (refit-time w))
+                  final (m/cum-at w (inc (:eff-end w)))
+                  capped? (boolean (:cap w))
+                  wobs (window-obs obs spec w)]
+            t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
+            :let [g (m/forecast model (rows-before t) spec zone t (:eff-end w) (pct-at wobs t) :path? false)
+                  in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))]]
+        {:win i :hours (/ (- t (:start w)) 3600.0)
+         :crps (m/crps (:draws g) final 100.0)
+         :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
+         :cov50 (in? (:q25 g) (:q75 g))
+         :cov90 (in? (:lo g) (:hi g))
+         :brier (Math/pow (- (:p-cap g) (if capped? 1.0 0.0)) 2)}))))
+
+(defn run-momentum
+  "Print the momentum experiment for every agent/window with history, or
+  only the cells in `only` (e.g. #{[\"codex\" :seven-day]})."
+  [& {:keys [only]}]
+  (let [now (quot (System/currentTimeMillis) 1000)
+        zone (ZoneId/systemDefault)
+        data (into {} (map (fn [c] [c (cell-data now c)]) cells))
+        series-at (memoize (fn [cell t] ((:series (data cell)) t)))
+        profile-at (memoize (fn [cell t]
+                              (:profile (get (m/fleet-profiles
+                                               (into {} (for [c cells :let [s (series-at c t)] :when (seq s)] [c s]))
+                                               zone)
+                                             cell))))]
+    (doseq [cell (if only (filter only cells) cells)
+            :let [[_ wk] cell
+                  arms (momentum-arms wk)
+                  results (into {} (pmap (fn [a] [(first a) (replay-arm (data cell) profile-at a now zone)]) arms))
+                  base (results (ffirst arms))]
+            :when (seq base)]
+      (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs %s)" (first cell) (name wk)
+                       (count base) (count (distinct (map :win base))) (ffirst arms)))
+      (println (format "  %-15s %7s %16s %6s %6s %6s %7s" "arm" "CRPS" "dCRPS (+-se)" "MAE" "cov50" "cov90" "Brier"))
+      (doseq [[label] arms
+              :let [rows (results label)
+                    {:keys [delta se]} (paired-delta rows base)
+                    frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) rows))))]]
+        (println (format "  %-15s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
+                         label (mean (map :crps rows)) delta se (mean (map :err rows))
+                         (frac :cov50) (frac :cov90) (mean (map :brier rows)))))
+      (let [span (if (= wk :seven-day) 24.0 1.0)
+            bucket #(min 5 (int (Math/ceil (/ (:hours %) span))))]
+        (println (format "  CRPS by elapsed %s:" (if (= wk :seven-day) "day" "hour")))
+        (doseq [[label] arms
+                :let [by (group-by bucket (results label))]]
+          (println (format "    %-15s %s" label
+                           (str/join "  " (for [k (sort (keys by))]
+                                            (format "%s:%.2f" (if (= k 5) "5+" k) (mean (map :crps (by k)))))))))))))

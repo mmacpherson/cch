@@ -196,11 +196,13 @@
   stopped reporting keeps adding zero-usage exposure, which would otherwise
   lower the shape's level uniformly.)"
   [stats]
-  (let [num (apply mapv + (map normalized-usage stats))
-        den (apply mapv + (map :exposure stats))
-        raw (mapv (fn [n d] (if (pos? d) (/ n d) 0.0)) num den)
-        mean (/ (reduce + raw) 168.0)]
-    (if (pos? mean) (mapv #(/ % mean) raw) raw)))
+  (if (empty? stats)
+    (vec (repeat 168 1.0))
+    (let [num (apply mapv + (map normalized-usage stats))
+          den (apply mapv + (map :exposure stats))
+          raw (mapv (fn [n d] (if (pos? d) (/ n d) 0.0)) num den)
+          mean (/ (reduce + raw) 168.0)]
+      (if (pos? mean) (mapv #(/ % mean) raw) raw))))
 
 (defn shrunk-rates
   "Empirical-Bayes shrinkage of one cell's normalized bin rates toward
@@ -366,13 +368,20 @@
 (defn fit
   "Maximum-likelihood theta for `blks`, starting from unconstrained `x0`
   (the spec default, or yesterday's fit). Nelder–Mead with one restart
-  from the best point guards against a stalled simplex."
-  [blks spec x0]
-  (let [obj (fn [x] (- (:loglik (run-filter blks (unpack x) spec true))))
-        r1 (num/nelder-mead obj x0 :tol 1e-6 :max-iter 1500)
+  from the best point guards against a stalled simplex. `fixed` maps
+  unconstrained indices to values held constant (e.g. {5 -30.0} pins the
+  discount d at ~0, removing memory between blocks)."
+  [blks spec x0 & {:keys [fixed]}]
+  (let [free (vec (remove (set (keys fixed)) (range (count x0))))
+        full (fn [xf] (reduce-kv assoc (reduce (fn [v [i xi]] (assoc v i xi)) (vec x0) (map vector free xf))
+                                 (or fixed {})))
+        obj (fn [xf] (- (:loglik (run-filter blks (unpack (full xf)) spec true))))
+        start (mapv #(nth x0 %) free)
+        r1 (num/nelder-mead obj start :tol 1e-6 :max-iter 1500)
         r2 (num/nelder-mead obj (:x r1) :step 0.2 :tol 1e-6 :max-iter 1500)
-        best (if (<= (:fx r2) (:fx r1)) r2 r1)]
-    {:x (:x best) :theta (unpack (:x best)) :nll (:fx best)}))
+        best (if (<= (:fx r2) (:fx r1)) r2 r1)
+        x (full (:x best))]
+    {:x x :theta (unpack x) :nll (:fx best)}))
 
 ;; --- forecast ---
 
@@ -511,8 +520,9 @@
 (defn fit-model
   "Fit the activity profile and theta from hourly aggregate `rows` observed
   before `now`. `x0` warm-starts the optimizer; `profile-override` supplies
-  a profile estimated elsewhere (e.g. pooled across agents)."
-  [rows spec zone now & {:keys [x0 profile-override]}]
+  a profile estimated elsewhere (e.g. pooled across agents); `fixed` holds
+  parameters constant (see fit)."
+  [rows spec zone now & {:keys [x0 profile-override fixed]}]
   (let [wins (windows rows spec)
         series (hour-series wins now)
         prof (or profile-override (profile series zone))
@@ -521,5 +531,5 @@
                      (into (sorted-map) (filter #(>= (key %) (- now lookback)) series))
                      series)
         blks (blocks fit-series prof zone spec)
-        {:keys [x theta nll]} (fit blks spec (or x0 (:x0 spec)))]
+        {:keys [x theta nll]} (fit blks spec (or x0 (:x0 spec)) :fixed fixed)]
     {:theta theta :x x :nll nll :profile prof :fitted-at now :blocks (count blks)}))

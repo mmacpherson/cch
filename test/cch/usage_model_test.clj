@@ -167,3 +167,9 @@
         (is (< k 5.0))
         (is (> (nth rates 6) 1.4))
         (is (< (nth rates 18) 0.6))))))
+
+(deftest fit-can-hold-parameters-fixed
+  (let [blks (simulate [0.05 6.0 30.0 3.0 1.0 0.8] 200 3)
+        {:keys [x theta]} (m/fit blks seven (:x0 seven) :fixed {5 -30.0})]
+    (is (= -30.0 (nth x 5)))
+    (is (< (nth theta 5) 1e-9) "d pinned at ~0: no memory between blocks")))
