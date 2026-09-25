@@ -1,14 +1,14 @@
 (ns cch.usage
-  "Server-rendered 7-day rate-limit window page.
+  "Server-rendered rate-limit window page (5h or 7d).
 
-  Renders observed used_percentage as an SVG chart, plus a single
-  Bayesian forward projection (mean line + 90% credible interval band)
-  from cch.projections.
+  Renders observed used_percentage as a step line and the usage model's
+  predictive fan to the reset (median path, 50% and 90% bands), plus a
+  per-hour chart of used and expected usage. Before the model has enough
+  history, the projection falls back to a straight line and band.
 
   Pure functions of the data bundle from cch.forecast/current-window —
   easy to test without a server."
   (:require [cch.forecast :as forecast]
-            [cch.projections :as proj]
             [clojure.string :as str])
   (:import (java.time Instant ZoneId)
            (java.time.format DateTimeFormatter)))
@@ -42,7 +42,7 @@
 ;; --- formatting helpers ---
 
 (def ^:private day-fmt
-  (.withZone (DateTimeFormatter/ofPattern "MMM d") (ZoneId/systemDefault)))
+  (.withZone (DateTimeFormatter/ofPattern "EEE MMM d") (ZoneId/systemDefault)))
 
 (def ^:private hour-fmt
   (.withZone (DateTimeFormatter/ofPattern "HH:mm") (ZoneId/systemDefault)))
@@ -53,17 +53,25 @@
 (defn- fmt-hour [epoch]
   (.format hour-fmt (Instant/ofEpochSecond epoch)))
 
+(defn- local-midnights
+  "Local midnights strictly inside (from, to]."
+  [from to]
+  (let [zone (ZoneId/systemDefault)
+        first-day (-> (Instant/ofEpochSecond from) (.atZone zone) .toLocalDate (.plusDays 1))]
+    (->> (iterate #(.plusDays ^java.time.LocalDate % 1) first-day)
+         (map #(.toEpochSecond (.atStartOfDay ^java.time.LocalDate % zone)))
+         (take-while #(<= % to)))))
+
 (defn- x-axis-ticks
   "Time-axis ticks for the given window. Returns {:ts seq, :fmt fn, :step}.
-   7d: one tick per day. 5h: one tick per hour. Range covers the whole window."
+   7d: local midnights, labeled by weekday and date. 5h: one tick per hour."
   [{:keys [window-key window-start resets-at]}]
   (if (= window-key :five-hour)
     {:ts   (->> (iterate #(+ % 3600) window-start)
                 (take-while #(<= % resets-at)))
      :fmt  fmt-hour
      :step 3600}
-    {:ts   (->> (iterate #(+ % 86400) window-start)
-                (take-while #(<= % resets-at)))
+    {:ts   (local-midnights window-start resets-at)
      :fmt  fmt-day
      :step 86400}))
 
@@ -85,7 +93,74 @@
 ;; --- projection styling ---
 
 (def ^:private projection-color "#f59e0b") ; orange
+(def ^:private observed-color "#059669")   ; green
 
+(defn- rgba [hex a]
+  (let [r (Integer/parseInt (subs hex 1 3) 16)
+        g (Integer/parseInt (subs hex 3 5) 16)
+        b (Integer/parseInt (subs hex 5 7) 16)]
+    (format "rgba(%d,%d,%d,%.2f)" r g b (double a))))
+
+(def ^:private cap-fmt
+  {:seven-day (.withZone (DateTimeFormatter/ofPattern "EEE HH:mm") (ZoneId/systemDefault))
+   :five-hour hour-fmt})
+
+(defn- step-points
+  "Observed usage as a step line. The meter moves in whole-percent steps,
+  so usage holds at its last report until the next one, then jumps."
+  [observed sx sy now]
+  (let [pts (reduce (fn [acc {:keys [ts pct]}]
+                      (let [x (sx ts) y (sy pct)]
+                        (if-let [[_ prev-y] (peek acc)]
+                          (conj acc [x prev-y] [x y])
+                          (conj acc [x y]))))
+                    [] observed)]
+    (if-let [[_ y] (peek pts)]
+      (conj pts [(sx now) y])
+      pts)))
+
+(defn- cap-crossing
+  "First path point whose median demand reaches the cap, or nil."
+  [path]
+  (first (filter #(>= (:median %) 100.0) path)))
+
+(defn- fan
+  "Predictive fan from `now` to the reset: 90% and 50% bands and the median
+  path. They follow the activity profile, so they flatten when you are
+  usually idle."
+  [{:keys [path]} last-pct now sx sy]
+  (let [start {:ts now :lo last-pct :q25 last-pct :median last-pct
+               :q75 last-pct :hi last-pct}
+        pts (cons start path)
+        line (fn [k] (mapv (fn [p] [(sx (:ts p)) (sy (k p))]) pts))]
+    [:g {:clip-path "url(#plot-clip)"}
+     [:path {:d (band-path (line :hi) (line :lo))
+             :fill (rgba projection-color 0.12) :stroke "none"
+             :class "band-region"}]
+     [:path {:d (band-path (line :q75) (line :q25))
+             :fill (rgba projection-color 0.24) :stroke "none"
+             :class "band-inner"}]
+     [:polyline {:points (points-attr (line :median))
+                 :fill "none" :stroke projection-color
+                 :stroke-width 2.4 :stroke-opacity 0.95
+                 :stroke-dasharray "5 4"
+                 :class "proj-line"}]]))
+
+(defn- straight-projection
+  "Fallback before the model has enough history: a straight line from now
+  to the projected value, with its band."
+  [{:keys [proj band]} last-pct now resets-at sx sy]
+  (let [line-for (fn [pct] [[(sx now) (sy last-pct)] [(sx resets-at) (sy pct)]])]
+    [:g {:clip-path "url(#plot-clip)"}
+     (when band
+       [:path {:d (band-path (line-for (:hi band)) (line-for (:lo band)))
+               :fill (rgba projection-color 0.10) :stroke "none"
+               :class "band-region"}])
+     [:polyline {:points (points-attr (line-for proj))
+                 :fill "none" :stroke projection-color
+                 :stroke-width 2.7 :stroke-opacity 0.9
+                 :stroke-dasharray "5 4"
+                 :class "proj-line"}]]))
 
 ;; --- chart svg ---
 
@@ -103,20 +178,9 @@
           sx   (scale-x data rect)
           sy   (scale-y y-top rect)
           {:keys [x0 y0 x1 y1]} rect
-          obs-pts    (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)]) observed)
-          smoothed   (when (seq observed)
-                       (some->> (proj/loess-smooth observed 80 0.08)
-                                (mapv (fn [{:keys [ts pct]}] [(sx ts) (sy pct)]))))
-          proj-x0 (sx now)
-          proj-x1 (sx resets-at)
           y-ticks (range 0 (inc y-top) 25)
           x-ticks (x-axis-ticks data)
-          line-for (fn [proj-pct] [[proj-x0 (sy last-pct)] [proj-x1 (sy proj-pct)]])
-          rgba (fn [hex a]
-                 (let [r (Integer/parseInt (subs hex 1 3) 16)
-                       g (Integer/parseInt (subs hex 3 5) 16)
-                       b (Integer/parseInt (subs hex 5 7) 16)]
-                   (format "rgba(%d,%d,%d,%.2f)" r g b a)))]
+          crossing (cap-crossing (:path projection))]
       [:svg {:viewBox (str "0 0 " chart-w " " chart-h)
              :width   "100%"
              :role    "img"
@@ -128,20 +192,17 @@
        [:defs
         [:clipPath {:id "plot-clip"}
          [:rect {:x x0 :y y0 :width (- x1 x0) :height (- y1 y0)}]]]
-       ;; --- reset-cycle vertical lines (resets-at, resets-at-24h, ...) ---
-       ;; Marks the same hour-of-day as the weekly reset, every 24h back to
-       ;; window-start. Drawn before gridlines so they sit furthest back.
-       ;; 5h-native view skips these — the only relevant reset is at the
-       ;; right edge of the chart, already implied by the axis.
+       ;; --- day separators at local midnight (7d only) ---
+       ;; Drawn before gridlines so they sit furthest back. Days, not reset
+       ;; hours, because the forecast follows the daily activity rhythm.
        (when-not (= window-key :five-hour)
-         (for [t (->> (iterate #(- % 86400) resets-at)
-                      (take-while #(>= % window-start)))
+         (for [t (:ts x-ticks)
                :let [x (sx t)]]
            [:line {:x1 x :x2 x :y1 (sy 100) :y2 y1
                    :stroke "var(--fg-muted)"
                    :stroke-width 1
                    :opacity 0.25
-                   :class "reset-cycle-tick"}]))
+                   :class "day-tick"}]))
        ;; --- linear-pace reference line (0% at window-start → 100% at resets-at) ---
        ;; If observed usage is above this line you're ahead of pace; below means behind.
        [:line {:x1 (sx window-start) :x2 (sx resets-at)
@@ -185,171 +246,132 @@
                   :font-size 10
                   :fill "var(--fg-muted)"}
            "now"]])
-       ;; --- projection band + line, clipped to plot area ---
+       ;; --- forecast: fan from the model, or the straight fallback ---
        (when projection
-         (let [{:keys [proj band]} projection]
-           [:g {:clip-path "url(#plot-clip)"}
-            (when band
-              [:path {:d (band-path (line-for (:hi band))
-                                    (line-for (:lo band)))
-                      :fill (rgba projection-color 0.10)
-                      :stroke "none"
-                      :class "band-region"}])
-            [:polyline {:points (points-attr (line-for proj))
-                        :fill "none"
-                        :stroke projection-color
-                        :stroke-width 2.7
-                        :stroke-opacity 0.9
-                        :stroke-dasharray "5 4"
-                        :class "proj-line"}]]))
-       ;; --- observed: smoothed line + small raw dots ---
-       (when (seq smoothed)
-         [:polyline {:points (points-attr smoothed)
+         (if (seq (:path projection))
+           (fan projection last-pct now sx sy)
+           (straight-projection projection last-pct now resets-at sx sy)))
+       ;; --- where the median path reaches the cap ---
+       (when crossing
+         (let [x (sx (:ts crossing)) y (sy 100)
+               label (str "median hits cap "
+                          (.format ^DateTimeFormatter (cap-fmt (or window-key :seven-day))
+                                   (Instant/ofEpochSecond (:ts crossing))))]
+           [:g {:class "cap-marker"}
+            [:circle {:cx x :cy y :r 3.5 :fill "var(--c-deny)"}]
+            [:text {:x (if (> x (- x1 150)) (- x 6) (+ x 6)) :y (- y 6)
+                    :text-anchor (if (> x (- x1 150)) "end" "start")
+                    :font-size 10 :fill "var(--c-deny)"}
+             label]]))
+       ;; --- observed usage ---
+       (when (seq observed)
+         [:polyline {:points (points-attr (step-points observed sx sy now))
                      :fill "none"
-                     :stroke "#059669"
+                     :stroke observed-color
                      :stroke-width 2.1
                      :stroke-opacity 0.9
-                     :class "observed-smoothed"}])
-       (for [[x y] obs-pts]
-         [:circle {:cx x :cy y :r 1.6
-                   :fill "#059669"
-                   :fill-opacity 0.5
-                   :class "observed-point"}])])))
+                     :class "observed-line"}])])))
 
 (defn legend
-  "Inline legend: observed series + projected usage swatches."
-  [_data]
-  [:div.legend
-   [:span.legend-item
-    [:span.swatch.observed] " observed"]
-   [:span.legend-item
-    [:span.swatch {:style (str "background:" projection-color)}]
-    " projected (90% CI)"]])
-
+  "Inline legend for the usage chart."
+  [data]
+  (let [fan? (seq (get-in data [:projection :path]))]
+    [:div.legend
+     [:span.legend-item
+      [:span.swatch.observed] " observed"]
+     [:span.legend-item
+      [:span.swatch {:style (str "background:" projection-color)}]
+      (if fan? " median forecast" " projected (90% CI)")]
+     (when fan?
+       [:span.legend-item
+        [:span.swatch {:style (str "background:" (rgba projection-color 0.45))}]
+        " 50% likely"])
+     (when fan?
+       [:span.legend-item
+        [:span.swatch {:style (str "background:" (rgba projection-color 0.2))}]
+        " 90% likely"])]))
 
 ;; page-css removed — all styles live in cch.css now
 
-(def ^:private rate-chart-h 280)
+(def ^:private bars-chart-h 200)
 
-(defn rate-chart-svg
-  "Second chart: burn rate (%/hr) sampled on a regular time grid.
-   For each grid point t, finds the oldest and newest observed sample
-   within a trailing lookback window and computes (delta-pct / delta-t).
-   Same math as the statusline burn indicator, applied historically."
+(defn- usage-buckets
+  "Per-bucket usage: observed increments before now, and the model's
+  expected (mean) increments after it. The bucket holding `now` carries
+  both, stacked. Returns [{:t :observed :expected}]."
+  [{:keys [window-start resets-at now observed projection]} step]
+  (let [obs (vec observed)
+        cum-at (fn [t] (reduce (fn [v {:keys [ts pct]}] (if (<= ts t) pct (reduced v)))
+                               0.0 obs))
+        bucket (fn [t] (* step (quot (- t window-start) step)))
+        observed-by (into {}
+                          (for [b (range 0 (- now window-start) step)
+                                :let [t (+ window-start b)]]
+                            [b (max 0.0 (- (cum-at (min now (+ t step))) (cum-at t)))]))
+        expected-by (second
+                      (reduce (fn [[prev m] {:keys [ts mean]}]
+                                [mean (update m (bucket (dec ts)) (fnil + 0.0) (- mean prev))])
+                              [(double (or (:last-pct projection) (cum-at now))) {}]
+                              (:path projection)))]
+    (for [b (range 0 (- resets-at window-start) step)]
+      {:t (+ window-start b)
+       :observed (get observed-by b 0.0)
+       :expected (get expected-by b 0.0)})))
+
+(defn usage-bars-svg
+  "Second chart: usage per bucket (hour for 7d, 5 min for 5h). Solid bars
+  are what was used; light bars are what the model expects, which is the
+  activity profile scaled by the current intensity."
   [data]
-  (when (and data (> (count (:observed data)) 4))
-    (let [{:keys [rate-samples rate-scale window-start resets-at now]} data
-          ;; rate-samples is window-appropriate dense data: for 7d it's the
-          ;; 60s-bucketed 5h-window stream (which ticks ~7.5x more often
-          ;; than the 6m-bucketed 7d samples, giving a continuous signal
-          ;; even when the 7d curve is on a long plateau), scaled into
-          ;; 7d-%/hr units. For 5h it's the in-window observed samples at
-          ;; unit scale.
-          scale       (double (or rate-scale 1.0))
-          in-5h       (vec (filter #(<= (:ts %) now) (or rate-samples [])))
-          n-5h        (count in-5h)
-          grid-step-s (* 10 60)
-          lookback-s  (* 30 60)
-          grid-ts     (range window-start (+ now 1) grid-step-s)
-          ;; Binary search: first index where (:ts v[i]) >= cutoff. O(log n).
-          lower-bound (fn [cutoff]
-                        (loop [lo 0 hi n-5h]
-                          (if (>= lo hi) lo
-                            (let [mid (quot (+ lo hi) 2)]
-                              (if (< (:ts (nth in-5h mid)) cutoff)
-                                (recur (inc mid) hi)
-                                (recur lo mid))))))
-          rate-pts    (mapv (fn [t]
-                              (let [lo      (lower-bound (- t lookback-s))
-                                    hi      (lower-bound (inc t))
-                                    bucket  (subvec in-5h lo hi)
-                                    active-r (when (seq bucket)
-                                               (apply max (map :resets-at bucket)))
-                                    active  (filter #(= (:resets-at %) active-r) bucket)
-                                    rate    (when (>= (count active) 2)
-                                              (let [oldest  (first active)
-                                                    newest  (last active)
-                                                    elapsed (- (:ts newest) (:ts oldest))]
-                                                (when (>= elapsed 300)
-                                                  (* scale
-                                                     (max 0.0 (/ (- (:pct newest) (:pct oldest))
-                                                                  (/ elapsed 3600.0)))))))]
-                                {:ts t :rate (or rate 0.0)}))
-                            grid-ts)
-          margin-r  {:top 34 :right 32 :bottom 36 :left 56}
-          rect      {:x0 (:left margin-r) :y0 (:top margin-r)
-                     :x1 (- chart-w (:right margin-r))
-                     :y1 (- rate-chart-h (:bottom margin-r))}
-          {:keys [x0 y0 x1 y1]} rect
-          ;; y ceiling: p95 of *non-zero* rates so that the many idle-period
-          ;; zeros don't pull the percentile below the active-session peaks.
-          ;; Hard cap at 25 to clip genuine millisecond bursts (e.g. 4
-          ;; sessions all ticking simultaneously in a few seconds).
-          ;; y ceiling: max of non-zero rates, hard-capped at 25 to clip
-          ;; sub-second multi-session coincident bursts (e.g. 140%/hr).
-          nonzero   (filter pos? (map :rate rate-pts))
-          r-max     (min 25.0 (max 2.0 (if (seq nonzero) (apply max nonzero) 2.0)))
-          y-top     (-> r-max (/ 5.0) Math/ceil long (* 5) (max 5))
-          sx        (scale-x {:window-start window-start :resets-at resets-at} rect)
-          sy        (scale-y y-top rect)
-          r-ticks   (range 0 (inc y-top) 5)
-          pts       (mapv (fn [{:keys [ts rate]}] [(sx ts) (sy rate)]) rate-pts)
-          ;; Area fill: close path at y1 (zero line)
-          area-d    (when (seq pts)
-                      (let [[fx fy] (first pts)
-                            [lx _]  (last pts)]
-                        (str "M " fx " " fy " "
-                             (apply str (for [[x y] (rest pts)] (str "L " x " " y " ")))
-                             "L " lx " " y1 " L " fx " " y1 " Z")))]
-      [:svg {:viewBox (str "0 0 " chart-w " " rate-chart-h)
-             :width   "100%"
-             :class   "rate-chart"}
+  (when (and data (seq (:observed data)))
+    (let [{:keys [window-key window-start resets-at now]} data
+          five? (= window-key :five-hour)
+          step (if five? 300 3600)
+          rows (usage-buckets (assoc-in data [:projection :last-pct] (:last-pct data)) step)
+          margin-r {:top 30 :right 32 :bottom 30 :left 56}
+          {:keys [x0 y0 x1 y1]} {:x0 (:left margin-r) :y0 (:top margin-r)
+                                 :x1 (- chart-w (:right margin-r))
+                                 :y1 (- bars-chart-h (:bottom margin-r))}
+          tallest (reduce max 1.0 (map #(+ (:observed %) (:expected %)) rows))
+          y-top (-> tallest Math/ceil long (max 2))
+          sx (scale-x {:window-start window-start :resets-at resets-at} {:x0 x0 :x1 x1})
+          sy (scale-y y-top {:y0 y0 :y1 y1})
+          bar-w (max 0.5 (- (sx (+ window-start step)) (sx window-start) 0.6))
+          x-ticks (x-axis-ticks data)]
+      [:svg {:viewBox (str "0 0 " chart-w " " bars-chart-h)
+             :width "100%"
+             :class "rate-chart usage-bars"}
        [:text {:x (/ (+ x0 x1) 2.0) :y 14
                :text-anchor "middle" :font-size 10
                :fill "var(--fg-muted)"}
-        "burn rate (%/hr)"]
-       [:defs
-        [:clipPath {:id "rate-clip"}
-         [:rect {:x x0 :y y0 :width (- x1 x0) :height (- y1 y0)}]]]
-       ;; gridlines + y-axis labels
-       (for [r r-ticks :let [y (sy r)]]
+        (str "usage per " (if five? "5 min" "hour") " (%) — solid: used, light: expected")]
+       (for [v [0 y-top] :let [y (sy v)]]
          [:g
           [:line {:x1 x0 :x2 x1 :y1 y :y2 y
                   :stroke "var(--border)" :stroke-width 1
-                  :stroke-dasharray (when (pos? r) "2 4")}]
+                  :stroke-dasharray (when (pos? v) "2 4")}]
           [:text {:x (- x0 8) :y (+ y 4) :text-anchor "end" :font-size 10
                   :fill "var(--fg-muted)"}
-           (str r "%/h")]])
-       ;; x-axis ticks (aligned with main chart)
-       (let [x-ticks (x-axis-ticks data)]
-         (for [t (:ts x-ticks)
-               :let [x (sx t)]]
-           [:g
-            [:line {:x1 x :x2 x :y1 y1 :y2 (+ y1 4)
-                    :stroke "var(--border)" :stroke-width 1}]
-            [:text {:x x :y (+ y1 16) :text-anchor "middle" :font-size 10
-                    :fill "var(--fg-muted)"}
-             ((:fmt x-ticks) t)]]))
-       ;; "now" guide
+           (str v "%")]])
+       (for [t (:ts x-ticks) :let [x (sx t)]]
+         [:g
+          [:line {:x1 x :x2 x :y1 y1 :y2 (+ y1 4) :stroke "var(--border)" :stroke-width 1}]
+          [:text {:x x :y (+ y1 16) :text-anchor "middle" :font-size 10
+                  :fill "var(--fg-muted)"}
+           ((:fmt x-ticks) t)]])
        (let [x (sx now)]
          [:line {:x1 x :x2 x :y1 y0 :y2 y1
-                 :stroke "var(--fg-muted)" :stroke-width 1
-                 :stroke-dasharray "3 3"}])
-       ;; reset-cycle vertical ticks — 7d-only; 5h reset is at chart edge.
-       (when-not (= (:window-key data) :five-hour)
-         (for [t (->> (iterate #(- % 86400) resets-at) (take-while #(>= % window-start)))
-               :let [x (sx t)]]
-           [:line {:x1 x :x2 x :y1 (sy (min y-top 100)) :y2 y1
-                   :stroke "var(--fg-muted)" :stroke-width 1 :opacity 0.25}]))
-       ;; area fill + line, clipped
-       [:g {:clip-path "url(#rate-clip)"}
-        (when area-d
-          [:path {:d area-d :fill "#059669" :fill-opacity 0.12 :stroke "none"}])
-        (when (seq pts)
-          [:polyline {:points (points-attr pts)
-                      :fill "none" :stroke "#059669"
-                      :stroke-width 1.75 :stroke-opacity 0.9
-                      :class "rate-line"}])]])))
+                 :stroke "var(--fg-muted)" :stroke-width 1 :stroke-dasharray "3 3"}])
+       (for [{:keys [t observed expected]} rows
+             :let [x (+ (sx t) 0.3)]]
+         [:g
+          (when (pos? observed)
+            [:rect {:x x :y (sy observed) :width bar-w :height (- y1 (sy observed))
+                    :fill observed-color :fill-opacity 0.75 :class "bar-observed"}])
+          (when (pos? expected)
+            [:rect {:x x :y (sy (+ observed expected)) :width bar-w
+                    :height (- (sy observed) (sy (+ observed expected)))
+                    :fill projection-color :fill-opacity 0.35 :class "bar-expected"}])])])))
 
 (defn page-body
   "Hiccup body for the /usage page. Caller wraps with html/head/nav."
@@ -357,7 +379,7 @@
   [:div.usage-chart-block
    (chart-svg data)
    (legend data)
-   (rate-chart-svg data)])
+   (usage-bars-svg data)])
 
 (defn usage-href
   "Build a Usage link while preserving agent and window selection. `base` is
@@ -408,8 +430,9 @@
 (defn stat-tiles
   "Shared stat row derived solely from a rich Usage data bundle."
   [data]
-  (let [{:keys [last-pct resets-at now rate-phr projection samples]} data
+  (let [{:keys [last-pct resets-at now rate-phr projection]} data
         projected (:proj projection)
+        p-cap (:p-cap projection)
         band (:band projection)
         seconds-left (when (and resets-at now) (max 0 (- resets-at now)))]
     [:div.tile-row
@@ -418,7 +441,7 @@
       [:div.stat-value (if (number? last-pct)
                          (str (Math/round (double last-pct)) "%") "—")]]
      [:div.stat-tile {:class (when (and projected (> projected 85)) "warn")}
-      [:div.stat-label "projected"]
+      [:div.stat-label "projected at reset"]
       [:div.stat-value (if (number? projected)
                          (str (Math/round (double projected)) "%") "—")
        (when band
@@ -432,9 +455,10 @@
       [:div.stat-label "burn rate"]
       [:div.stat-value (if (number? rate-phr)
                          (format "%.1f%%/h" (double rate-phr)) "—")]]
-     [:div.stat-tile
-      [:div.stat-label "samples"]
-      [:div.stat-value (str (or samples (count (or (:observed data) []))))]]]))
+     [:div.stat-tile {:class (when (and p-cap (>= p-cap 0.25)) "warn")}
+      [:div.stat-label "chance of cap"]
+      [:div.stat-value (if (number? p-cap)
+                         (str (Math/round (* 100.0 (double p-cap))) "%") "—")]]]))
 
 (defn page-view
   "The full Usage experience shared by local and hosted data adapters."

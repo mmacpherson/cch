@@ -894,8 +894,8 @@
   [window-key agent]
   (let [data     (usage/build-data agent window-key)
         subtitle (case window-key
-                   :five-hour "5-hour rate-limit window — projection with 90% credible interval"
-                   "7-day rate-limit window — projection with 90% credible interval")
+                   :five-hour "5-hour rate-limit window — forecast to reset, with 50% and 90% ranges"
+                   "7-day rate-limit window — forecast to reset, with 50% and 90% ranges")
         href     (usage/usage-href "/usage" {:window window-key :agent agent})]
     (str (hic/html
            [:html {:lang "en"}

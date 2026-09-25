@@ -22,8 +22,10 @@
 
   Parameters theta = [kappa alpha0 beta0 a0 b0 d] are fit by maximizing
   the one-step-ahead predictive likelihood (Nelder–Mead). The forecast is
-  a seeded Monte Carlo draw of the demand at the scheduled reset, which can
-  exceed 100% (the cap stops the meter, not the demand).
+  a seeded Monte Carlo simulation of the demand path to the scheduled
+  reset, which can exceed 100% (the cap stops the meter, not the demand).
+  The path is simulated in sub-block pieces; a gamma process splits
+  exactly, so the pieces of one block sum to the block's distribution.
 
   Everything here is pure; cch.forecast owns the SQL and caching."
   (:require [cch.numeric :as num])
@@ -37,13 +39,13 @@
   logit d]."
   {:seven-day {:span-secs (* 7 86400) :block-hours 24 :anchor-hour 4
                :min-mass 2.0 :cluster-secs 300 :fit-lookback-secs nil
-               :filter-lookback-secs nil
+               :filter-lookback-secs nil :path-step-secs 3600
                :x0 [-3.0 2.3 4.1 1.4 0.85 1.4]}
    :five-hour {:span-secs (* 5 3600) :block-hours 1 :anchor-hour 0
                :min-mass 0.05 :cluster-secs 120
                :fit-lookback-secs (* 42 86400)
                ;; With d ~ 0.9 per hour, state older than a week has no weight.
-               :filter-lookback-secs (* 7 86400)
+               :filter-lookback-secs (* 7 86400) :path-step-secs 300
                :x0 [-1.2 1.6 0.7 1.4 -0.85 2.2]}})
 
 ;; --- clock ---
@@ -294,18 +296,85 @@
      :hi (num/quantile draws 0.95)
      :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)}))
 
+(defn future-pieces
+  "Sub-intervals of [t, t-end) at `step-secs` resolution (a divisor or
+  multiple of an hour), never crossing an hour boundary, tagged with the
+  model block they belong to (0 = the current block):
+  [[piece-end mass block-index] ...]."
+  [prof zone spec t t-end step-secs]
+  (loop [t t idx 0 out []]
+    (if (>= t t-end)
+      out
+      (let [nxt (min t-end
+                     (* step-secs (inc (quot t step-secs)))
+                     (+ (floor-hour t) hour-secs))
+            idx (if (and (seq out) (zero? (mod t hour-secs)) (block-start? zone spec t))
+                  (inc idx)
+                  idx)]
+        (recur nxt idx (conj out [nxt (mass prof zone t nxt) idx]))))))
+
+(defn predict-path
+  "Monte Carlo demand path over `pieces` (see future-pieces) from current
+  pct `x`. Each draw samples the intensity and on-probability once, each
+  block's on/off once (the current block is on if it has usage), and each
+  piece's usage. Returns one summary per piece end:
+  {:ts :mean :lo :q25 :median :q75 :hi :p-cap}, where lo/hi bound the 90%
+  band and p-cap is P(demand >= 100 by ts)."
+  [[al be a b] [kappa] x pieces on-now? & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [k (count pieces)
+        r (num/rng seed)
+        cols (vec (repeatedly k #(double-array n)))
+        masses (double-array (map second pieces))
+        blks (long-array (map #(nth % 2) pieces))]
+    (dotimes [i n]
+      (let [lam (num/gamma-sample r al be)
+            pi (num/beta-sample r a b)]
+        (loop [j 0 cum (double x) blk -1 on? false]
+          (when (< j k)
+            (let [b-idx (aget blks j)
+                  on? (if (= b-idx blk)
+                        on?
+                        (or (and (zero? b-idx) on-now?) (< (.nextDouble r) pi)))
+                  A (aget masses j)
+                  cum (if (and on? (pos? A)) (+ cum (num/gamma-sample r (* kappa A) lam)) cum)]
+              (aset ^doubles (nth cols j) i cum)
+              (recur (inc j) cum b-idx on?))))))
+    (mapv (fn [j]
+            (let [^doubles col (nth cols j)
+                  mean (/ (areduce col i acc 0.0 (+ acc (aget col i))) n)
+                  capped (areduce col i acc 0.0 (if (>= (aget col i) 100.0) (inc acc) acc))]
+              (java.util.Arrays/sort col)
+              {:ts (first (nth pieces j))
+               :mean mean
+               :lo (num/quantile col 0.05)
+               :q25 (num/quantile col 0.25)
+               :median (num/quantile col 0.5)
+               :q75 (num/quantile col 0.75)
+               :hi (num/quantile col 0.95)
+               :p-cap (/ capped n)}))
+          (range k))))
+
 (defn forecast
   "Forecast the window ending at `resets-at` from hourly aggregate `rows` of
-  all windows up to `now`, given a fitted model {:theta :profile}.
-  `x` is the latest observed pct of the current window."
-  [{:keys [theta profile]} rows spec zone now resets-at x]
+  all windows up to `now`, given a fitted model {:theta :profile}. `x` is
+  the latest observed pct of the current window. Returns
+  {:median :lo :hi :p-cap :path}, summarizing demand at the reset; `:path`
+  holds the per-step summaries unless `path?` is false (the backtest skips
+  it and draws whole blocks, which is equivalent at the endpoint)."
+  [{:keys [theta profile]} rows spec zone now resets-at x & {:keys [path?] :or {path? true}}]
   (let [wins (windows rows spec)
         lookback (:filter-lookback-secs spec)
         series (cond->> (hour-series wins now)
                  lookback (into (sorted-map) (filter #(>= (key %) (- now lookback)))))
-        {:keys [state on-last?]} (run-filter (blocks series profile zone spec) theta spec false)
-        fut (future-blocks profile zone spec now resets-at)]
-    (predict state theta x fut on-last?)))
+        {:keys [state on-last?]} (run-filter (blocks series profile zone spec) theta spec false)]
+    (if path?
+      (let [path (predict-path state theta x
+                               (future-pieces profile zone spec now resets-at (:path-step-secs spec))
+                               on-last?)]
+        (if-let [end (peek path)]
+          (assoc (select-keys end [:median :lo :hi :p-cap]) :path path)
+          {:median x :lo x :hi x :p-cap (if (>= x 100.0) 1.0 0.0) :path []}))
+      (predict state theta x (future-blocks profile zone spec now resets-at) on-last?))))
 
 (defn fit-model
   "Fit the activity profile and theta from hourly aggregate `rows` observed

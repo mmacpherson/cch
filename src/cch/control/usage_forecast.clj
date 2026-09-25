@@ -50,11 +50,6 @@
                        :window-key window-key
                        :span-secs span-seconds
                        :observed observed
-                       :rate-samples
-                       (mapv (fn [{:keys [ts pct]}]
-                               {:ts ts :pct pct :resets-at resets-at})
-                             observed)
-                       :rate-scale 1.0
                        :resets-at resets-at
                        :window-start (- resets-at span-seconds)
                        :now now

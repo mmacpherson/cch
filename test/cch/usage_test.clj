@@ -123,11 +123,6 @@
                     {:ts 1800 :pct 12.0}
                     {:ts 3600 :pct 25.0}
                     {:ts 5400 :pct 38.0}]
-     :rate-samples [{:ts 0    :pct 0.0  :resets-at (* 5 3600)}
-                    {:ts 1800 :pct 12.0 :resets-at (* 5 3600)}
-                    {:ts 3600 :pct 25.0 :resets-at (* 5 3600)}
-                    {:ts 5400 :pct 38.0 :resets-at (* 5 3600)}]
-     :rate-scale   1.0
      :resets-at    (* 5 3600)
      :window-start 0
      :now          now
@@ -142,11 +137,72 @@
       ;; chart-svg returns hiccup; tick labels appear as quoted strings.
       (is (re-find #"\"\d\d:\d\d\"" s)
           "expected at least one HH:mm tick label")
-      ;; The 7d view emits 'MMM d' strings; 5h should not.
+      ;; The 7d view emits 'EEE MMM d' strings; 5h should not.
       (is (not (re-find #"\"[A-Z][a-z]{2} \d" s))
           "month-name tick should be absent in 5h view"))))
 
-(deftest chart-svg-5h-skips-reset-cycle-ticks
-  (testing "5h view omits the per-24h reset-cycle marker lines"
+(deftest chart-svg-5h-skips-day-ticks
+  (testing "5h view omits the midnight day separators"
     (let [s (str (u/chart-svg (make-5h-data)))]
-      (is (not (re-find #"reset-cycle-tick" s))))))
+      (is (not (re-find #"day-tick" s))))))
+
+(deftest chart-svg-7d-marks-local-midnights
+  (let [s (str (u/chart-svg (make-data)))]
+    (is (<= 6 (count (re-seq #"day-tick" s)) 7) "one separator per midnight in a 7-day window")))
+
+;; --- model fan chart ---
+
+(defn- fan-data
+  "7d bundle with a model path: hourly steps from now (day 3) to the reset,
+  median rising to 130% so it crosses the cap on day 6."
+  []
+  (let [now (* 3 86400)
+        path (for [k (range 1 97)
+                   :let [ts (+ now (* k 3600))
+                         med (+ 24.0 (* 106.0 (/ k 96.0)))]]
+               {:ts ts :mean med :median med :q25 (- med 5) :q75 (+ med 5)
+                :lo (- med 15) :hi (+ med 20) :p-cap (if (>= med 100) 0.6 0.1)})]
+    (assoc (make-data)
+           :window-key :seven-day
+           :projection {:method :gamma-process :proj 130.0 :band {:lo 115 :hi 150}
+                        :p-cap 0.6 :path (vec path)})))
+
+(deftest fan-chart-renders-bands-median-and-cap-marker
+  (let [s (str (u/chart-svg (fan-data)))]
+    (is (re-find #"band-region" s) "90% band")
+    (is (re-find #"band-inner" s) "50% band")
+    (is (re-find #"proj-line" s) "median path")
+    (is (re-find #"cap-marker" s))
+    (is (re-find #"median hits cap" s))
+    (is (re-find #"observed-line" s))))
+
+(deftest fan-legend-names-the-bands
+  (let [out (str (u/legend (fan-data)))]
+    (is (re-find #"median forecast" out))
+    (is (re-find #"50% likely" out))
+    (is (re-find #"90% likely" out))))
+
+(deftest no-cap-marker-when-median-stays-under-the-cap
+  (is (not (re-find #"cap-marker" (str (u/chart-svg (make-data)))))))
+
+(deftest observed-is-a-step-line
+  (testing "each report holds until the next, so points come in vertical pairs"
+    (let [s (str (u/chart-svg (make-data)))
+          [_ body] (re-find #"points \"([^\"]+)\"[^}]*:class \"observed-line\"" s)]
+      (is (some? body))
+      ;; 4 reports -> first point, 3 x (hold + jump), and a hold to now
+      (is (= 8 (count (re-seq #"\S+,\S+" body)))))))
+
+(deftest usage-bars-split-used-and-expected
+  (let [s (str (u/usage-bars-svg (fan-data)))]
+    (is (re-find #"usage per hour" s))
+    (is (re-find #"bar-observed" s))
+    (is (re-find #"bar-expected" s))))
+
+(deftest usage-bars-5h-use-five-minute-buckets
+  (is (re-find #"usage per 5 min" (str (u/usage-bars-svg (make-5h-data))))))
+
+(deftest tiles-show-chance-of-cap
+  (let [out (str (u/stat-tiles (fan-data)))]
+    (is (re-find #"chance of cap" out))
+    (is (re-find #"60%" out))))

@@ -318,7 +318,6 @@
     (with-redefs [cch.forecast/learned-prior          (fn [_ _] nil)
                   cch.forecast/latest-resets-at       (fn [_ _] 1000000000)
                   cch.forecast/filtered-samples       (fn [_ _ _] [])
-                  cch.forecast/rate-5h-samples        (fn [_ _] [])
                   cch.forecast/raw-sample-count       (fn [_ _ _] 0)
                   cch.forecast/historical-final-pcts  (fn [_ _] nil)
                   cch.projections/rate-bayes-projection

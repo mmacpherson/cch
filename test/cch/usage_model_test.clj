@@ -113,3 +113,22 @@
         t (+ t0 (* 22 h))
         fb (m/future-blocks prof utc seven t (+ t (* 36 h)))]
     (is (= [[6.0 true] [24.0 false] [6.0 false]] fb))))
+
+(deftest future-pieces-respect-steps-hours-and-blocks
+  (let [prof (vec (repeat 168 1.0))
+        t (+ t0 (* 3 h) 1800)                 ; 03:30 Monday UTC
+        ps (m/future-pieces prof utc seven t (+ t (* 3 h)) h)]
+    (is (= [(+ t0 (* 4 h)) (+ t0 (* 5 h)) (+ t0 (* 6 h)) (+ t0 (* 6 h) 1800)] (mapv first ps)))
+    (is (= [0.5 1.0 1.0 0.5] (mapv second ps)))
+    (is (= [0 1 1 1] (mapv #(nth % 2) ps)) "04:00 starts the next 7d block")))
+
+(deftest predict-path-is-monotone-and-ends-at-the-forecast
+  (let [theta [0.05 6.0 30.0 3.0 1.0 0.8]
+        st [6.0 30.0 3.0 1.0]
+        prof (vec (repeat 168 1.0))
+        t (+ t0 (* 22 h))
+        path (m/predict-path st theta 20.0 (m/future-pieces prof utc seven t (+ t (* 36 h)) h) true)]
+    (is (= 36 (count path)))
+    (is (every? (fn [[a b]] (<= (:median a) (:median b))) (partition 2 1 path)) "cumulative demand never falls")
+    (is (every? #(<= 20.0 (:lo %) (:q25 %) (:median %) (:q75 %) (:hi %)) path))
+    (is (<= (:p-cap (first path)) (:p-cap (peek path))))))

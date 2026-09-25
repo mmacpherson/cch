@@ -164,14 +164,6 @@
 (defn- epoch->iso [secs]
   (str (java.time.Instant/ofEpochSecond secs)))
 
-(defn- rate-5h-samples
-  "60s-bucketed five-hour window samples for the full 7d span, scoped to `agent`.
-   Monotone filter is partitioned per resets_at so each 5h window is
-   treated independently. Returns :resets-at so the chart can avoid
-   spanning a reset boundary when computing a lookback-window rate."
-  [agent since-iso]
-  (filtered-samples agent since-iso :five-hour))
-
 (def ^:private prior-decay-lambda 0.85)
 
 (def ^:private prior-sigma-floor 0.03)
@@ -335,14 +327,16 @@
           spec (model/specs window-key)
           completed (count (filter #(< (:eff-end %) now) (model/windows rows spec)))]
       (when (>= completed min-model-windows)
-        (let [{:keys [median lo hi p-cap]}
-              (model/forecast (fitted-model agent window-key rows now)
-                              rows spec (ZoneId/systemDefault) now resets-at last-pct)]
-          {:method :gamma-process
-           :name   "Gamma process"
-           :proj   median
-           :band   {:lo lo :hi hi}
-           :p-cap  p-cap})))))
+        (let [fitted (fitted-model agent window-key rows now)
+              {:keys [median lo hi p-cap path]}
+              (model/forecast fitted rows spec (ZoneId/systemDefault) now resets-at last-pct)]
+          {:method  :gamma-process
+           :name    "Gamma process"
+           :proj    median
+           :band    {:lo lo :hi hi}
+           :p-cap   p-cap
+           :path    path
+           :profile (:profile fitted)})))))
 
 (defn- build-current-window
   "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
@@ -377,21 +371,11 @@
           recent-rate  (when (>= (count rs) 2)
                          (let [recent (take-last 3 rs)]
                            (/ (reduce + 0.0 (map :rate recent))
-                              (count recent))))
-          ;; Rate chart data source: for 7d we enrich with the 60s-bucketed
-          ;; 5h-window stream (much denser than the 6m-bucketed 7d samples)
-          ;; and scale into 7d-%/hr units. For 5h-native we just reuse the
-          ;; observed samples (already 60s-bucketed) at unit scale.
-          rate-samples (if (= window-key :seven-day)
-                         (rate-5h-samples agent (epoch->iso window-start))
-                         in-window)
-          rate-scale   (if (= window-key :seven-day) scale-5h->7d 1.0)]
+                              (count recent))))]
       {:agent           agent
        :window-key      window-key
        :span-secs       span
        :observed        obs-pairs
-       :rate-samples    rate-samples
-       :rate-scale      rate-scale
        :resets-at       resets-at
        :window-start    window-start
        :now             now

@@ -121,7 +121,7 @@
                   wobs (window-obs obs spec w)]
             t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
             :let [x (pct-at wobs t)
-                  g (m/forecast model (rows-before t) spec zone t (:eff-end w) x)
+                  g (m/forecast model (rows-before t) spec zone t (:eff-end w) x :path? false)
                   b (rate-projection wobs window-key w prior-finals t)]]
         {:hours (/ (- t (:start w)) 3600.0)
          :capped? capped? :p-cap (:p-cap g)
