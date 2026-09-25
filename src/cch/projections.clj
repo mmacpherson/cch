@@ -376,10 +376,21 @@
 (defn- bayes-rate-posterior
   "Conjugate update for the *average* week-rate R ~ N(μ₀, σ₀²) given
   observed inter-sample rates with robust variance σ_ε² (MAD-based).
+
+  The data mean is duration-weighted (Σ rate·dt / Σ dt = Δpct / Δt), not a
+  plain average of interval rates. Samples arrive only while an agent is
+  active, so busy stretches yield many short high-rate intervals and an idle
+  night yields one long near-zero interval; an unweighted mean measures the
+  burn rate *while working* and then projects it across nights and idle days.
+  Under the Brownian model each interval's rate has variance ∝ 1/dt, so the
+  duration-weighted mean is also the precision-weighted one.
   Returns posterior {:mu :sigma2 :sigma-eps2 :tau-avg-hr}."
   [rates dts mu0 sigma0]
   (let [n (count rates)
-        r-mean (/ (reduce + 0.0 rates) (max 1 n))
+        dt-sum (reduce + 0.0 dts)
+        r-mean (if (pos? dt-sum)
+                 (/ (reduce + 0.0 (map * rates dts)) dt-sum)
+                 (/ (reduce + 0.0 rates) (max 1 n)))
         r-var  (if (> n 1)
                  (robust-rate-variance rates)
                  (* sigma0 sigma0))

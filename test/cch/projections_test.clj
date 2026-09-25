@@ -137,6 +137,21 @@
              (- (:hi band-n) (:lo band-n)))))))
 
 
+(deftest bayes-rate-is-duration-weighted
+  (testing "bursty daytime work plus a long idle night projects the average
+            wall-clock rate, not the while-working rate"
+    (let [day   (fn [start pct0]
+                  (mapv (fn [i] (snap (+ start (* i 1800)) (+ pct0 i)))
+                        (range 9)))
+          ;; Two 4h work days at 2 %/hr, separated by a 20h idle gap:
+          ;; 16% over 28h ≈ 0.57 %/hr of wall-clock time.
+          obs   (into (day 0 0.0) (day (* 24 3600) 8.0))
+          win   (window-info obs 24)
+          {:keys [rate]} (p/rate-bayes-projection obs win)]
+      (is (< rate 1.0)
+          "unweighted mean of interval rates (~1.9 %/hr) ignores the idle night"))))
+
+
 ;; --- loess-smooth ---
 
 (deftest loess-smooth-passes-through-linear
