@@ -86,6 +86,10 @@ build:
 bench *args:
     clj -M:bench {{args}}
 
+# Replay the usage forecast against local history and print accuracy metrics
+usage-backtest:
+    clj -M -e "(require 'cch.usage-backtest) (cch.usage-backtest/run)"
+
 # Remove generated files
 clean:
     rm -rf .cpcache .nrepl-port target

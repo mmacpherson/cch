@@ -533,7 +533,14 @@
       (is (= 200 (:status resp)))
       (is (map? body))
       (is (contains? body :five_hour))
-      (is (contains? body :seven_day)))))
+      (is (contains? body :seven_day))))
+  (testing "GET /forecast?agent=codex returns the same shape for Codex"
+    (let [resp (http/get (url "/forecast?agent=codex") {:throw-exceptions? false})
+          body (json/parse-string (:body resp) true)]
+      (is (= 200 (:status resp)))
+      (is (contains? body :seven_day))))
+  (testing "an unknown agent is rejected"
+    (is (= 400 (:status (http/get (url "/forecast?agent=bogus") {:throw-exceptions? false}))))))
 
 (deftest test-hooks-toggle-form-post
   (testing "POST /hooks/toggle upserts the row"

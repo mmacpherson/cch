@@ -14,8 +14,9 @@
   (:require [cch.db :as db]
             [cch.projections :as proj]
             [cch.settings :as settings]
+            [cch.usage-model :as model]
             [clojure.string :as str])
-  (:import (java.time Instant)))
+  (:import (java.time Instant ZoneId)))
 
 ;; --- Query building ---
 
@@ -279,6 +280,70 @@
     {:prior-mu (:mu learned) :prior-sigma (:sigma learned)}
     (prior-params window-key [])))
 
+;; --- Gamma-process model (normalized source) ---
+;;
+;; cch.usage-model forecasts demand at the reset from the whole usage history
+;; in absolute time. It needs hourly aggregates of every window, so those are
+;; cached and extended incrementally: each refresh re-reads only the last
+;; cached hour onward. The fitted model is refreshed daily.
+
+(def ^:private hourly-cache (atom {}))
+(def ^:private model-cache (atom {}))
+(def ^:private refit-secs 86400)
+(def ^:private min-model-windows
+  "Completed windows needed before the model replaces the rate projection."
+  5)
+
+(defn- hourly-rows
+  "Hourly max-pct rows [{:resets-at :hour :pct}] for `agent`/`window-key`."
+  [agent window-key]
+  ;; Keyed by DB path so a swapped database (tests, restores) starts fresh.
+  (let [k [(db/db-path) agent window-key]
+        {:keys [by-key through]} (get @hourly-cache k)
+        since (if through (- through 3600) 0)
+        rows (db/query
+               (format (str "SELECT resets_at, (observed_at/3600000)*3600 AS h,"
+                            " MAX(used_percentage) AS pct FROM usage_observations"
+                            " WHERE window_key='%s' AND observed_at >= %d %s"
+                            "GROUP BY resets_at, h")
+                       (window-sql-path window-key) (* 1000 since) (agent-clause agent)))
+        merged (reduce (fn [m {:keys [resets_at h pct]}]
+                         (update m [(long resets_at) (long h)] (fnil max 0.0) (double pct)))
+                       (or by-key {}) rows)
+        through (reduce max (or through 0) (map #(long (:h %)) rows))]
+    (swap! hourly-cache assoc k {:by-key merged :through through})
+    (mapv (fn [[[r h] pct]] {:resets-at r :hour h :pct pct}) merged)))
+
+(defn- fitted-model
+  "Daily-refreshed fit for [agent window-key], warm-started from the last."
+  [agent window-key rows now]
+  (let [k [(db/db-path) agent window-key]
+        cached (get @model-cache k)]
+    (if (and cached (< (- now (:fitted-at cached)) refit-secs))
+      cached
+      (let [fit (model/fit-model rows (model/specs window-key) (ZoneId/systemDefault) now
+                                 :x0 (:x cached))]
+        (swap! model-cache assoc k fit)
+        fit))))
+
+(defn- model-projection
+  "Gamma-process forecast of demand at `resets-at`, shaped like the rate
+  projections ({:proj :band}), or nil when there is too little history."
+  [agent window-key now resets-at last-pct]
+  (when (normalized-source?)
+    (let [rows (hourly-rows agent window-key)
+          spec (model/specs window-key)
+          completed (count (filter #(< (:eff-end %) now) (model/windows rows spec)))]
+      (when (>= completed min-model-windows)
+        (let [{:keys [median lo hi p-cap]}
+              (model/forecast (fitted-model agent window-key rows now)
+                              rows spec (ZoneId/systemDefault) now resets-at last-pct)]
+          {:method :gamma-process
+           :name   "Gamma process"
+           :proj   median
+           :band   {:lo lo :hi hi}
+           :p-cap  p-cap})))))
+
 (defn- build-current-window
   "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
    scoped to `agent`. Returns nil when no rate-limit data exists for the
@@ -306,7 +371,8 @@
                         :prior-mu prior-mu :prior-sigma prior-sigma
                         :historical-finals hist-finals}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
-          projection   (proj/rate-bayes-projection obs-pairs window-info)
+          projection   (or (model-projection agent window-key now resets-at last-pct)
+                           (proj/rate-bayes-projection obs-pairs window-info))
           rs           (proj/rate-samples obs-pairs)
           recent-rate  (when (>= (count rs) 2)
                          (let [recent (take-last 3 rs)]
@@ -439,7 +505,9 @@
                         :prior-mu prior-mu :prior-sigma prior-sigma
                         :historical-finals hist-finals}
           obs-pairs    (mapv #(select-keys % [:ts :pct]) in-window)
-          proj-result  (when last-pct (proj-fn obs-pairs window-info))
+          proj-result  (when last-pct
+                         (or (model-projection agent window-key now resets-at last-pct)
+                             (proj-fn obs-pairs window-info)))
           local-rate   (if (= window-key :seven-day)
                          (fused-burn-rate-7d agent resets-at now)
                          (recent-burn-rate-phr agent wpath resets-at now))]
@@ -450,6 +518,7 @@
                    :projected_pct (Double/parseDouble (format "%.1f" raw-proj))
                    :secs_left     (max 0 (- resets-at now))}
             (some? local-rate) (assoc :local_rate_phr (Double/parseDouble (format "%.1f" local-rate)))
+            (:p-cap proj-result) (assoc :p_cap (Double/parseDouble (format "%.3f" (:p-cap proj-result))))
             band (assoc :band {:lo (Math/round (double (:lo band)))
                                :hi (Math/round (double (:hi band)))})))))))
 
@@ -640,6 +709,23 @@
    all computation runs in the background thread."
   []
   @forecast-cache)
+
+(def ^:private agent-forecast-cache (atom {}))
+
+(defn agent-stats
+  "Forecast bundle for another agent (e.g. codex, for a tmux status glyph),
+  in the statusline shape. Computed on demand and cached for 30 s."
+  [agent]
+  (let [now (-> (Instant/now) .getEpochSecond)
+        {:keys [ts data]} (get @agent-forecast-cache agent {:ts 0})]
+    (if (< (- now ts) 30)
+      data
+      (let [fresh (binding [*usage-source* :normalized]
+                    {:five_hour (compute-window-stats agent :five-hour proj/rate-bayes-projection)
+                     :seven_day (compute-window-stats agent :seven-day proj/rate-bayes-projection)
+                     :computed_at now})]
+        (swap! agent-forecast-cache assoc agent {:ts now :data fresh})
+        fresh))))
 
 (defn parity-status
   "Aggregate, privacy-safe legacy/normalized forecast discrepancy metrics."

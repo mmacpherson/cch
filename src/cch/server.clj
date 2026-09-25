@@ -925,14 +925,21 @@
      :body    (usage-html window-key agent)}))
 
 (defn- handle-forecast
-  "GET /forecast — current pct + Bayesian projection + time-to-reset for
-  both the 5h and 7d rate-limit windows. The statusLine consumes this
-  to render compact, color-coded status."
-  [_req]
+  "GET /forecast[?agent=claude-code|codex] — current pct, projected demand at
+  reset (median, 90% band, P(cap)), and time-to-reset for the 5h and 7d
+  windows. The Claude statusLine and the tmux Codex glyph consume this."
+  [req]
   (try
-    {:status  200
-     :headers {"Content-Type" "application/json"}
-     :body    (json/generate-string (forecast/statusline-stats))}
+    (let [agent (:agent (parse-query (:query-string req)))]
+      (if (and agent (not (#{"claude-code" "codex"} agent)))
+        {:status 400
+         :headers {"Content-Type" "application/json"}
+         :body (json/generate-string {:error "agent must be claude-code or codex"})}
+        {:status  200
+         :headers {"Content-Type" "application/json"}
+         :body    (json/generate-string (if (and agent (not= agent "claude-code"))
+                                          (forecast/agent-stats agent)
+                                          (forecast/statusline-stats)))}))
     (catch Exception e
       {:status  500
        :headers {"Content-Type" "application/json"}

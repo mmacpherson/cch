@@ -47,6 +47,9 @@ mkdir -p "$HOME/.claude"
 cp "$repo/bin/statusline-command.sh" "$HOME/.claude/statusline-command.sh"
 chmod +x "$HOME/.claude/statusline-command.sh"
 
+# cch-usage-glyph.sh — one-cell usage meter for a tmux status line.
+install -m 755 "$repo/bin/cch-usage-glyph.sh" "$bin/cch-usage-glyph.sh"
+
 # Restart cch-owned services so they run the freshly deployed runtime. Every
 # long-lived cch process is the same jlink image chosen by subcommand, so a
 # redeploy that only restarts the dispatcher would leave the paired runner (and
@@ -72,6 +75,7 @@ echo "Installed:"
 echo "  $bin/cch        -> execs $runtime_bin"
 echo "  $bin/cch-eval   -> $repo/bin/cch-eval"
 echo "  ~/.claude/statusline-command.sh  (copied)"
+echo "  $bin/cch-usage-glyph.sh  (copied)"
 
 if ! command -v cch >/dev/null 2>&1; then
   echo
