@@ -21,7 +21,7 @@
         {:keys [data cells]} (us/fit-data {["claude-code" :seven-day] (weekly-rows)
                                            ["agy" :seven-day] (take 3 (weekly-rows))}
                                           now utc)
-        {:keys [C NB NW y cell_start cell_len block_ptr hbin live S g_init ctype]} data]
+        {:keys [C NB NW y cell_start cell_len block_ptr hbin live g_init ctype]} data]
     (testing "cells with too little history are left out"
       (is (= [["claude-code" :seven-day]] cells))
       (is (= 1 C)))
@@ -37,7 +37,8 @@
             jvm (m/blocks series (vec (repeat 168 1.0)) utc spec)]
         (is (= (count jvm) NB))
         (is (= (mapv #(nth % 2) jvm) y))))
-    (testing "smoothing rows sum to one; the fleet log-profile has 168 bins"
-      (is (every? #(< (Math/abs (- 1.0 (reduce + %))) 1e-12) S))
+    (testing "the fleet log-profile has 168 bins; the basis sizes are data"
       (is (= 168 (count g_init)))
+      (is (every? pos-int? [(:n_daily data)]))
+      (is (every? nat-int? [(:n_weekly data) (:n_weekend data)]))
       (is (= [1] ctype)))))

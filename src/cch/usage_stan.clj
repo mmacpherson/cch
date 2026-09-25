@@ -13,25 +13,18 @@
 
 (def ^:private type-index {:seven-day 1 :five-hour 2})
 
-(defn- smoothing-matrix
-  "Row-normalized circular Gaussian kernel (sigma 1.5h, +/-6h), the same
-  smoothing cch.usage-model/smooth-profile applies."
-  []
-  (let [ws (mapv #(Math/exp (* -0.5 (Math/pow (/ % 1.5) 2))) (range -6 7))
-        s (reduce + ws)]
-    (vec (for [i (range 168)]
-           (let [row (double-array 168)]
-             (doseq [j (range -6 7)]
-               (let [col (mod (+ i j) 168)]
-                 (aset row col (+ (aget row col) (/ (nth ws (+ j 6)) s)))))
-             (vec row))))))
+(def ^:private profile-basis
+  "Size of the Stan model's hour-of-week profile basis: daily harmonics
+  (down to 4-hour detail), weekly harmonics (weekday drift), and daily
+  harmonics that apply only on weekends."
+  {:n_daily 6 :n_weekly 3 :n_weekend 2})
 
 (defn- block-entries
-  "Model blocks of an hour series with their hour-level profile entries:
-  [{:y usage :entries [[bin live] ...]} ...]."
+  "Model blocks of an hour series with their hour-level entries:
+  [{:y usage :entries [[bin live hourly-usage] ...]} ...]."
   [series zone spec]
   (reduce (fn [acc [h [live y]]]
-            (let [entry [(inc (m/hour-of-week zone h)) live]]
+            (let [entry [(inc (m/hour-of-week zone h)) live y]]
               (if (or (empty? acc) (m/block-start? zone spec h))
                 (conj acc {:y y :entries [entry]})
                 (update acc (dec (count acc))
@@ -41,7 +34,8 @@
 (defn fit-data
   "Stan data for all cells at time `now`. `rows-by-cell` maps
   [agent window-key] -> hourly aggregate rows observed before `now`. Cells
-  with fewer than `min-windows` completed windows are left out. Returns
+  with fewer than `min-windows` completed windows, or no usage in the fit
+  span, are left out. Returns
   {:data <stan json map> :cells [[agent window-key] ...]}."
   [rows-by-cell now ^ZoneId zone & {:keys [min-windows] :or {min-windows 5}}]
   (let [series-of (fn [[_ window-key] rows]
@@ -54,32 +48,37 @@
                              (>= (count (filter #(< (:eff-end %) now) (m/windows rows (m/specs wk))))
                                  min-windows)))
                    (sort-by key))
-        per-cell (mapv (fn [[cell rows]]
-                         (let [s (series-of cell rows)]
-                           {:cell cell :series s
-                            :blocks (block-entries s zone (m/specs (second cell)))}))
-                       cells)
+        per-cell (->> cells
+                      (map (fn [[cell rows]]
+                             (let [s (series-of cell rows)]
+                               {:cell cell :series s
+                                :blocks (block-entries s zone (m/specs (second cell)))})))
+                      ;; A cell with no usage in its fit span (e.g. a provider that
+                      ;; stopped reporting a window) only adds cost.
+                      (filter #(pos? (reduce + (map :y (:blocks %)))))
+                      vec)
         fleet (m/smooth-profile (m/pooled-rates (map #(m/bin-stats (:series %) zone) per-cell)))
         blocks (mapcat :blocks per-cell)
         entries (mapcat :entries blocks)
         starts (reductions + 1 (map #(count (:blocks %)) per-cell))
         ptr (vec (reductions + 1 (map #(count (:entries %)) blocks)))]
     {:cells (mapv :cell per-cell)
-     :data {:C (count per-cell)
-            :T 2
-            :ctype (mapv #(type-index (second (:cell %))) per-cell)
-            :x0 [(get-in m/specs [:seven-day :x0]) (get-in m/specs [:five-hour :x0])]
-            :NB (count blocks)
-            :y (mapv :y blocks)
-            :cell_start (vec (butlast starts))
-            :cell_len (mapv #(count (:blocks %)) per-cell)
-            :NW (count entries)
-            :block_ptr ptr
-            :hbin (mapv first entries)
-            :live (mapv second entries)
-            :min_mass (mapv #(:min-mass (m/specs (second (:cell %)))) per-cell)
-            :S (smoothing-matrix)
-            :g_init (mapv #(Math/log %) fleet)}}))
+     :data (merge profile-basis
+                  {:C (count per-cell)
+                   :T 2
+                   :ctype (mapv #(type-index (second (:cell %))) per-cell)
+                   :x0 [(get-in m/specs [:seven-day :x0]) (get-in m/specs [:five-hour :x0])]
+                   :NB (count blocks)
+                   :y (mapv :y blocks)
+                   :cell_start (vec (butlast starts))
+                   :cell_len (mapv #(count (:blocks %)) per-cell)
+                   :NW (count entries)
+                   :block_ptr ptr
+                   :hbin (mapv first entries)
+                   :live (mapv second entries)
+                   :yh (mapv #(nth % 2) entries)
+                   :min_mass (mapv #(:min-mass (m/specs (second (:cell %)))) per-cell)
+                   :g_init (mapv #(Math/log %) fleet)})}))
 
 (defn write-fit-data
   "Write Stan data JSON; returns the cells in Stan index order."

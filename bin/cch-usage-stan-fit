@@ -53,19 +53,24 @@ def main():
     model = compile_model()
     data = json.loads(pathlib.Path(a.data).read_text())
     threads = max(1, (os.cpu_count() or 4) // a.chains)
+    # The model is parameterized so that zero on the unconstrained scale is
+    # the prior center; start every chain close to it rather than at Stan's
+    # default uniform(-2, 2), whose corners under/overflow the gamma shapes.
+    inits = 0.1
     started = time.time()
     diagnostics = {}
     if a.method == "sample":
         fit = model.sample(data=data, chains=a.chains, parallel_chains=a.chains,
                            threads_per_chain=threads, iter_warmup=a.warmup,
-                           iter_sampling=a.samples, seed=a.seed, show_progress=False)
+                           iter_sampling=a.samples, seed=a.seed, show_progress=False,
+                           inits=inits)
         summary = fit.summary()
         rhat = summary["R_hat"].replace([np.inf, -np.inf], np.nan).dropna()
         diagnostics = {"max_rhat": float(rhat.max()) if len(rhat) else None,
                        "divergences": int(fit.divergences.sum()),
                        "tau": float(fit.stan_variable("tau").mean())}
     else:
-        mode = model.optimize(data=data, seed=a.seed, jacobian=True, show_console=False)
+        mode = model.optimize(data=data, seed=a.seed, jacobian=True, show_console=False, inits=inits)
         fit = model.laplace_sample(data=data, mode=mode, draws=max(a.draws * 4, 200), seed=a.seed,
                                    show_console=False)
         diagnostics = {"tau": float(np.mean(fit.stan_variable("tau")))}
