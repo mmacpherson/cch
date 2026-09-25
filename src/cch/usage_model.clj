@@ -191,12 +191,16 @@
     (if (pos? rate) (mapv #(/ % rate) usage) (vec (repeat 168 0.0)))))
 
 (defn pooled-rates
-  "Exposure-weighted mean normalized rate per bin across cells' bin-stats:
-  a shared shape (mean ~1) to shrink toward."
+  "Exposure-weighted mean normalized rate per bin across cells' bin-stats,
+  renormalized to mean 1: a shared shape to shrink toward. (A cell that
+  stopped reporting keeps adding zero-usage exposure, which would otherwise
+  lower the shape's level uniformly.)"
   [stats]
   (let [num (apply mapv + (map normalized-usage stats))
-        den (apply mapv + (map :exposure stats))]
-    (mapv (fn [n d] (if (pos? d) (/ n d) 0.0)) num den)))
+        den (apply mapv + (map :exposure stats))
+        raw (mapv (fn [n d] (if (pos? d) (/ n d) 0.0)) num den)
+        mean (/ (reduce + raw) 168.0)]
+    (if (pos? mean) (mapv #(/ % mean) raw) raw)))
 
 (defn shrunk-rates
   "Empirical-Bayes shrinkage of one cell's normalized bin rates toward
@@ -205,6 +209,78 @@
   [stats target k]
   (mapv (fn [u e f] (let [d (+ e k)] (if (pos? d) (/ (+ u (* k f)) d) f)))
         (normalized-usage stats) (:exposure stats) target))
+
+(defn weekly-bin-rates
+  "For each of the 168 bins, the per-week usage rates (usage / live hours)
+  in units of the cell's overall mean rate: [[w1 w2 ...] ...]."
+  [series ^ZoneId zone]
+  (let [first-h (or (ffirst series) 0)
+        cells (reduce (fn [m [h [live y]]]
+                        (if (pos? live)
+                          (update m [(hour-of-week zone h) (quot (- h first-h) 604800)]
+                                  (fn [[u e]] [(+ (or u 0.0) y) (+ (or e 0.0) live)]))
+                          m))
+                      {} series)
+        total-u (reduce + (map (comp first val) cells))
+        total-e (reduce + (map (comp second val) cells))
+        mean-rate (if (pos? total-e) (/ total-u total-e) 0.0)
+        by-bin (group-by ffirst cells)]
+    (mapv (fn [k]
+            (vec (for [[_ [u e]] (get by-bin k)
+                       :when (pos? e)]
+                   (if (pos? mean-rate) (/ (/ u e) mean-rate) 0.0))))
+          (range 168))))
+
+(defn eb-rates
+  "Moment (Fay–Herriot) empirical-Bayes shrinkage of a cell's bin rates
+  toward `target` (mean ~1), with the shrinkage strength estimated from the
+  data instead of fixed.
+
+  Week-to-week variation measures noise: bursty usage has variance roughly
+  proportional to its rate, so Var(weekly rate) ~ phi * rate, and a bin
+  mean over n weeks has noise v = phi * rate / n. Real departures from the
+  target are modeled as variance t * target. With m the bin mean,
+  E[(m - target)^2] = t * target + v, which gives t by moments. Each bin
+  keeps weight w = t*f / (t*f + v); the equivalent pseudo-exposure is
+  k = phi / t (infinite, i.e. full pooling, when t = 0).
+  Returns {:rates [168] :k k :phi phi :t t}."
+  [weekly target]
+  (let [bins (map-indexed (fn [h ws]
+                            (let [n (count ws)
+                                  m (if (pos? n) (/ (reduce + ws) n) 0.0)
+                                  s2 (if (> n 1)
+                                       (/ (reduce + (map #(Math/pow (- % m) 2) ws)) (dec n))
+                                       0.0)]
+                              {:n n :m m :s2 s2 :f (nth target h)}))
+                          weekly)
+        informative (filter #(> (:n %) 1) bins)
+        phi (let [num (reduce + (map :s2 informative))
+                  den (reduce + (map #(/ (+ (:m %) (:f %)) 2.0) informative))]
+              (if (pos? den) (/ num den) 0.0))
+        noise (fn [{:keys [n m f]}] (if (pos? n) (/ (* phi (/ (+ m f) 2.0)) n) Double/POSITIVE_INFINITY))
+        with-n (filter #(pos? (:n %)) bins)
+        t (let [num (reduce + (map #(- (Math/pow (- (:m %) (:f %)) 2) (noise %)) with-n))
+                den (reduce + (map :f with-n))]
+            (if (pos? den) (max 0.0 (/ num den)) 0.0))
+        rates (mapv (fn [{:keys [f m] :as b}]
+                      (let [v (noise b)
+                            signal (* t f)
+                            w (if (or (zero? signal) (Double/isInfinite v)) 0.0 (/ signal (+ signal v)))]
+                        (+ f (* w (- m f)))))
+                    bins)]
+    {:rates rates :phi phi :t t :k (if (pos? t) (/ phi t) Double/POSITIVE_INFINITY)}))
+
+(defn fleet-profiles
+  "Activity profiles for several cells (agent/window pairs), each shrunk
+  toward the pooled fleet shape with its own estimated strength (eb-rates),
+  then smoothed. `series-by-cell` maps cell -> hour series. Returns
+  cell -> {:profile [168] :k shrinkage-strength}."
+  [series-by-cell ^ZoneId zone]
+  (let [fleet (pooled-rates (map #(bin-stats % zone) (vals series-by-cell)))]
+    (into {}
+          (for [[cell series] series-by-cell
+                :let [{:keys [rates k]} (eb-rates (weekly-bin-rates series zone) fleet)]]
+            [cell {:profile (smooth-profile rates) :k k}]))))
 
 (defn profile
   "Hour-of-week activity profile (length 168, mean 1): usage per live hour
@@ -226,7 +302,9 @@
 
 ;; --- blocks ---
 
-(defn- block-start? [zone {:keys [block-hours anchor-hour]} h]
+(defn block-start?
+  "True when hour `h` starts a new model block for `spec`."
+  [zone {:keys [block-hours anchor-hour]} h]
   (zero? (mod (- (mod (hour-of-week zone h) 24) anchor-hour) block-hours)))
 
 (defn blocks
@@ -413,7 +491,8 @@
   {:median :lo :hi :p-cap :path}, summarizing demand at the reset; `:path`
   holds the per-step summaries unless `path?` is false (the backtest skips
   it and draws whole blocks, which is equivalent at the endpoint)."
-  [{:keys [theta profile]} rows spec zone now resets-at x & {:keys [path?] :or {path? true}}]
+  [{:keys [theta profile]} rows spec zone now resets-at x
+   & {:keys [path? n seed] :or {path? true n 4000 seed 1}}]
   (let [wins (windows rows spec)
         lookback (:filter-lookback-secs spec)
         series (cond->> (hour-series wins now)
@@ -426,7 +505,8 @@
         (if-let [end (peek path)]
           (assoc (select-keys end [:median :lo :hi :p-cap]) :path path)
           {:median x :lo x :hi x :p-cap (if (>= x 100.0) 1.0 0.0) :path []}))
-      (predict state theta x (future-blocks profile zone spec now resets-at) on-last?))))
+      (predict state theta x (future-blocks profile zone spec now resets-at) on-last?
+               :n n :seed seed))))
 
 (defn fit-model
   "Fit the activity profile and theta from hourly aggregate `rows` observed

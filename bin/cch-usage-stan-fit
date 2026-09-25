@@ -1,0 +1,85 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["cmdstanpy>=1.2", "numpy"]
+# ///
+"""Fit the hierarchical usage model (resources/stan/usage_model.stan) offline.
+
+    cch-usage-stan-fit DATA.json OUT.json [--method sample|laplace]
+                       [--draws 50] [--chains 4] [--warmup 500] [--samples 250]
+
+DATA.json comes from cch.usage-stan/write-fit-data. OUT.json holds thinned
+posterior draws of each cell's unconstrained parameters and activity
+profile, plus fit diagnostics, for cch.usage-stan/read-draws.
+
+The model is compiled once with threading (reduce_sum over cells) and cached
+next to the CmdStan install. Requires CmdStan (cmdstanpy.install_cmdstan()).
+"""
+import argparse
+import json
+import os
+import pathlib
+import sys
+import time
+
+import cmdstanpy
+import numpy as np
+
+HERE = pathlib.Path(__file__).resolve().parent
+STAN_FILE = HERE.parent / "resources" / "stan" / "usage_model.stan"
+
+
+def compile_model():
+    cache = pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "cch" / "stan"
+    cache.mkdir(parents=True, exist_ok=True)
+    src = cache / STAN_FILE.name
+    if not src.exists() or src.read_text() != STAN_FILE.read_text():
+        src.write_text(STAN_FILE.read_text())
+    return cmdstanpy.CmdStanModel(stan_file=str(src), cpp_options={"STAN_THREADS": True})
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("data")
+    p.add_argument("out")
+    p.add_argument("--method", choices=["sample", "laplace"], default="sample")
+    p.add_argument("--draws", type=int, default=50)
+    p.add_argument("--chains", type=int, default=4)
+    p.add_argument("--warmup", type=int, default=500)
+    p.add_argument("--samples", type=int, default=250)
+    p.add_argument("--seed", type=int, default=1)
+    a = p.parse_args()
+
+    model = compile_model()
+    data = json.loads(pathlib.Path(a.data).read_text())
+    threads = max(1, (os.cpu_count() or 4) // a.chains)
+    started = time.time()
+    diagnostics = {}
+    if a.method == "sample":
+        fit = model.sample(data=data, chains=a.chains, parallel_chains=a.chains,
+                           threads_per_chain=threads, iter_warmup=a.warmup,
+                           iter_sampling=a.samples, seed=a.seed, show_progress=False)
+        summary = fit.summary()
+        rhat = summary["R_hat"].replace([np.inf, -np.inf], np.nan).dropna()
+        diagnostics = {"max_rhat": float(rhat.max()) if len(rhat) else None,
+                       "divergences": int(fit.divergences.sum()),
+                       "tau": float(fit.stan_variable("tau").mean())}
+    else:
+        mode = model.optimize(data=data, seed=a.seed, jacobian=True, show_console=False)
+        fit = model.laplace_sample(data=data, mode=mode, draws=max(a.draws * 4, 200), seed=a.seed,
+                                   show_console=False)
+        diagnostics = {"tau": float(np.mean(fit.stan_variable("tau")))}
+
+    theta = fit.stan_variable("theta")   # draws x C x 6
+    prof = fit.stan_variable("prof")     # draws x C x 168
+    idx = np.linspace(0, theta.shape[0] - 1, num=min(a.draws, theta.shape[0])).round().astype(int)
+    out = {"method": a.method,
+           "seconds": round(time.time() - started, 1),
+           "diagnostics": diagnostics,
+           "draws": [{"theta": theta[i].tolist(), "prof": prof[i].tolist()} for i in idx]}
+    pathlib.Path(a.out).write_text(json.dumps(out))
+    print(json.dumps({k: out[k] for k in ("method", "seconds", "diagnostics")}), file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()

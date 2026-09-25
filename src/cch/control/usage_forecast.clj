@@ -31,7 +31,7 @@
 (defn- model-projection
   "Gamma-process forecast from the read model's hourly history, shaped like
   the rate projection ({:proj :band}), or nil with too little history."
-  [agent window-key hourly now resets-at last-pct]
+  [agent window-key hourly fleet-series now resets-at last-pct]
   (let [spec (model/specs window-key)
         completed (count (filter #(< (:eff-end %) now) (model/windows hourly spec)))]
     (when (>= completed min-model-windows)
@@ -39,7 +39,11 @@
             fitted (forecast/cached-fit
                      model-cache [agent window-key] now
                      (fn [previous]
-                       (model/fit-model hourly spec zone now :x0 (:x previous))))
+                       (let [{:keys [profile k]}
+                             (get (model/fleet-profiles @fleet-series zone) [agent window-key])]
+                         (assoc (model/fit-model hourly spec zone now
+                                                 :x0 (:x previous) :profile-override profile)
+                                :profile-k k))))
             {:keys [median lo hi p-cap path]}
             (model/forecast fitted hourly spec zone now resets-at last-pct)]
         {:method :gamma-process
@@ -49,8 +53,20 @@
          :p-cap p-cap
          :path path}))))
 
+(defn- fleet-series
+  "Hour series of every agent/window in the read model, keyed like the
+  model cache, for pooling activity profiles across the fleet."
+  [agents now]
+  (into {}
+        (for [[agent windows] agents
+              [window input] windows
+              :let [window-key (window-keywords window)]
+              :when (and window-key (seq (:hourly input)))]
+          [[agent window-key]
+           (model/hour-series (model/windows (:hourly input) (model/specs window-key)) now)])))
+
 (defn project-window
-  [generated-at agent window input]
+  [generated-at agent window input & {:keys [fleet]}]
   (let [window-key (window-keywords window)
         {:keys [span-seconds]}
         (get read-model/window-settings window)
@@ -78,7 +94,7 @@
                          :historical-finals finals}
             projection (or (when (seq (:hourly input))
                              (model-projection agent window-key (:hourly input)
-                                               now resets-at last-pct))
+                                               (or fleet (delay {})) now resets-at last-pct))
                            (projections/rate-bayes-projection observed window-info))
             projected (or (:proj projection) last-pct)
             band (:band projection)
@@ -115,15 +131,18 @@
 (defn from-read-model
   "Project every agent/window in the internal broker read model."
   [{:keys [generated-at agents]}]
-  {:generated-at generated-at
-   :agents
-   (->> agents
-        (map (fn [[agent windows]]
-               [agent
-                (->> windows
-                     (keep (fn [[window input]]
-                             (when-let [projected
-                                        (project-window generated-at agent window input)]
-                               [window projected])))
-                     (into (sorted-map)))]))
-        (into (sorted-map)))})
+  ;; Only a refit needs the fleet series; delay so ordinary projections skip it.
+  (let [fleet (delay (fleet-series agents (quot generated-at 1000)))]
+    {:generated-at generated-at
+     :agents
+     (->> agents
+          (map (fn [[agent windows]]
+                 [agent
+                  (->> windows
+                       (keep (fn [[window input]]
+                               (when-let [projected
+                                          (project-window generated-at agent window input
+                                                          :fleet fleet)]
+                                 [window projected])))
+                       (into (sorted-map)))]))
+          (into (sorted-map)))}))

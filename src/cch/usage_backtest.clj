@@ -13,7 +13,10 @@
   (:require [cch.db :as db]
             [cch.forecast :as forecast]
             [cch.projections :as proj]
-            [cch.usage-model :as m])
+            [cch.usage-model :as m]
+            [cch.usage-stan :as stan]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str])
   (:import (java.time ZoneId)))
 
 (def ^:private window-sql {:seven-day "seven_day" :five-hour "five_hour"})
@@ -177,11 +180,17 @@
    ["fleet-shared" :fleet ##Inf]
    ["agent k=4" :agent 4] ["agent k=12" :agent 12] ["agent k=36" :agent 36]
    ["fleet k=4" :fleet 4] ["fleet k=12" :fleet 12] ["fleet k=36" :fleet 36]
-   ["two-level 12/12" [:two-level 12] 12] ["two-level 36/12" [:two-level 12] 36]])
+   ["two-level 12/12" [:two-level 12] 12] ["two-level 36/12" [:two-level 12] 36]
+   ["fleet EB k" :fleet :eb]])
+
+(def ^:private focus-variants
+  "The comparison that decides adoption (claude-code-hooks-20r)."
+  #{"independent" "fleet-shared" "fleet k=36" "fleet EB k"})
 
 (defn- variant-profile
-  "Smoothed profile for `cell` at time t under `variant`; nil = independent."
-  [stats-at cell t [_ target k]]
+  "Smoothed profile for `cell` at time t under `variant`; nil = independent.
+  k = :eb estimates the shrinkage strength per cell (eb-rates)."
+  [{:keys [stats-at weekly-at]} cell t [_ target k]]
   (when target
     (let [own (stats-at cell t)
           agent-cells (filter #(= (first %) (first cell)) cells)
@@ -193,18 +202,21 @@
                          (= target :fleet) (pooled cells)
                          :else (m/shrunk-rates (as-stats agent-cells) (pooled cells) (second target)))]
       (m/smooth-profile
-        (if (Double/isInfinite (double k)) target-rates (m/shrunk-rates own target-rates k))))))
+        (cond
+          (= k :eb) (:rates (m/eb-rates (weekly-at cell t) target-rates))
+          (Double/isInfinite (double k)) target-rates
+          :else (m/shrunk-rates own target-rates k))))))
 
-(defn- cell-data [zone now [agent window-key :as cell]]
+(defn- cell-data [now [agent window-key :as cell]]
   (let [obs (raw-observations agent window-key)
         {:keys [rows-before]} (history obs)
         spec (m/specs window-key)]
     {:cell cell :spec spec :obs obs :rows-before rows-before
      :wins (m/windows (rows-before now) spec)
-     :stats (memoize (fn [t] (m/bin-stats (m/hour-series (m/windows (rows-before t) spec) t) zone)))}))
+     :series (memoize (fn [t] (m/hour-series (m/windows (rows-before t) spec) t)))}))
 
 (defn- replay-variant
-  [{:keys [cell spec obs rows-before wins]} stats-at variant now zone]
+  [{:keys [cell spec obs rows-before wins]} access variant now zone]
   (let [[_ window-key] cell
         {:keys [checkpoint-secs refit min-train]} (plan window-key)
         done? (fn [w] (or (:cap w) (< (:eff-end w) (- now 3600))))
@@ -212,7 +224,7 @@
                              :per-window (:start w)
                              :weekly (* 604800 (quot (:start w) 604800))))
         fit-at (memoize (fn [t] (m/fit-model (rows-before t) spec zone t
-                                             :profile-override (variant-profile stats-at cell t variant))))]
+                                             :profile-override (variant-profile access cell t variant))))]
     (vec
       (for [[i w] (map-indexed vector wins)
             :when (and (>= i min-train) (done? w))
@@ -247,24 +259,118 @@
      :se (/ sd (Math/sqrt (max 1 n)))}))
 
 (defn run-pooling
-  "Print the profile pooling experiment for every agent/window with history."
-  [& _]
+  "Print the profile pooling experiment for every agent/window with history.
+  With `:focus true`, only the variants that decide adoption."
+  [& {:keys [focus]}]
   (let [now (quot (System/currentTimeMillis) 1000)
         zone (ZoneId/systemDefault)
-        data (into {} (map (fn [c] [c (cell-data zone now c)]) cells))
-        stats-at (fn [cell t] (when-let [d (data cell)] ((:stats d) t)))]
+        data (into {} (map (fn [c] [c (cell-data now c)]) cells))
+        series-at (memoize (fn [cell t] ((:series (data cell)) t)))
+        access {:stats-at (memoize (fn [cell t] (m/bin-stats (series-at cell t) zone)))
+                :weekly-at (memoize (fn [cell t] (m/weekly-bin-rates (series-at cell t) zone)))}
+        chosen (if focus (filter #(focus-variants (first %)) variants) variants)]
     (doseq [cell cells
             :let [d (data cell)
-                  results (into {} (pmap (fn [v] [(first v) (replay-variant d stats-at v now zone)]) variants))
+                  results (into {} (pmap (fn [v] [(first v) (replay-variant d access v now zone)]) chosen))
                   base (results "independent")]
             :when (seq base)]
       (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
                        (count base) (count (distinct (map :win base)))))
       (println (format "  %-16s %7s %16s %6s %6s %6s %7s" "variant" "CRPS" "dCRPS (+-se)" "MAE" "cov50" "cov90" "Brier"))
-      (doseq [[label] variants
+      (doseq [[label] chosen
               :let [rows (results label)
                     {:keys [delta se]} (paired-delta rows base)
                     frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) rows))))]]
         (println (format "  %-16s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
                          label (mean (map :crps rows)) delta se (mean (map :err rows))
                          (frac :cov50) (frac :cov90) (mean (map :brier rows))))))))
+
+;; --- hierarchical Stan comparison ---
+;;
+;; Weekly refits (the production job's cadence) of three variants, scored on
+;; identical checkpoints: the independent in-JVM fit, the in-JVM fit with
+;; the fleet-shrunk profile (estimated k), and the offline hierarchical Stan
+;; posterior (bin/cch-usage-stan-fit), forecast as a mixture over draws.
+
+(defn- stan-fit!
+  "Run the Stan job on data before `t`; returns {cell [fits]} or nil."
+  [data t dir {:keys [draws warmup samples]}]
+  (let [rows-by-cell (into {} (for [[cell d] data] [cell ((:rows-before d) t)]))
+        in (str dir "/stan-data-" t ".json")
+        out (str dir "/stan-draws-" t ".json")
+        cells (stan/write-fit-data in rows-by-cell t (ZoneId/systemDefault))
+        {:keys [exit err]} (shell/sh "bin/cch-usage-stan-fit" in out
+                                     "--draws" (str draws) "--warmup" (str warmup)
+                                     "--samples" (str samples))]
+    (println (format "  stan fit @ %s: exit %d %s" (java.time.Instant/ofEpochSecond t) exit
+                     (last (str/split-lines (str err)))))
+    (when (zero? exit) (stan/read-draws out cells t))))
+
+(defn run-stan
+  "Compare independent, fleet-EB, and hierarchical Stan fits on weekly refits.
+  Stan fits are cached in `dir` by refit time, so reruns reuse them."
+  [& {:keys [dir draws warmup samples]
+      :or {dir "target/usage-stan" draws 40 warmup 300 samples 200}}]
+  (.mkdirs (java.io.File. ^String dir))
+  (let [now (quot (System/currentTimeMillis) 1000)
+        zone (ZoneId/systemDefault)
+        data (into {} (map (fn [c] [c (cell-data now c)]) cells))
+        week 604800
+        refit-of (fn [w] (* week (quot (:start w) week)))
+        targets (for [[cell d] data
+                      :let [[_ wk] cell
+                            {:keys [checkpoint-secs min-train]} (plan wk)]
+                      [i w] (map-indexed vector (:wins d))
+                      :when (and (>= i min-train) (or (:cap w) (< (:eff-end w) (- now 3600))))]
+                  {:cell cell :d d :w w :i i :checkpoint-secs checkpoint-secs :refit (refit-of w)})
+        stan-at (memoize (fn [t]
+                           (let [cached (str dir "/stan-draws-" t ".json")
+                                 cells-file (str dir "/stan-cells-" t ".edn")]
+                             (if (.exists (java.io.File. cached))
+                               (stan/read-draws cached (read-string (slurp cells-file)) t)
+                               (let [fits (stan-fit! data t dir {:draws draws :warmup warmup :samples samples})]
+                                 (when fits (spit cells-file (pr-str (vec (keys fits)))))
+                                 fits)))))
+        series-at (memoize (fn [cell t] ((:series (data cell)) t)))
+        fit-at (memoize (fn [cell t eb?]
+                          (let [{:keys [spec rows-before]} (data cell)
+                                prof (when eb?
+                                       (:profile (get (m/fleet-profiles
+                                                        (into {} (for [c cells :let [s (series-at c t)] :when (seq s)] [c s]))
+                                                        zone)
+                                                      cell)))]
+                            (m/fit-model (rows-before t) spec zone t :profile-override prof))))
+        rows (vec
+               (for [{:keys [cell d w i checkpoint-secs refit]} (sort-by :refit targets)
+                     :let [fits (get (stan-at refit) cell)]
+                     :when (seq fits)
+                     :let [{:keys [spec obs rows-before]} d
+                           final (m/cum-at w (inc (:eff-end w)))
+                           capped? (boolean (:cap w))
+                           wobs (window-obs obs spec w)]
+                     t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
+                     :let [rows (rows-before t)
+                           x (pct-at wobs t)
+                           score (fn [g]
+                                   (let [in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))]
+                                     {:crps (m/crps (:draws g) final 100.0)
+                                      :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
+                                      :cov50 (in? (:q25 g) (:q75 g)) :cov90 (in? (:lo g) (:hi g))
+                                      :brier (Math/pow (- (:p-cap g) (if capped? 1.0 0.0)) 2)}))]]
+                 {:cell cell :win i
+                  "independent" (score (m/forecast (fit-at cell refit false) rows spec zone t (:eff-end w) x :path? false))
+                  "fleet EB k" (score (m/forecast (fit-at cell refit true) rows spec zone t (:eff-end w) x :path? false))
+                  "stan" (score (stan/mixture-forecast (take draws fits) rows spec zone t (:eff-end w) x))}))]
+    (doseq [[cell cell-rows] (sort-by key (group-by :cell rows))
+            :let [base (mapv #(get % "independent") cell-rows)
+                  wins (mapv :win cell-rows)]]
+      (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
+                       (count cell-rows) (count (distinct wins))))
+      (println (format "  %-12s %7s %16s %6s %6s %6s %7s" "variant" "CRPS" "dCRPS (+-se)" "MAE" "cov50" "cov90" "Brier"))
+      (doseq [label ["independent" "fleet EB k" "stan"]
+              :let [scored (mapv #(assoc (get % label) :win (:win %)) cell-rows)
+                    {:keys [delta se]} (paired-delta scored (mapv #(assoc %1 :win %2) base wins))
+                    frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) scored))))]]
+        (println (format "  %-12s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
+                         label (mean (map :crps scored)) delta se (mean (map :err scored))
+                         (frac :cov50) (frac :cov90) (mean (map :brier scored))))))))

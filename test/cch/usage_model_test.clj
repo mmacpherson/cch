@@ -150,3 +150,20 @@
     (is (every? (fn [[a b]] (<= (:median a) (:median b))) (partition 2 1 path)) "cumulative demand never falls")
     (is (every? #(<= 20.0 (:lo %) (:q25 %) (:median %) (:q75 %) (:hi %)) path))
     (is (<= (:p-cap (first path)) (:p-cap (peek path))))))
+
+(deftest eb-rates-pools-noise-and-keeps-real-differences
+  (let [target (vec (repeat 168 1.0))
+        r (num/rng 5)
+        noisy-week (fn [mean] (* mean (num/gamma-sample r 2.0 2.0)))]
+    (testing "a cell that is only noise around the target pools almost fully"
+      (let [weekly (vec (for [_ (range 168)] (vec (repeatedly 12 #(noisy-week 1.0)))))
+            {:keys [rates k]} (m/eb-rates weekly target)]
+        (is (> k 20.0))
+        (is (< (reduce max (map #(Math/abs (- % 1.0)) rates)) 0.35))))
+    (testing "a cell whose profile really differs keeps its shape"
+      (let [true-rate (fn [h] (if (< (mod h 24) 12) 1.8 0.2))
+            weekly (vec (for [h (range 168)] (vec (repeatedly 12 #(noisy-week (true-rate h))))))
+            {:keys [rates k]} (m/eb-rates weekly target)]
+        (is (< k 5.0))
+        (is (> (nth rates 6) 1.4))
+        (is (< (nth rates 18) 0.6))))))
