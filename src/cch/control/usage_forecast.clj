@@ -3,10 +3,11 @@
 
   Uses the gamma-process usage model (cch.usage-model) once an agent/window
   has enough completed windows in the read model's hourly history, and the
-  rate-Bayes projection before that. The model is refit daily per
-  agent/window. Hour-of-week profiles use the JVM's default zone, the same
-  zone the Usage page labels its axes in; set TZ on the broker service to the
-  operator's local zone."
+  rate-Bayes projection before that. Fits are lazy: the first projection
+  that needs one fits it, and it is reused for 24 hours per agent/window.
+  Hour-of-week profiles use the JVM's default zone, the same zone the Usage
+  page labels its axes in; set TZ on the broker service to the operator's
+  local zone."
   (:require [cch.control.usage-read-model :as read-model]
             [cch.forecast :as forecast]
             [cch.projections :as projections]

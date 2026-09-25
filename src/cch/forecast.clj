@@ -277,7 +277,8 @@
 ;; cch.usage-model forecasts demand at the reset from the whole usage history
 ;; in absolute time. It needs hourly aggregates of every window, so those are
 ;; cached and extended incrementally: each refresh re-reads only the last
-;; cached hour onward. The fitted model is refreshed daily.
+;; cached hour onward. A fit is reused for 24 hours; the next refresh after
+;; that refits, warm-started from the previous parameters.
 
 (def ^:private hourly-cache (atom {}))
 (def ^:private model-cache (atom {}))
@@ -307,7 +308,8 @@
     (mapv (fn [[[r h] pct]] {:resets-at r :hour h :pct pct}) merged)))
 
 (defn- fitted-model
-  "Daily-refreshed fit for [agent window-key], warm-started from the last."
+  "Fit for [agent window-key], reused for 24 hours, then refit on the next
+  call (warm-started from the previous fit)."
   [agent window-key rows now]
   (let [k [(db/db-path) agent window-key]
         cached (get @model-cache k)]
