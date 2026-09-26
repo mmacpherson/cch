@@ -342,27 +342,25 @@
 (def ^:private model-agents ["claude-code" "codex" "agy"])
 
 (defn- fleet-profile
-  "Activity profile for [agent window-key], shrunk toward the shape pooled
-  over every local agent/window (cch.usage-model/fleet-profiles). Returns
-  {:profile :k}, or nil when the cell has no history."
-  [agent window-key now]
-  (let [series (into {}
-                     (for [a model-agents
-                           wk [:seven-day :five-hour]
-                           :let [rows (hourly-rows a wk)]
-                           :when (seq rows)]
-                       [[a wk] (model/hour-series (model/windows rows (model/specs wk)) now)]))]
-    (get (model/fleet-profiles series (ZoneId/systemDefault)) [agent window-key])))
+  "The production activity profile: one fleet shape of daily harmonics fit
+  to every local agent/window (cch.usage-model/fleet-harmonic-profile)."
+  [now]
+  (model/fleet-harmonic-profile
+    (into {}
+          (for [a model-agents
+                wk [:seven-day :five-hour]
+                :let [rows (hourly-rows a wk)]
+                :when (seq rows)]
+            [[a wk] (model/hour-series (model/windows rows (model/specs wk)) now)]))
+    (ZoneId/systemDefault)))
 
 (defn- fitted-model
   "Fit for [agent window-key]; see cached-fit."
   [agent window-key rows now]
   (cached-fit model-cache [(db/db-path) agent window-key] now
               (fn [previous]
-                (let [{:keys [profile k]} (fleet-profile agent window-key now)]
-                  (assoc (model/fit-model rows (model/specs window-key) (ZoneId/systemDefault) now
-                                          :x0 (:x previous) :profile-override profile)
-                         :profile-k k)))))
+                (model/fit-model rows (model/specs window-key) (ZoneId/systemDefault) now
+                                 :x0 (:x previous) :profile-override (fleet-profile now)))))
 
 (defn- model-projection
   "Gamma-process forecast of demand at `resets-at`, shaped like the rate

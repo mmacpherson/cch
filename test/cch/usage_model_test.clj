@@ -205,3 +205,16 @@
     (is (< (Math/abs (- 1.0 (/ (reduce + prof) 168.0))) 1e-9))
     (is (< (apply max (map #(Math/abs (- %1 (/ %2 mean-t))) prof truth)) 1e-3)
         "a rhythm inside the basis is recovered exactly")))
+
+(deftest fleet-harmonic-profile-is-the-same-every-day
+  (let [series (into (sorted-map)
+                     (for [k (range (* 21 24))
+                           :let [t (+ t0 (* k h)) hod (mod k 24) day (quot (mod k 168) 24)]]
+                       ;; busy afternoons, and busier Mondays: the day level is ignored
+                       [t [1.0 (* (if (zero? day) 3.0 1.0) (if (<= 12 hod 17) 4.0 0.2))]]))
+        prof (m/fleet-harmonic-profile {["claude-code" :five-hour] series} utc)]
+    (is (= 168 (count prof)))
+    (is (every? (fn [hr] (< (Math/abs (- (nth prof hr) (nth prof (+ hr 48)))) 1e-9)) (range 24))
+        "no weekday levels: Monday's hours equal Wednesday's")
+    (is (> (nth prof 15) (* 3 (nth prof 3))) "afternoons outweigh 3am")
+    (is (= (vec (repeat 168 1.0)) (m/fleet-harmonic-profile {} utc)))))

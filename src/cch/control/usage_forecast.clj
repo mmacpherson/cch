@@ -39,11 +39,9 @@
             fitted (forecast/cached-fit
                      model-cache [agent window-key] now
                      (fn [previous]
-                       (let [{:keys [profile k]}
-                             (get (model/fleet-profiles @fleet-series zone) [agent window-key])]
-                         (assoc (model/fit-model hourly spec zone now
-                                                 :x0 (:x previous) :profile-override profile)
-                                :profile-k k))))
+                       (model/fit-model hourly spec zone now :x0 (:x previous)
+                                        :profile-override (model/fleet-harmonic-profile
+                                                            @fleet-series zone))))
             {:keys [median lo hi p-cap path]}
             (model/forecast fitted hourly spec zone now resets-at last-pct)]
         {:method :gamma-process

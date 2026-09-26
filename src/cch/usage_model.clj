@@ -5,7 +5,8 @@
   only accounting on top of it. The model has three parts:
 
   * Activity profile a(h): the relative usage rate for each of the 168
-    local hours of the week, estimated from history and smoothed.
+    local hours of the week. In production it is one fleet shape of four
+    daily harmonics shared by every agent (fleet-harmonic-profile).
   * Latent intensity: usage over a block with profile mass A is
     Gamma(kappa*A, lambda), with lambda ~ Gamma(alpha, beta). Blocks are
     24h for the 7d window and 1h for the 5h window.
@@ -312,6 +313,22 @@
         raw (mapv #(Math/exp (reduce + (map * % beta))) xs)
         mean (/ (reduce + raw) 168.0)]
     (mapv #(/ % mean) raw)))
+
+(def profile-harmonics
+  "Daily harmonics in the production profile. The profile ladder
+  (claude-code-hooks-jgb) found the out-of-sample elbow at 4, with no
+  weekday levels: one fleet shape, identical every day, for every agent."
+  4)
+
+(defn fleet-harmonic-profile
+  "The production activity profile: one fleet shape of `profile-harmonics`
+  daily harmonics (no weekday levels), fit to the pooled usage of every cell.
+  `series-by-cell` maps cell -> hour series. Returns a 168-vector, mean 1."
+  [series-by-cell ^ZoneId zone]
+  (if (empty? series-by-cell)
+    (vec (repeat 168 1.0))
+    (harmonic-profile (map #(bin-stats % zone) (vals series-by-cell))
+                      profile-harmonics :weekday? false)))
 
 (defn fleet-profiles
   "Activity profiles for several cells (agent/window pairs), each shrunk
