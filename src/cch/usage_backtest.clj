@@ -270,11 +270,11 @@
   "One variant under cch.usage-eval's estimand (equal weight per window,
   then per horizon stratum): levels, the paired CRPS difference vs `base`,
   and calendar-week block-bootstrap intervals."
-  [label rows base window-key]
-  (let [lv (fn [f] (:est (ev/level rows window-key f)))
+  [label rows base window-key & {:keys [estimator] :or {estimator ev/estimate}}]
+  (let [lv (fn [f] (:est (ev/level rows window-key f :estimator estimator)))
         bool (fn [k] #(if (k %) 1.0 0.0))
-        cov90 (ev/level rows window-key (bool :cov90))
-        {:keys [delta lo hi]} (paired-delta rows base window-key)]
+        cov90 (ev/level rows window-key (bool :cov90) :estimator estimator)
+        {:keys [delta lo hi]} (ev/paired rows base window-key :crps :estimator estimator)]
     (format "  %-24s %6.2f  %+6.2f [%+6.2f, %+6.2f]  %6.1f %5.0f%% %3.0f%% [%2.0f-%3.0f] %s"
             label (lv :crps) delta lo hi (lv :err) (* 100 (lv (bool :cov50)))
             (* 100 (:est cov90)) (* 100 (:lo cov90)) (* 100 (:hi cov90))
@@ -283,21 +283,27 @@
 (defn- print-pooled-7d
   "The primary endpoint: 7d accuracy pooled across agents. `by-cell` maps
   cell -> {label rows}, rows paired by position with the `base` label's.
-  Windows are keyed by agent (indices repeat across cells) and weigh
-  equally; the calendar-week bootstrap resamples weeks jointly across
-  agents, whose weekly habits are shared."
-  [by-cell labels base]
+  Windows weigh equally within an agent, and agents combine with the fixed
+  weights in cch.usage-eval/agent-weights; the calendar-week bootstrap
+  resamples weeks jointly across agents, whose weekly habits are shared."
+  [by-cell labels base & {:keys [contrasts]}]
   (let [cells7 (sort (filter #(= :seven-day (second %)) (keys by-cell)))
         pooled (fn [label] (vec (for [cell cells7
                                       r (get-in by-cell [cell label])]
-                                  (assoc r :win [(first cell) (:win r)]))))
-        base-rows (pooled base)]
+                                  (assoc r :win [(first cell) (:win r)] :agent (first cell)))))
+        base-rows (pooled base)
+        estimator (ev/agent-weighted ev/agent-weights)]
     (when (seq base-rows)
-      (println (format "\nseven-day pooled across agents  (%d checkpoints, %d windows; primary endpoint)"
-                       (count base-rows) (count (distinct (map :win base-rows)))))
+      (println (format "\nseven-day pooled across agents  (%d checkpoints; windows %s; weights %s; primary endpoint)"
+                       (count base-rows)
+                       (str/join " " (for [[a rs] (sort (group-by :agent base-rows))] (str a " " (count (distinct (map :win rs))))))
+                       (str/join " " (for [[a w] (sort ev/agent-weights)] (str a " " w)))))
       (println summary-header)
       (doseq [label labels]
-        (println (summary-line label (pooled label) base-rows :seven-day))))))
+        (println (summary-line label (pooled label) base-rows :seven-day :estimator estimator)))
+      (doseq [[a b] contrasts
+              :let [{:keys [delta lo hi]} (ev/paired (pooled a) (pooled b) :seven-day :crps :estimator estimator)]]
+        (println (format "  %s vs %s  %+6.2f [%+.2f, %+.2f]" a b delta lo hi))))))
 
 (defn run-pooling
   "Print the profile pooling experiment for every agent/window with history.
@@ -574,4 +580,4 @@
     (print-pooled-7d (into {} (for [[cell cr] (group-by :cell rows)]
                                 [cell (into {} (for [arm [:A :B :C]]
                                                  [(name arm) (mapv #(merge (select-keys (:A %) [:win :week :hours]) (arm %)) cr)]))]))
-                     ["A" "B" "C"] "A")))
+                     ["A" "B" "C"] "A" :contrasts [["C" "B"]])))
