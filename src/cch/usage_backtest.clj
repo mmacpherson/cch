@@ -308,8 +308,10 @@
 
 (defn run-stan
   "Compare independent, fleet-EB, and hierarchical Stan fits on weekly refits.
-  Stan fits are cached in `dir` by refit time, so reruns reuse them."
-  [& {:keys [dir draws warmup samples]
+  Stan fits are cached in `dir` by refit time, so reruns reuse them. `only`
+  restricts target cells and `max-refits` keeps the latest N refit weeks
+  (for smoke tests)."
+  [& {:keys [dir draws warmup samples only max-refits]
       :or {dir "target/usage-stan" draws 40 warmup 300 samples 200}}]
   (.mkdirs (java.io.File. ^String dir))
   (let [now (quot (System/currentTimeMillis) 1000)
@@ -321,8 +323,13 @@
                       :let [[_ wk] cell
                             {:keys [checkpoint-secs min-train]} (plan wk)]
                       [i w] (map-indexed vector (:wins d))
-                      :when (and (>= i min-train) (or (:cap w) (< (:eff-end w) (- now 3600))))]
+                      :when (and (>= i min-train) (or (:cap w) (< (:eff-end w) (- now 3600)))
+                                 (or (nil? only) (only cell)))]
                   {:cell cell :d d :w w :i i :checkpoint-secs checkpoint-secs :refit (refit-of w)})
+        targets (if max-refits
+                  (let [keep (set (take-last max-refits (sort (distinct (map :refit targets)))))]
+                    (filter #(keep (:refit %)) targets))
+                  targets)
         stan-at (memoize (fn [t]
                            (let [cached (str dir "/stan-draws-" t ".json")
                                  cells-file (str dir "/stan-cells-" t ".edn")]
