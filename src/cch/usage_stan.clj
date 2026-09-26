@@ -80,7 +80,7 @@
                    :hbin (mapv first entries)
                    :live (mapv second entries)
                    :yh (mapv #(nth % 2) entries)
-                   :min_mass (mapv #(:min-mass (m/specs (second (:cell %)))) per-cell)
+                   :min_mass (mapv #(:min-live-hours (m/specs (second (:cell %)))) per-cell)
                    :g_init (mapv #(Math/log %) fleet)})}))
 
 (defn write-fit-data

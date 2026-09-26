@@ -38,11 +38,11 @@
   the fit: [ln kappa, ln alpha0, ln beta0, ln on-strength, logit on-mean,
   logit d]."
   {:seven-day {:span-secs (* 7 86400) :block-hours 24 :anchor-hour 4
-               :min-mass 2.0 :cluster-secs 300 :fit-lookback-secs nil
+               :min-live-hours 2.0 :cluster-secs 300 :fit-lookback-secs nil
                :filter-lookback-secs nil :path-step-secs 3600
                :x0 [-3.0 2.3 4.1 1.4 0.85 1.4]}
    :five-hour {:span-secs (* 5 3600) :block-hours 1 :anchor-hour 0
-               :min-mass 0.05 :cluster-secs 120
+               :min-live-hours 0.05 :cluster-secs 120
                :fit-lookback-secs (* 42 86400)
                ;; With d ~ 0.9 per hour, state older than a week has no weight.
                :filter-lookback-secs (* 7 86400) :path-step-secs 300
@@ -310,16 +310,16 @@
   (zero? (mod (- (mod (hour-of-week zone h) 24) anchor-hour) block-hours)))
 
 (defn blocks
-  "Aggregate an hour series into model blocks: [[start mass usage] ...]."
+  "Aggregate an hour series into model blocks:
+  [[start profile-mass usage live-hours] ...]."
   [series prof zone spec]
-  (let [out (reduce (fn [acc [h [live y]]]
-                      (let [A (* (nth prof (hour-of-week zone h)) live)]
-                        (if (or (empty? acc) (block-start? zone spec h))
-                          (conj acc [h A y])
-                          (let [[s A0 y0] (peek acc)]
-                            (conj (pop acc) [s (+ A0 A) (+ y0 y)])))))
-                    [] series)]
-    out))
+  (reduce (fn [acc [h [live y]]]
+            (let [A (* (nth prof (hour-of-week zone h)) live)]
+              (if (or (empty? acc) (block-start? zone spec h))
+                (conj acc [h A y live])
+                (let [[s A0 y0 L0] (peek acc)]
+                  (conj (pop acc) [s (+ A0 A) (+ y0 y) (+ L0 live)])))))
+          [] series))
 
 ;; --- filter ---
 
@@ -350,13 +350,19 @@
 (defn run-filter
   "Filter the intensity and on/off states through `blks`. Returns
   {:state [alpha beta a b] :loglik L :on-last? bool} where loglik is the sum
-  of one-step-ahead predictive log probabilities (when `score?`)."
-  [blks [kappa al0 be0 a0 b0 d] {:keys [min-mass]} score?]
+  of one-step-ahead predictive log probabilities (when `score?`).
+
+  Sliver blocks (fewer than `min-live-hours` live hours, e.g. partial blocks
+  at window edges) update the intensity but carry no on/off information.
+  The test uses live hours, which are data, not profile mass: with a mass
+  test the likelihood jumps as the profile moves, which breaks gradient
+  samplers (the Stan model uses the same rule)."
+  [blks [kappa al0 be0 a0 b0 d] {:keys [min-live-hours]} score?]
   (let [relax (fn [s p] (+ (* d s) (* (- 1.0 d) p)))]
     (reduce
-      (fn [{[al be a b] :state ll :loglik} [_ A y]]
+      (fn [{[al be a b] :state ll :loglik} [_ A y live-hours]]
         (let [al (relax al al0) be (relax be be0) a (relax a a0) b (relax b b0)]
-          (if (< A min-mass)
+          (if (< live-hours min-live-hours)
             {:state [(+ al (* kappa A)) (+ be y) a b] :loglik ll :on-last? (>= y 0.5)}
             (let [pi (/ a (+ a b))
                   pg (interval-prob y A al be kappa)

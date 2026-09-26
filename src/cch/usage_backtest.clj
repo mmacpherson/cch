@@ -391,7 +391,7 @@
 (def ^:private hourly-overrides
   "7d at hourly resolution: the 5h window's block settings and start point."
   (-> (m/specs :five-hour)
-      (select-keys [:block-hours :anchor-hour :min-mass :filter-lookback-secs :x0])
+      (select-keys [:block-hours :anchor-hour :min-live-hours :filter-lookback-secs :x0])
       (assoc :fit-lookback-secs nil)))
 
 (def ^:private no-memory {5 -30.0})

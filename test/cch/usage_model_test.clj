@@ -83,7 +83,7 @@
         (let [lam (if (< (.nextDouble r) (- 1.0 d)) (num/gamma-sample r al0 be0) lam)
               on? (< (.nextDouble r) (/ a0 (+ a0 b0)))
               y (if on? (Math/rint (num/gamma-sample r (* kappa 24.0) lam)) 0.0)]
-          (recur (inc i) lam (conj out [(+ t0 (* i day)) 24.0 y])))))))
+          (recur (inc i) lam (conj out [(+ t0 (* i day)) 24.0 y 24.0])))))))
 
 (deftest fit-prefers-true-parameters-over-perturbed
   (let [truth [0.05 6.0 30.0 3.0 1.0 0.8]
@@ -183,3 +183,13 @@
                                   [3 4.43641 64.1322 2.16049 -39.34885232]]]
       (is (< (Math/abs (- expected (Math/log (m/interval-prob y 1.0 al be k)))) 1e-3)
           (str [y k al be])))))
+
+(deftest sliver-test-uses-live-hours-not-profile-mass
+  (let [theta [0.05 6.0 30.0 3.0 1.0 0.8]
+        ;; a long block that the profile weights near zero, and a short block it weights heavily
+        blks [[t0 0.5 10.0 24.0] [(+ t0 day) 3.0 0.0 1.0]]
+        {:keys [state]} (m/run-filter blks theta seven false)]
+    (testing "the 24-live-hour block updates on/off despite tiny mass; the 1-hour block does not"
+      ;; a+b starts at 4; block 1 adds 1 (5); relaxing toward 4 with d = 0.8
+      ;; gives 4.8 before block 2, which as a sliver adds nothing (else 5.8).
+      (is (< (Math/abs (- 4.8 (+ (nth state 2) (nth state 3)))) 1e-9)))))
