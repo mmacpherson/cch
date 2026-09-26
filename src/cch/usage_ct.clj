@@ -312,12 +312,17 @@
           (recur more mf2 ms2 pff2 pss2 pfs2 r
                  (if score? (+ ll (Math/log (max tot 1e-300))) ll)))))))
 
+(defn- objective-c
+  "Negative log likelihood of `stps` plus the weak sd-3 prior around `x-start`."
+  [stps x-start]
+  (fn [x] (+ (- (:loglik (run-filter-c stps (unpack-c x) true)))
+             (* 0.5 (reduce + (map (fn [xi si] (Math/pow (/ (- xi si) 3.0) 2)) x x-start))))))
+
 (defn fit-c
   "Maximum-likelihood arm-C parameters for `stps` (weak sd-3 prior around the
   start on the unconstrained scale, as in `fit`)."
   [stps x-start]
-  (let [obj (fn [x] (+ (- (:loglik (run-filter-c stps (unpack-c x) true)))
-                       (* 0.5 (reduce + (map (fn [xi si] (Math/pow (/ (- xi si) 3.0) 2)) x x-start)))))
+  (let [obj (objective-c stps x-start)
         r1 (num/nelder-mead obj x-start :tol 1e-6 :max-iter 2000)
         r2 (num/nelder-mead obj (:x r1) :step 0.2 :tol 1e-6 :max-iter 2000)
         best (if (<= (:fx r2) (:fx r1)) r2 r1)]
@@ -366,4 +371,46 @@
      :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
      :hi (num/quantile draws 0.95)
      :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))
+
+;; --- parameter uncertainty ---
+;;
+;; A plug-in forecast conditions on the fitted parameters as if they were
+;; known. The Laplace approximation replaces them with a Gaussian around the
+;; fit on the unconstrained scale, covariance the inverse Hessian of the
+;; penalized negative log likelihood; the forecast mixes paths over draws.
+
+(defn laplace-draws
+  "`k` unconstrained parameter draws from the Laplace approximation around the
+  arm-C fit `x-hat` of `stps`. A ridge is added until the Hessian is positive
+  definite. Returns {:draws [x ...] :ridge r :sd [...]}."
+  [stps x-start x-hat k & {:keys [seed] :or {seed 5}}]
+  (let [h (num/hessian (objective-c stps x-start) x-hat :h 1e-2)
+        n (count x-hat)
+        [ridge l] (some (fn [r] (when-let [l (num/cholesky
+                                               (num/inverse (vec (for [i (range n)]
+                                                                   (update (nth h i) i + r)))))]
+                                  [r l]))
+                        [0.0 1e-3 1e-2 1e-1 1.0])
+        rng (num/rng seed)]
+    {:ridge ridge
+     :sd (mapv #(Math/sqrt (reduce + (map (fn [v] (* v v)) %))) l)
+     :draws (vec (for [_ (range k)]
+                   (let [z (vec (repeatedly n #(.nextGaussian rng)))]
+                     (mapv (fn [xi row] (+ xi (reduce + (map * row z)))) x-hat l))))}))
+
+(defn forecast-steps-c-mix
+  "Arm-C predictive mixing over unconstrained parameter draws `xs`: each draw
+  filters the history and contributes n/k paths."
+  [xs stps fut x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [per (max 1 (quot n (count xs)))
+        draws (double-array (mapcat (fn [xi i] (:draws (forecast-steps-c (unpack-c xi) stps fut x
+                                                                         :n per :seed (+ seed i))))
+                                    xs (range)))
+        m (alength draws)]
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
+     :hi (num/quantile draws 0.95)
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) m)
      :draws draws}))

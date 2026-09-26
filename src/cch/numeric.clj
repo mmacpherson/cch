@@ -184,6 +184,47 @@
                      (aget row r))))
       (vec x))))
 
+(defn hessian
+  "Central-difference Hessian of scalar `f` at vector `x` with step `h`."
+  [f x & {:keys [h] :or {h 1e-3}}]
+  (let [n (count x)
+        x (vec x)
+        at (fn [& ds] (f (reduce (fn [v [i d]] (update v i + d)) x (partition 2 ds))))
+        f0 (f x)]
+    (vec (for [i (range n)]
+           (vec (for [j (range n)]
+                  (if (= i j)
+                    (/ (+ (at i h) (at i (- h)) (* -2.0 f0)) (* h h))
+                    (/ (- (+ (at i h j h) (at i (- h) j (- h)))
+                          (+ (at i h j (- h)) (at i (- h) j h)))
+                       (* 4.0 h h)))))))))
+
+(defn cholesky
+  "Lower Cholesky factor of symmetric matrix `a` (vector of rows), or nil if
+  `a` is not positive definite."
+  [a]
+  (let [n (count a)
+        l (make-array Double/TYPE n n)]
+    (loop [i 0]
+      (if (= i n)
+        (mapv vec l)
+        (when (loop [j 0]
+                (if (> j i)
+                  true
+                  (let [s (- (double (get-in a [i j]))
+                             (reduce + 0.0 (map #(* (aget ^doubles (aget l i) %) (aget ^doubles (aget l j) %)) (range j))))]
+                    (if (= i j)
+                      (when (pos? s) (aset ^doubles (aget l i) i (Math/sqrt s)) (recur (inc j)))
+                      (do (aset ^doubles (aget l i) j (/ s (aget ^doubles (aget l j) j))) (recur (inc j)))))))
+          (recur (inc i)))))))
+
+(defn inverse
+  "Inverse of a small dense matrix, column by column with `solve`."
+  [a]
+  (let [n (count a)
+        cols (for [j (range n)] (solve a (assoc (vec (repeat n 0.0)) j 1.0)))]
+    (vec (for [i (range n)] (mapv #(nth % i) cols)))))
+
 (defn gamma-inc
   "Regularized lower incomplete gamma P(a, x) for a > 0, x >= 0: series for
   x < a + 1, continued fraction (modified Lentz) otherwise."
