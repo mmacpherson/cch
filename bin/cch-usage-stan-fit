@@ -92,11 +92,6 @@ def main():
                            "divergences": int(fit.divergences.sum()),
                            "max_treedepth_hits": int(fit.max_treedepths.sum())
                            if fit.max_treedepths is not None else None}
-        for name in ("tau_day", "tau_week"):
-            try:
-                diagnostics[name] = round(float(np.mean(fit.stan_variable(name))), 3)
-            except ValueError:
-                pass
         out["diagnostics"] = diagnostics
         pathlib.Path(a.out).write_text(json.dumps(out))
     except Exception as e:   # diagnostics are informational; the draws are already saved

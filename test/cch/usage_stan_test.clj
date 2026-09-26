@@ -43,6 +43,5 @@
         (is (= (mapv #(nth % 2) (ml-blocks (weekly-rows))) (subvec y n1 (+ n1 n2))))))
     (testing "the fleet log-profile has 168 bins; the basis sizes are data"
       (is (= 168 (count g_init)))
-      (is (pos-int? (:n_daily data)))
-      (is (every? nat-int? [(:n_weekly data) (:n_weekend data)]))
+      (is (= 4 (:n_daily data)))
       (is (= [1 1] ctype)))))

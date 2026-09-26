@@ -11,31 +11,13 @@
 // cells hourly ones, as in the maximum-likelihood fit (day blocks predict weekly
 // totals better; see claude-code-hooks-w7v).
 //
-// Activity profiles, over a smooth hour-of-week basis split into within-day
-// columns (daily harmonics, and daily harmonics on weekends) and weekly
-// columns (weekly harmonics and a weekend level); basis sizes are data:
-//   log a_c = B_day  (fleet_day  + agent_day[agent(c)])
-//           + B_week (fleet_week + cell_week[c]),   normalized to mean 1.
-// Day-long blocks cannot see within-day shape (daily harmonics integrate to
-// zero over a day), so the within-day deviation belongs to the agent and is
-// identified by its hourly 5h cell (the 5h and 7d meters count the same
-// usage); a 7d cell deviates from the fleet only in weekly shape. An agent
-// without a 5h cell keeps the fleet within-day shape. Deviation scales have
-// half-normal priors, so full pooling stays possible. The fleet profile is
-// well identified by all cells together, so its prior scale is fixed (0.5).
-//
-// Block interval probabilities: zero-usage blocks use the incomplete-beta
-// power series, reflected (I_x(a,b) = 1 - I_{1-x}(b,a)) where the direct
-// series would converge slowly; blocks with usage use 5-point Gauss-Legendre
-// on the closed-form density where it is smooth and an exact difference taken
-// in the smaller tail where it is steep. Stan's beta_lcdf shape gradients had
-// dominated run time (up to ~555 us per call); this is ~6x faster overall with
-// the same posterior, and never differences two CDF values near 1.
-//
-// Sliver blocks (partial blocks at window edges) skip the on/off update. They
-// are detected from live hours, which are data: testing the profile-weighted
-// mass instead made the log density jump as the profile moved, which
-// collapsed the HMC step size.
+// Activity profile: one fleet shape shared by every cell, log a = B beta over
+// n_daily daily harmonics (a data size; 4 in production), normalized to mean 1,
+// the same every day. The profile ladder (claude-code-hooks-jgb) found that
+// per-agent within-day deviations, per-cell weekly deviations, and weekday or
+// weekend terms do no better out of sample, so this replaces a hierarchy of
+// about 108 profile parameters and two deviation scales with 2 * n_daily
+// coefficients.
 //
 // Cell parameters phi, around a mean for the window type (5h or 7d):
 //   [log geometric-mean usage rate = log p + log kappa + log beta0 - digamma(alpha0),
@@ -156,9 +138,7 @@ functions {
 data {
   int<lower=1> C;                        // cells
   int<lower=1> T;                        // window types (7d, 5h)
-  int<lower=1> A;                        // agents
   array[C] int<lower=1, upper=T> ctype;
-  array[C] int<lower=1, upper=A> agent;
   array[T] vector[6] x0;                 // maximum-likelihood fit's starting point per type (centers the prior)
   int<lower=1> NB;                       // blocks, all cells
   vector<lower=0>[NB] y;
@@ -171,37 +151,22 @@ data {
   vector<lower=0>[C] min_mass;
   vector[168] g_init;                    // log fleet profile estimate (centering)
   int<lower=1> n_daily;                  // profile basis: daily harmonics
-  int<lower=0> n_weekly;                 //                weekly harmonics
-  int<lower=0> n_weekend;                //                weekend daily harmonics
 }
 transformed data {
   array[C] int cell_ids;
   for (c in 1:C) cell_ids[c] = c;
-  int KD = 2 * n_daily + 2 * n_weekend;  // within-day columns
-  int KW = 2 * n_weekly + 1;             // weekly columns
-  matrix[168, KD] B_day;
-  matrix[168, KW] B_week;
+  int K = 2 * n_daily;
+  matrix[168, K] B;
   for (h in 1:168) {
     real t = h - 1;
-    real weekend = t >= 120 ? 1 : 0;     // Saturday and Sunday (bin 0 = Monday 00:00)
     for (m in 1:n_daily) {
-      B_day[h, 2 * m - 1] = cos(2 * pi() * m * t / 24);
-      B_day[h, 2 * m] = sin(2 * pi() * m * t / 24);
+      B[h, 2 * m - 1] = cos(2 * pi() * m * t / 24);
+      B[h, 2 * m] = sin(2 * pi() * m * t / 24);
     }
-    for (m in 1:n_weekend) {
-      B_day[h, 2 * n_daily + 2 * m - 1] = weekend * cos(2 * pi() * m * t / 24);
-      B_day[h, 2 * n_daily + 2 * m] = weekend * sin(2 * pi() * m * t / 24);
-    }
-    for (m in 1:n_weekly) {
-      B_week[h, 2 * m - 1] = cos(2 * pi() * m * t / 168);
-      B_week[h, 2 * m] = sin(2 * pi() * m * t / 168);
-    }
-    B_week[h, KW] = weekend - 2.0 / 7;   // mean-zero weekend level
   }
-  // Center the fleet coefficients on the least-squares fit of the pooled log
+  // Center the coefficients on the least-squares fit of the pooled log
   // profile that the maximum-likelihood fit starts from.
-  matrix[168, KD + KW] B = append_col(B_day, B_week);
-  vector[KD + KW] beta_init = mdivide_left_spd(crossprod(B), B' * (g_init - mean(g_init)));
+  vector[K] beta_init = mdivide_left_spd(crossprod(B), B' * (g_init - mean(g_init)));
   // Prior centers for phi, converted from the maximum-likelihood starting point x0.
   array[T] vector[6] phi0;
   for (t in 1:T) {
@@ -215,11 +180,7 @@ transformed data {
   vector[6] phi_scale = [1.5, 1, 1.5, 1.5, 1, 1]';
 }
 parameters {
-  vector[KD + KW] z_g;
-  array[A] vector[KD] z_agent_day;
-  real<lower=0> tau_day;
-  array[C] vector[KW] z_cell_week;
-  real<lower=0> tau_week;
+  vector[K] z_g;
   array[C] vector[6] eta;                // cell phi, in prior-scale units (centered)
   array[T] vector[6] mu;                 // type means of phi, in prior-scale units
   array[T] vector<lower=0>[6] sigma_theta;
@@ -228,12 +189,8 @@ transformed parameters {
   array[C] vector[168] prof;
   array[C] vector[6] theta;
   {
-    vector[KD + KW] fleet = beta_init + 0.5 * z_g;
-    for (c in 1:C) {
-      vector[168] la = B_day * (fleet[1:KD] + tau_day * z_agent_day[agent[c]])
-                       + B_week * (fleet[(KD + 1):(KD + KW)] + tau_week * z_cell_week[c]);
-      prof[c] = 168 * softmax(la);
-    }
+    vector[168] shared = 168 * softmax(B * (beta_init + 0.5 * z_g));
+    for (c in 1:C) prof[c] = shared;
   }
   for (c in 1:C) {
     vector[6] phi = phi0[ctype[c]] + phi_scale .* eta[c];
@@ -247,10 +204,6 @@ transformed parameters {
 }
 model {
   z_g ~ std_normal();
-  for (a in 1:A) z_agent_day[a] ~ std_normal();
-  tau_day ~ normal(0, 0.5);
-  for (c in 1:C) z_cell_week[c] ~ std_normal();
-  tau_week ~ normal(0, 0.5);
   for (t in 1:T) {
     mu[t] ~ std_normal();
     sigma_theta[t] ~ lognormal(log(0.5), 0.5);

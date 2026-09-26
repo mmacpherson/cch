@@ -14,10 +14,9 @@
 (def ^:private type-index {:seven-day 1 :five-hour 2})
 
 (def ^:private profile-basis
-  "Size of the Stan model's hour-of-week profile basis: daily harmonics
-  (down to 4-hour detail), weekly harmonics (weekday drift), and daily
-  harmonics that apply only on weekends."
-  {:n_daily 6 :n_weekly 3 :n_weekend 2})
+  "Size of the Stan model's profile basis: daily harmonics of the shared
+  fleet shape, matching the maximum-likelihood fit."
+  {:n_daily m/profile-harmonics})
 
 (defn- block-entries
   "Model blocks of an hour series with their hour-level entries:
