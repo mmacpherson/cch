@@ -3,7 +3,7 @@
   (resources/stan/usage_model.stan, run by bin/cch-usage-stan-fit).
 
   `fit-data` exports every agent/window cell's model blocks, built by the
-  same code the in-JVM fit uses, so the Stan likelihood sees identical
+  same code the maximum-likelihood fit uses, so the Stan likelihood sees identical
   inputs. `read-draws` loads the job's posterior draws as per-cell
   {:theta :profile} fits that cch.usage-model/forecast can consume."
   (:require [cch.numeric]

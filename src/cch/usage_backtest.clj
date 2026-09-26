@@ -288,9 +288,10 @@
 ;; --- hierarchical Stan comparison ---
 ;;
 ;; Weekly refits (the production job's cadence) of three variants, scored on
-;; identical checkpoints: the independent in-JVM fit, the in-JVM fit with
-;; the fleet-shrunk profile (estimated k), and the offline hierarchical Stan
-;; posterior (bin/cch-usage-stan-fit), forecast as a mixture over draws.
+;; identical checkpoints: the maximum-likelihood fit with an independent
+;; profile, the same fit with the fleet-shrunk profile (estimated k), and the
+;; hierarchical posterior from Stan (bin/cch-usage-stan-fit), forecast as a
+;; mixture over draws.
 
 (defn- stan-fit!
   "Run the Stan job on data before `t`; returns {cell [fits]} or nil."

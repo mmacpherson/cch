@@ -31,7 +31,7 @@
       (is (= (inc NB) (count block_ptr)))
       (is (= NW (count hbin) (count live) (dec (peek block_ptr))))
       (is (every? #(<= 1 % 168) hbin)))
-    (testing "blocks carry the same usage as the in-JVM model's blocks"
+    (testing "blocks carry the same usage as the maximum-likelihood model's blocks"
       (let [spec (m/specs :seven-day)
             series (m/hour-series (m/windows (weekly-rows) spec) now)
             jvm (m/blocks series (vec (repeat 168 1.0)) utc spec)]
