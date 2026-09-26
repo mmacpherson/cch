@@ -48,6 +48,10 @@ def main():
     p.add_argument("--warmup", type=int, default=500)
     p.add_argument("--samples", type=int, default=250)
     p.add_argument("--seed", type=int, default=1)
+    # 0.95, not Stan's 0.8: when hours split crisply into on/off (high kappa,
+    # weak on/off prior) the posterior is sharply curved; at 0.8 a few percent
+    # of transitions diverged and one chain could stall in warmup.
+    p.add_argument("--adapt-delta", type=float, default=0.95)
     a = p.parse_args()
 
     model = compile_model()
@@ -63,7 +67,7 @@ def main():
         fit = model.sample(data=data, chains=a.chains, parallel_chains=a.chains,
                            threads_per_chain=threads, iter_warmup=a.warmup,
                            iter_sampling=a.samples, seed=a.seed, show_progress=False,
-                           inits=inits)
+                           inits=inits, adapt_delta=a.adapt_delta)
     else:
         mode = model.optimize(data=data, seed=a.seed, jacobian=True, show_console=False, inits=inits)
         fit = model.laplace_sample(data=data, mode=mode, draws=max(a.draws * 4, 200), seed=a.seed,

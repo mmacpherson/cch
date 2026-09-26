@@ -34,10 +34,11 @@
 (defn fit-data
   "Stan data for all cells at time `now`. `rows-by-cell` maps
   [agent window-key] -> hourly aggregate rows observed before `now`. Cells
-  with fewer than `min-windows` completed windows, or no usage in the fit
-  span, are left out. Returns
+  with no usage in the fit span are left out; `min-windows` (default 0)
+  can also require completed windows. Thin cells are kept on purpose: the
+  hierarchy pools them toward their type and the fleet. Returns
   {:data <stan json map> :cells [[agent window-key] ...]}."
-  [rows-by-cell now ^ZoneId zone & {:keys [min-windows] :or {min-windows 5}}]
+  [rows-by-cell now ^ZoneId zone & {:keys [min-windows] :or {min-windows 0}}]
   (let [series-of (fn [[_ window-key] rows]
                     (let [spec (m/specs window-key)
                           s (m/hour-series (m/windows rows spec) now)

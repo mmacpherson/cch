@@ -299,20 +299,23 @@
   (let [rows-by-cell (into {} (for [[cell d] data] [cell ((:rows-before d) t)]))
         in (str dir "/stan-data-" t ".json")
         out (str dir "/stan-draws-" t ".json")
-        cells (stan/write-fit-data in rows-by-cell t (ZoneId/systemDefault))
-        {:keys [exit err]} (shell/sh "bin/cch-usage-stan-fit" in out
-                                     "--draws" (str draws) "--warmup" (str warmup)
-                                     "--samples" (str samples))]
-    (println (format "  stan fit @ %s: exit %d %s" (java.time.Instant/ofEpochSecond t) exit
-                     (last (str/split-lines (str err)))))
-    (when (zero? exit) (stan/read-draws out cells t))))
+        cells (stan/write-fit-data in rows-by-cell t (ZoneId/systemDefault))]
+    (if (empty? cells)
+      (println (format "  stan fit @ %s: skipped (no cell has usage yet)" (java.time.Instant/ofEpochSecond t)))
+      ;; A hard timeout, so one stalled chain cannot block the comparison.
+      (let [{:keys [exit err]} (shell/sh "timeout" "3600" "bin/cch-usage-stan-fit" in out
+                                         "--draws" (str draws) "--warmup" (str warmup)
+                                         "--samples" (str samples))]
+        (println (format "  stan fit @ %s: exit %d %s" (java.time.Instant/ofEpochSecond t) exit
+                         (last (str/split-lines (str err)))))
+        (when (zero? exit) (stan/read-draws out cells t))))))
 
 (defn run-stan
   "Compare independent, fleet-EB, and hierarchical Stan fits on weekly refits.
   Stan fits are cached in `dir` by refit time, so reruns reuse them. `only`
-  restricts target cells and `max-refits` keeps the latest N refit weeks
-  (for smoke tests)."
-  [& {:keys [dir draws warmup samples only max-refits]
+  restricts target cells, and `max-refits` keeps the latest N refit weeks
+  (or `first-refits` the earliest N), for smoke tests."
+  [& {:keys [dir draws warmup samples only max-refits first-refits]
       ;; Outside target/: a build cleans target/ and would delete a running
       ;; comparison's inputs and cached fits.
       :or {dir (str (System/getProperty "user.home") "/.cache/cch/usage-stan-backtest")
@@ -330,10 +333,10 @@
                       :when (and (>= i min-train) (or (:cap w) (< (:eff-end w) (- now 3600)))
                                  (or (nil? only) (only cell)))]
                   {:cell cell :d d :w w :i i :checkpoint-secs checkpoint-secs :refit (refit-of w)})
-        targets (if max-refits
-                  (let [keep (set (take-last max-refits (sort (distinct (map :refit targets)))))]
-                    (filter #(keep (:refit %)) targets))
-                  targets)
+        refits (sort (distinct (map :refit targets)))
+        keep (cond max-refits (set (take-last max-refits refits))
+                   first-refits (set (take first-refits refits)))
+        targets (if keep (filter #(keep (:refit %)) targets) targets)
         stan-at (memoize (fn [t]
                            (let [cached (str dir "/stan-draws-" t ".json")
                                  cells-file (str dir "/stan-cells-" t ".edn")]

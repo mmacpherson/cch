@@ -8,7 +8,7 @@
 // discount d between blocks. Block likelihoods are interval probabilities
 // of the compound-gamma predictive y/(y+beta) ~ Beta(kappa*A, alpha), since
 // usage is reported in whole percent. 7d cells use day-long blocks and 5h
-// cells hourly ones, as in the in-JVM model (day blocks predict weekly
+// cells hourly ones, as in the maximum-likelihood fit (day blocks predict weekly
 // totals better; see claude-code-hooks-w7v).
 //
 // Activity profiles, over a smooth hour-of-week basis split into within-day
@@ -159,7 +159,7 @@ data {
   int<lower=1> A;                        // agents
   array[C] int<lower=1, upper=T> ctype;
   array[C] int<lower=1, upper=A> agent;
-  array[T] vector[6] x0;                 // in-JVM starting point per type (centers the prior)
+  array[T] vector[6] x0;                 // maximum-likelihood fit's starting point per type (centers the prior)
   int<lower=1> NB;                       // blocks, all cells
   vector<lower=0>[NB] y;
   array[C] int<lower=1> cell_start;
@@ -199,10 +199,10 @@ transformed data {
     B_week[h, KW] = weekend - 2.0 / 7;   // mean-zero weekend level
   }
   // Center the fleet coefficients on the least-squares fit of the pooled log
-  // profile that the in-JVM estimate starts from.
+  // profile that the maximum-likelihood fit starts from.
   matrix[168, KD + KW] B = append_col(B_day, B_week);
   vector[KD + KW] beta_init = mdivide_left_spd(crossprod(B), B' * (g_init - mean(g_init)));
-  // Prior centers for phi, converted from the in-JVM starting point x0.
+  // Prior centers for phi, converted from the maximum-likelihood starting point x0.
   array[T] vector[6] phi0;
   for (t in 1:T) {
     phi0[t][1] = log_inv_logit(x0[t][5]) + x0[t][1] + x0[t][3] - digamma(exp(x0[t][2]));
