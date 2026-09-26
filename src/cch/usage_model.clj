@@ -399,11 +399,14 @@
             lo (max 0.0 (- y q))
             x-lo (/ lo (+ lo be))
             i-lo (num/beta-inc k al x-lo)]
-        (max 1e-300
+        ;; Clamped to [1e-300, 1]: at extreme parameters the difference can
+        ;; leave that range numerically, and an optimizer will exploit it.
+        (min 1.0
+             (max 1e-300
              (if (> i-lo 0.5)
                (- (num/beta-inc al k (/ be (+ lo be)))
                   (num/beta-inc al k (/ be (+ hi be))))
-               (- (num/beta-inc k al (/ hi (+ hi be))) i-lo)))))))
+               (- (num/beta-inc k al (/ hi (+ hi be))) i-lo))))))))
 
 (defn run-filter
   "Filter the intensity and on/off states through `blks`. Returns

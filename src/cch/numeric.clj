@@ -183,3 +183,56 @@
                         (reduce + 0.0 (map #(* (aget row %) (aget x %)) (range (inc r) n))))
                      (aget row r))))
       (vec x))))
+
+(defn gamma-inc
+  "Regularized lower incomplete gamma P(a, x) for a > 0, x >= 0: series for
+  x < a + 1, continued fraction (modified Lentz) otherwise."
+  ^double [^double a ^double x]
+  (cond
+    (<= x 0.0) 0.0
+    (< x (+ a 1.0))
+    (loop [n 1 ap a del (/ 1.0 a) sum (/ 1.0 a)]
+      (let [ap (+ ap 1.0) del (* del (/ x ap)) sum (+ sum del)]
+        (if (or (< (Math/abs del) (* (Math/abs sum) 1e-15)) (> n 1000))
+          (* sum (Math/exp (- (* a (Math/log x)) x (log-gamma a))))
+          (recur (inc n) ap del sum))))
+    :else
+    (let [tiny 1e-300
+          b0 (+ x 1.0 (- a))]
+      (loop [i 1 b b0 c (/ 1.0 tiny) d (/ 1.0 b0) h (/ 1.0 b0)]
+        (let [an (* (- i) (- i a))
+              b (+ b 2.0)
+              d (+ (* an d) b) d (/ 1.0 (if (< (Math/abs d) tiny) tiny d))
+              c (+ b (/ an c)) c (if (< (Math/abs c) tiny) tiny c)
+              del (* d c)
+              h (* h del)]
+          (if (or (< (Math/abs (- del 1.0)) 1e-15) (> i 1000))
+            (- 1.0 (* h (Math/exp (- (* a (Math/log x)) x (log-gamma a)))))
+            (recur (inc i) b c d h)))))))
+
+(defn gamma-inc-upper
+  "Regularized upper incomplete gamma Q(a, x) = 1 - P(a, x), computed
+  directly in the continued-fraction regime so the upper tail keeps full
+  precision."
+  ^double [^double a ^double x]
+  (if (< x (+ a 1.0))
+    (- 1.0 (gamma-inc a x))
+    (let [tiny 1e-300
+          b0 (+ x 1.0 (- a))]
+      (loop [i 1 b b0 c (/ 1.0 tiny) d (/ 1.0 b0) h (/ 1.0 b0)]
+        (let [an (* (- i) (- i a))
+              b (+ b 2.0)
+              d (+ (* an d) b) d (/ 1.0 (if (< (Math/abs d) tiny) tiny d))
+              c (+ b (/ an c)) c (if (< (Math/abs c) tiny) tiny c)
+              del (* d c)
+              h (* h del)]
+          (if (or (< (Math/abs (- del 1.0)) 1e-15) (> i 1000))
+            (* h (Math/exp (- (* a (Math/log x)) x (log-gamma a))))
+            (recur (inc i) b c d h)))))))
+
+(def gauss-hermite-10
+  "Nodes and weights for integral f(x) exp(-x^2) dx (physicists' convention)."
+  {:x [-3.4361591188377376 -2.5327316742327897 -1.7566836492998818 -1.0366108297895136 -0.3429013272237046
+       0.3429013272237046 1.0366108297895136 1.7566836492998818 2.5327316742327897 3.4361591188377376]
+   :w [7.640432855232621e-06 0.0013436457467812327 0.033874394455481065 0.2401386110823147 0.6108626337353258
+       0.6108626337353258 0.2401386110823147 0.033874394455481065 0.0013436457467812327 7.640432855232621e-06]})

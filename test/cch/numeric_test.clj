@@ -54,3 +54,12 @@
     (is (every? true? (map #(< (Math/abs (- %1 %2)) 1e-12) x [1.0 1.0 1.0]))))
   (testing "needs pivoting"
     (is (= [2.0 1.0] (mapv #(Math/rint %) (s/solve [[0.0 1.0] [1.0 0.0]] [1.0 2.0]))))))
+
+(deftest gamma-inc-matches-reference
+  ;; scipy.special.gammainc
+  (doseq [[a x expected] [[0.5 0.3 0.5614219739190003] [2.0 1.5 0.4421745996289252]
+                          [0.02 0.01 0.9221194412397666] [0.3 5.0 0.9993486812492816]
+                          [10.0 12.0 0.7576078383294875] [50.0 40.0 0.07033506665939494]
+                          [0.1 0.0001 0.41846137523796295]]]
+    (is (< (Math/abs (- (s/gamma-inc a x) expected)) 1e-10) (str [a x])))
+  (is (= 0.0 (s/gamma-inc 2.0 0.0))))

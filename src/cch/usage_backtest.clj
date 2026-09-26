@@ -13,6 +13,7 @@
   (:require [cch.db :as db]
             [cch.forecast :as forecast]
             [cch.projections :as proj]
+            [cch.usage-ct :as ct]
             [cch.usage-model :as m]
             [cch.usage-stan :as stan]
             [clojure.java.shell :as shell]
@@ -484,3 +485,69 @@
           (println (format "    %-15s %s" label
                            (str/join "  " (for [k (sort (keys by))]
                                             (format "%s:%.2f" (if (= k 5) "5+" k) (mean (map :crps (by k)))))))))))))
+
+;; --- continuous-time experiment (claude-code-hooks-lbz) ---
+;;
+;; Arms A (production blocks), B (continuous time, one timescale) and C
+;; (continuous time, two log-OU timescales), refit weekly on identical
+;; checkpoints with the production harmonic fleet profile.
+
+(defn run-ct
+  "Print the continuous-time experiment. `only` restricts cells;
+  `max-refits` keeps the latest N refit weeks (smoke tests)."
+  [& {:keys [only max-refits]}]
+  (let [now (quot (System/currentTimeMillis) 1000)
+        zone (ZoneId/systemDefault)
+        week 604800
+        data (into {} (map (fn [c] [c (cell-data now c)]) cells))
+        series-at (memoize (fn [cell t] ((:series (data cell)) t)))
+        profile-at (memoize (fn [t] (m/fleet-harmonic-profile
+                                      (into {} (for [c cells :let [s (series-at c t)] :when (seq s)] [c s]))
+                                      zone)))
+        refit-of (fn [w] (* week (quot (:start w) week)))
+        targets (for [[cell d] data
+                      :when (or (nil? only) (only cell))
+                      :let [[_ wk] cell {:keys [checkpoint-secs min-train]} (plan wk)]
+                      [i w] (map-indexed vector (:wins d))
+                      :when (and (>= i min-train) (or (:cap w) (< (:eff-end w) (- now 3600))))]
+                  {:cell cell :w w :i i :checkpoint-secs checkpoint-secs :refit (refit-of w)})
+        keep (when max-refits (set (take-last max-refits (sort (distinct (map :refit targets))))))
+        targets (if keep (filter #(keep (:refit %)) targets) targets)
+        fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
+                                      (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
+        fit-ct (memoize (fn [cell t arm] (let [{:keys [spec rows-before]} (data cell)]
+                                           (ct/fit-model (rows-before t) spec zone t arm (profile-at t)))))
+        ;; fit all (cell, refit) pairs in parallel first
+        _ (dorun (pmap (fn [[cell t arm]] (if (= arm :A) (fit-a cell t) (fit-ct cell t arm)))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) arm [:A :B :C]] [cell t arm])))
+        rows (vec
+               (pmap
+                 (fn [{:keys [cell w i checkpoint-secs refit]}]
+                   (let [{:keys [spec obs rows-before]} (data cell)
+                         final (m/cum-at w (inc (:eff-end w)))
+                         capped? (boolean (:cap w))
+                         wobs (window-obs obs spec w)]
+                     (vec
+                       (for [t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
+                             :let [rows (rows-before t) x (pct-at wobs t)
+                                   in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))
+                                   score (fn [g] {:win i :crps (m/crps (:draws g) final 100.0)
+                                                  :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
+                                                  :cov90 (in? (:lo g) (:hi g)) :cov50 (in? (:q25 g) (:q75 g))})]]
+                         {:cell cell :win i
+                          :A (score (m/forecast (fit-a cell refit) rows spec zone t (:eff-end w) x :path? false))
+                          :B (score (ct/forecast-arm (fit-ct cell refit :B) rows spec zone t (:eff-end w) x))
+                          :C (score (ct/forecast-arm (fit-ct cell refit :C) rows spec zone t (:eff-end w) x))}))))
+                 targets))
+        rows (vec (apply concat rows))]
+    (doseq [[cell cr] (sort-by key (group-by :cell rows))]
+      (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs A)" (first cell) (name (second cell))
+                       (count cr) (count (distinct (map :win cr)))))
+      (doseq [arm [:A :B :C]
+              :let [sc (mapv arm cr) base (mapv :A cr)
+                    {:keys [delta se]} (paired-delta sc base)
+                    frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) sc))))]]
+        (println (format "  %s  CRPS %6.2f  %+6.2f (%.2f)  MAE %5.1f  cov50 %3.0f%%  cov90 %3.0f%%"
+                         (name arm) (mean (map :crps sc)) delta se (mean (map :err sc)) (frac :cov50) (frac :cov90))))
+      (let [{:keys [delta se]} (paired-delta (mapv :C cr) (mapv :B cr))]
+        (println (format "  C vs B  %+6.2f (%.2f)" delta se))))))
