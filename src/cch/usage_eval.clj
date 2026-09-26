@@ -48,10 +48,10 @@
 
 (def agent-weights
   "Fixed agent weights for the pooled 7d endpoint, stating the maintainer's
-  priorities (Claude > Codex >> AGY). Percent of quota is not comparable
+  priorities (Claude = Codex >> AGY). Percent of quota is not comparable
   across plans and Codex's irregular resets inflate its window count, so
   neither windows nor percent used can stand in for importance."
-  {"claude-code" 0.6 "codex" 0.3 "agy" 0.1})
+  {"claude-code" 0.46 "codex" 0.46 "agy" 0.08})
 
 (defn horizon-estimate
   "Equal weight per horizon stratum: each stratum's mean over the windows
