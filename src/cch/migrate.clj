@@ -106,7 +106,23 @@
    {:id "0010-replay-usage-backfill-for-prior-horizon"
     :up (str "UPDATE usage_backfill_state SET last_context_id=0,"
              "updated_at=strftime('%Y-%m-%dT%H:%M:%f','now') "
-             "WHERE singleton_id=1;")}])
+             "WHERE singleton_id=1;")}
+   ;; Prospective forecast ledger (cch.usage-ledger): frozen model ids record
+   ;; hourly forecasts, scored after each window ends.
+   {:id "0011-usage-forecast-ledger"
+    :up (str "CREATE TABLE IF NOT EXISTS usage_forecast_ledger ("
+             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+             "  model TEXT NOT NULL,"
+             "  agent TEXT NOT NULL,"
+             "  window_key TEXT NOT NULL CHECK (window_key IN ('five_hour','seven_day')),"
+             "  resets_at INTEGER NOT NULL,"
+             "  hour INTEGER NOT NULL,"
+             "  recorded_at INTEGER NOT NULL,"
+             "  current_pct REAL NOT NULL,"
+             "  quantiles TEXT NOT NULL,"
+             "  p_cap REAL,"
+             "  UNIQUE (model, agent, window_key, resets_at, hour)"
+             ");")}])
 
 (defn migration-ids
   "Ordered ids of every defined migration. Public so tests and

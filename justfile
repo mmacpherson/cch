@@ -94,6 +94,10 @@ usage-backtest:
 usage-backtest-pooling:
     clj -M -e "(require 'cch.usage-backtest) (cch.usage-backtest/run-pooling)"
 
+# Score the prospective forecast ledger (forecasts recorded live, scored after each window ends)
+usage-ledger:
+    clj -M -e "(require 'cch.usage-ledger) (cch.usage-ledger/report)"
+
 # Remove generated files
 clean:
     rm -rf .cpcache .nrepl-port target

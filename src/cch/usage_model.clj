@@ -538,8 +538,9 @@
   pct `x`. Each draw samples the intensity and on-probability once, each
   block's on/off once (the current block is on if it has usage), and each
   piece's usage. Returns one summary per piece end:
-  {:ts :mean :lo :q25 :median :q75 :hi :p-cap}, where lo/hi bound the 90%
-  band and p-cap is P(demand >= 100 by ts)."
+  {:ts :mean :lo :q25 :median :q75 :hi :quantiles :p-cap}, where lo/hi bound
+  the 90% band, quantiles are the 19 levels 0.05..0.95, and p-cap is
+  P(demand >= 100 by ts)."
   [[al be a b] [kappa] x pieces on-now? & {:keys [n seed] :or {n 3000 seed 1}}]
   (let [k (count pieces)
         r (num/rng seed)
@@ -571,6 +572,7 @@
                :median (num/quantile col 0.5)
                :q75 (num/quantile col 0.75)
                :hi (num/quantile col 0.95)
+               :quantiles (mapv #(num/quantile col (/ % 20.0)) (range 1 20))
                :p-cap (/ capped n)}))
           (range k))))
 
@@ -593,7 +595,7 @@
                                (future-pieces profile zone spec now resets-at (:path-step-secs spec))
                                on-last?)]
         (if-let [end (peek path)]
-          (assoc (select-keys end [:median :lo :hi :p-cap]) :path path)
+          (assoc (select-keys end [:median :lo :hi :p-cap :quantiles]) :path path)
           {:median x :lo x :hi x :p-cap (if (>= x 100.0) 1.0 0.0) :path []}))
       (predict state theta x (future-blocks profile zone spec now resets-at) on-last?
                :n n :seed seed))))

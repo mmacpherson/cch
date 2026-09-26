@@ -14,6 +14,7 @@
   (:require [cch.db :as db]
             [cch.projections :as proj]
             [cch.settings :as settings]
+            [cch.usage-ledger :as ledger]
             [cch.usage-model :as model]
             [clojure.string :as str])
   (:import (java.time Instant ZoneId)))
@@ -374,13 +375,14 @@
         (let [fitted (fitted-model agent window-key rows now)
               {:keys [median lo hi p-cap path]}
               (model/forecast fitted rows spec (ZoneId/systemDefault) now resets-at last-pct)]
-          {:method  :gamma-process
-           :name    "Gamma process"
-           :proj    median
-           :band    {:lo lo :hi hi}
-           :p-cap   p-cap
-           :path    path
-           :profile (:profile fitted)})))))
+          {:method    :gamma-process
+           :name      "Gamma process"
+           :proj      median
+           :band      {:lo lo :hi hi}
+           :p-cap     p-cap
+           :quantiles (:quantiles (peek path))
+           :path      path
+           :profile   (:profile fitted)})))))
 
 (defn- build-current-window
   "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
@@ -510,6 +512,26 @@
       r5h           r5h
       r7d           r7d)))
 
+(defn- record-ledger!
+  "Record the ledger models' forecasts for one agent/window (hourly, see
+  cch.usage-ledger). Failures are logged, never raised: the ledger must not
+  break the statusline."
+  [agent window-key now resets-at last-pct model-proj rate-proj]
+  (try
+    (let [base {:agent agent :window-key window-key :resets-at resets-at
+                :now now :current-pct last-pct}]
+      (when (and (= :gamma-process (:method model-proj)) (seq (:quantiles model-proj)))
+        (ledger/record! (assoc base :model "ml-harmonic-v1"
+                               :quantiles (:quantiles model-proj) :p-cap (:p-cap model-proj))))
+      (when-let [{:keys [proj band]} rate-proj]
+        (let [lo (or (:lo band) proj) hi (or (:hi band) proj)
+              qs (ledger/gaussian-quantiles proj lo hi last-pct)]
+          (ledger/record! (assoc base :model "rate-bayes-v1" :quantiles qs
+                                 :p-cap (/ (count (filter #(>= % 100.0) qs)) 19.0))))))
+    (catch Throwable t
+      (binding [*out* *err*]
+        (println "cch.forecast: ledger record failed:" (.getMessage t))))))
+
 (defn- compute-window-stats
   "Assemble observations for `window-key` scoped to `agent`, run `proj-fn`
    to get the forward projection, and return the statusLine stats map.
@@ -539,6 +561,9 @@
           local-rate   (if (= window-key :seven-day)
                          (fused-burn-rate-7d agent resets-at now)
                          (recent-burn-rate-phr agent wpath resets-at now))]
+      (when (and last-pct (normalized-source?) (ledger/due? [agent window-key] now))
+        (record-ledger! agent window-key now resets-at last-pct proj-result
+                        (proj/rate-bayes-projection obs-pairs window-info)))
       (when last-pct
         (let [raw-proj (or (:proj proj-result) last-pct)
               band     (:band proj-result)]
@@ -551,6 +576,9 @@
                                :hi (Math/round (double (:hi band)))})))))))
 
 (def ^:private forecast-cache (atom nil))
+(def ^:private ledger-hours
+  "Last clock hour the non-statusline agents were computed for the ledger."
+  (atom {}))
 (def ^:private parity-cache (atom nil))
 (def ^:private bg-thread (atom nil))
 (def ^:private last-watermark (atom nil))
@@ -654,7 +682,16 @@
         selected (if (= :normalized *usage-source*) normalized legacy)
         computed-at (-> (Instant/now) .getEpochSecond)]
     (reset! forecast-cache (assoc selected :computed_at computed-at))
-    (reset! parity-cache (parity-summary legacy normalized))))
+    (reset! parity-cache (parity-summary legacy normalized))
+    ;; The statusline covers Claude; record the other agents' forecasts for
+    ;; the ledger too (hourly; compute-window-stats records when due).
+    (binding [*usage-source* :normalized]
+      (doseq [agent ["codex" "agy"]
+              window-key [:seven-day :five-hour]
+              :when (not= (quot computed-at 3600) (get @ledger-hours [agent window-key]))]
+        (swap! ledger-hours assoc [agent window-key] (quot computed-at 3600))
+        (try (compute-window-stats agent window-key proj/rate-bayes-projection)
+             (catch Throwable _ nil))))))
 
 (defn- safe-refresh! []
   ;; Catch Throwable, not Exception — an Error (OOM, init failure, etc.)
