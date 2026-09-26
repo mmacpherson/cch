@@ -119,8 +119,6 @@
         x (full (:x best))]
     {:x x :params (unpack x) :nll (:fx best)}))
 
-(def ^:private fit-lookback-secs (* 42 86400))
-
 (declare fit-c x0-c)
 
 (defn fit-model
@@ -128,7 +126,12 @@
   `now`, with the given activity profile. Hourly steps for either meter."
   [rows spec zone now arm profile & {:keys [x-start]}]
   (let [series (m/hour-series (m/windows rows spec) now)
-        recent (into (sorted-map) (filter #(>= (key %) (- now fit-lookback-secs)) series))
+        ;; the same training span as the discrete model (all history for 7d,
+        ;; 42 days for 5h), so an arm comparison changes only the dynamics
+        lookback (:fit-lookback-secs spec)
+        recent (if lookback
+                 (into (sorted-map) (filter #(>= (key %) (- now lookback)) series))
+                 series)
         stps (steps recent profile zone)
         {:keys [x params nll]} (if (= arm :C)
                                  (fit-c stps (or x-start x0-c))

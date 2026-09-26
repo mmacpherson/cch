@@ -280,6 +280,25 @@
             (* 100 (:est cov90)) (* 100 (:lo cov90)) (* 100 (:hi cov90))
             (if (:brier (first rows)) (format "%7.4f" (lv :brier)) ""))))
 
+(defn- print-pooled-7d
+  "The primary endpoint: 7d accuracy pooled across agents. `by-cell` maps
+  cell -> {label rows}, rows paired by position with the `base` label's.
+  Windows are keyed by agent (indices repeat across cells) and weigh
+  equally; the calendar-week bootstrap resamples weeks jointly across
+  agents, whose weekly habits are shared."
+  [by-cell labels base]
+  (let [cells7 (sort (filter #(= :seven-day (second %)) (keys by-cell)))
+        pooled (fn [label] (vec (for [cell cells7
+                                      r (get-in by-cell [cell label])]
+                                  (assoc r :win [(first cell) (:win r)]))))
+        base-rows (pooled base)]
+    (when (seq base-rows)
+      (println (format "\nseven-day pooled across agents  (%d checkpoints, %d windows; primary endpoint)"
+                       (count base-rows) (count (distinct (map :win base-rows)))))
+      (println summary-header)
+      (doseq [label labels]
+        (println (summary-line label (pooled label) base-rows :seven-day))))))
+
 (defn run-pooling
   "Print the profile pooling experiment for every agent/window with history.
   With `:focus true`, only the variants that decide adoption. `:base` names
@@ -292,16 +311,19 @@
         access {:stats-at (memoize (fn [cell t] (m/bin-stats (series-at cell t) zone)))
                 :weekly-at (memoize (fn [cell t] (m/weekly-bin-rates (series-at cell t) zone)))}
         chosen (if focus (filter #(focus-variants (first %)) variants) variants)]
-    (doseq [cell cells
-            :let [d (data cell)
-                  results (into {} (pmap (fn [v] [(first v) (replay-variant d access v now zone)]) chosen))
-                  base-rows (results base)]
-            :when (seq base-rows)]
-      (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
-                       (count base-rows) (count (distinct (map :win base-rows)))))
-      (println summary-header)
-      (doseq [[label] chosen]
-        (println (summary-line label (results label) base-rows (second cell)))))))
+    (print-pooled-7d
+      (into {} (for [cell cells
+                     :let [d (data cell)
+                           results (into {} (pmap (fn [v] [(first v) (replay-variant d access v now zone)]) chosen))
+                           base-rows (results base)]
+                     :when (seq base-rows)]
+                 (do (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
+                                      (count base-rows) (count (distinct (map :win base-rows)))))
+                     (println summary-header)
+                     (doseq [[label] chosen]
+                       (println (summary-line label (results label) base-rows (second cell))))
+                     [cell results])))
+      (map first chosen) base)))
 
 ;; --- hierarchical Stan comparison ---
 ;;
@@ -393,14 +415,18 @@
                   "independent" (score (m/forecast (fit-at cell refit false) rows spec zone t (:eff-end w) x :path? false))
                   "fleet EB k" (score (m/forecast (fit-at cell refit true) rows spec zone t (:eff-end w) x :path? false))
                   "stan" (score (stan/mixture-forecast (take draws fits) rows spec zone t (:eff-end w) x))}))]
-    (doseq [[cell cell-rows] (sort-by key (group-by :cell rows))
-            :let [ids (mapv #(select-keys % [:win :week :hours]) cell-rows)
-                  base (mapv #(merge %2 (get %1 "independent")) cell-rows ids)]]
-      (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
-                       (count cell-rows) (count (distinct (map :win cell-rows)))))
-      (println summary-header)
-      (doseq [label ["independent" "fleet EB k" "stan"]]
-        (println (summary-line label (mapv #(merge %2 (get %1 label)) cell-rows ids) base (second cell)))))))
+    (print-pooled-7d
+      (into {} (for [[cell cell-rows] (sort-by key (group-by :cell rows))
+                     :let [ids (mapv #(select-keys % [:win :week :hours]) cell-rows)
+                           by-label (into {} (for [label ["independent" "fleet EB k" "stan"]]
+                                               [label (mapv #(merge %2 (get %1 label)) cell-rows ids)]))]]
+                 (do (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
+                                      (count cell-rows) (count (distinct (map :win cell-rows)))))
+                     (println summary-header)
+                     (doseq [label ["independent" "fleet EB k" "stan"]]
+                       (println (summary-line label (by-label label) (by-label "independent") (second cell))))
+                     [cell by-label])))
+      ["independent" "fleet EB k" "stan"] "independent")))
 
 ;; --- momentum experiment (claude-code-hooks-w7v) ---
 ;;
@@ -544,4 +570,8 @@
       (doseq [arm [:A :B :C]]
         (println (summary-line (name arm) (mapv arm cr) (mapv :A cr) (second cell))))
       (let [{:keys [delta lo hi]} (paired-delta (mapv :C cr) (mapv :B cr) (second cell))]
-        (println (format "  C vs B  %+6.2f [%+.2f, %+.2f]" delta lo hi))))))
+        (println (format "  C vs B  %+6.2f [%+.2f, %+.2f]" delta lo hi))))
+    (print-pooled-7d (into {} (for [[cell cr] (group-by :cell rows)]
+                                [cell (into {} (for [arm [:A :B :C]]
+                                                 [(name arm) (mapv #(merge (select-keys (:A %) [:win :week :hours]) (arm %)) cr)]))]))
+                     ["A" "B" "C"] "A")))
