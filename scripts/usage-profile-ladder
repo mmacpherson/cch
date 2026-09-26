@@ -1,0 +1,495 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["numpy", "scipy", "matplotlib"]
+# ///
+"""Profile complexity ladder (claude-code-hooks-jgb), stage 1.
+
+Compares parameterizations of the hour-of-week activity profile by how well
+each predicts *when* next week's usage happens. The score is event level:
+every 1% meter tick is scored at its observed time under the profile read as a
+density over the week's live time,
+
+    log a(t_i) - log integral_week a(t) live(t) dt,
+
+reported as the gain in nats per tick over a flat profile. Leave-future-out by
+week: each test week is scored by variants fit only on earlier weeks. Ridge
+and smoothness strengths are chosen by inner validation on the last training
+weeks. Standard errors are clustered by week.
+
+Reads the local cch event DB and prints aggregate metrics only.
+
+    scripts/usage-profile-ladder [--db PATH] [--plot OUT.svg] [--min-train 4]
+"""
+import argparse
+import datetime as dt
+import math
+import os
+import sqlite3
+from zoneinfo import ZoneInfo
+
+import numpy as np
+from scipy import optimize
+
+SLOT_MIN = 10
+SPANS = {"seven_day": 7 * 86400, "five_hour": 5 * 3600}
+JITTER = {"seven_day": 300, "five_hour": 120}
+LAMBDAS = [0.3, 3.0, 30.0, 300.0]
+
+
+# --- data ---------------------------------------------------------------------
+
+def load_cells(db):
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    rows = con.execute(
+        "SELECT agent, window_key, CAST(observed_at/1000 AS INTEGER), used_percentage, resets_at "
+        "FROM usage_observations WHERE agent IN ('claude-code','codex','agy') ORDER BY observed_at").fetchall()
+    cells = {}
+    for agent, wk, t, p, r in rows:
+        cells.setdefault((agent, wk), []).append((t, p, r))
+    return cells
+
+
+def ticks_and_live(obs, wk):
+    """Tick times (one per 1% increment), the live span, and capped spans for
+    one cell. Hours between windows are live with zero usage (windows start at
+    first use, or are contiguous), as in the forecasting model; hours after a
+    window hit its cap are not live (demand is hidden)."""
+    span, jitter = SPANS[wk], JITTER[wk]
+    canon, groups = {}, []
+    for r in sorted({r for _, _, r in obs}):
+        if groups and r - groups[-1][-1] <= jitter:
+            groups[-1].append(r)
+        else:
+            groups.append([r])
+    for g in groups:
+        for r in g:
+            canon[r] = g[0]
+    wins = {}
+    for t, p, r in obs:
+        c = canon[r]
+        if c - span <= t < c:
+            wins.setdefault(c, []).append((t, p))
+    ends = sorted(wins)
+    ticks, spans, caps = [], [], []
+    for i, c in enumerate(ends):
+        start, mx, cap = c - span, 0.0, None
+        for t, p in wins[c]:
+            if p > mx:
+                ticks.extend([t] * int(round(p - mx)))
+                mx = p
+            if cap is None and p >= 100:
+                cap = t
+        nxt = [wins[e][0][0] for e in ends[i + 1:] if wins[e][0][0] > start]
+        eff_end = min([c] + nxt)
+        spans.append((start, eff_end))
+        if cap is not None:
+            caps.append((cap, eff_end))
+    if not spans:
+        return np.array([]), None, None, []
+    return (np.array(ticks, dtype=float), min(s for s, _ in spans), max(e for _, e in spans), caps)
+
+
+def build(db, tz):
+    zone = ZoneInfo(tz)
+    raw = load_cells(db)
+    cells = {}
+    t_min, t_max = math.inf, -math.inf
+    for key, obs in raw.items():
+        ticks, first, last, caps = ticks_and_live(obs, key[1])
+        if len(ticks) == 0:
+            continue
+        cells[key] = {"ticks": ticks, "first": first, "last": last, "caps": caps}
+        t_min, t_max = min(t_min, first), max(t_max, last)
+    # Timeline of 10-minute slots from the first local Monday 00:00.
+    d0 = dt.datetime.fromtimestamp(t_min, zone)
+    monday = (d0 - dt.timedelta(days=d0.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    t0 = int(monday.timestamp())
+    n_slots = int((t_max - t0) // (SLOT_MIN * 60)) + 1
+    slot_start = t0 + np.arange(n_slots) * SLOT_MIN * 60
+    how, week = np.empty(n_slots), np.empty(n_slots, dtype=int)
+    for i, s in enumerate(slot_start):
+        d = dt.datetime.fromtimestamp(int(s) + SLOT_MIN * 30, zone)
+        how[i] = d.weekday() * 24 + d.hour + d.minute / 60
+        week[i] = (d.date() - monday.date()).days // 7
+    for key, c in cells.items():
+        live = ((slot_start >= c["first"]) & (slot_start < c["last"])).astype(float)
+        for cap, end in c["caps"]:
+            live[(slot_start >= cap) & (slot_start < end)] = 0.0
+        c["live"] = live
+        idx = ((c["ticks"] - t0) // (SLOT_MIN * 60)).astype(int)
+        c["tick_week"] = week[idx]
+        c["tick_how"] = np.array([local_how(t, zone) for t in c["ticks"]])
+    return cells, how, week
+
+
+def local_how(t, zone):
+    d = dt.datetime.fromtimestamp(int(t), zone)
+    return d.weekday() * 24 + d.hour + d.minute / 60 + d.second / 3600
+
+
+# --- shape families -----------------------------------------------------------
+
+def features(family, K=0, Kw=2):
+    """Return (f, n_params): f(how array) -> design matrix, log a = X beta."""
+    def weekday(h):
+        d = np.floor(h / 24).astype(int) % 7
+        return np.stack([(d == k).astype(float) for k in range(1, 7)], 1)
+
+    def daily(h, k):
+        hod = h % 24
+        return np.concatenate([np.stack([np.cos(2 * np.pi * m * hod / 24), np.sin(2 * np.pi * m * hod / 24)], 1)
+                               for m in range(1, k + 1)], 1)
+
+    def weekend(h):
+        return (np.floor(h / 24).astype(int) % 7 >= 5).astype(float)[:, None]
+
+    if family == "S0":
+        return (lambda h: np.zeros((len(h), 0))), 0
+    if family == "S1":
+        return weekday, 6
+    if family == "S2":
+        return (lambda h: np.concatenate([weekday(h), daily(h, K)], 1)), 6 + 2 * K
+    if family == "S3":
+        return (lambda h: np.concatenate([weekday(h), daily(h, K), weekend(h) * daily(h, Kw)], 1)), 6 + 2 * K + 2 * Kw
+    if family == "S4":
+        return (lambda h: np.concatenate(
+            [weekday(h), np.stack([(np.floor(h % 24).astype(int) == k).astype(float) for k in range(1, 24)], 1)], 1)), 29
+    if family == "S5":
+        return (lambda h: np.stack([(np.floor(h).astype(int) % 168 == k).astype(float) for k in range(1, 168)], 1)), 167
+    raise ValueError(family)
+
+
+def smooth_penalty(family, p):
+    """Second-difference penalty over the 168 hourly bins (S5), else none."""
+    if family != "S5":
+        return np.zeros((p, p))
+    D = np.zeros((168, 168))
+    for h in range(168):
+        D[h, h], D[h, (h - 1) % 168], D[h, (h + 1) % 168] = -2, 1, 1
+    D = D[:, 1:]            # bin 0 is the reference level
+    return D.T @ D
+
+
+# --- penalized log-linear density fit -----------------------------------------
+
+class Data:
+    """Sufficient statistics for fitting and scoring on a set of weeks."""
+
+    def __init__(self, cells, how, week, feat, weeks):
+        self.items = []      # per (cell key, week): tick feature sum, n ticks, grid X, live weights
+        for key, c in cells.items():
+            for w in weeks:
+                m = c["tick_week"] == w
+                n = int(m.sum())
+                sl = (week == w) & (c["live"] > 0)
+                if n == 0 or not sl.any():
+                    continue
+                self.items.append({"key": key, "week": w, "n": n,
+                                   "S": feat(c["tick_how"][m]).sum(0),
+                                   "Xt": feat(c["tick_how"][m]),
+                                   "G": feat(how[sl]), "W": c["live"][sl] * SLOT_MIN / 60})
+
+
+def loglik_grad_hess(beta, it):
+    eta = it["G"] @ beta
+    mx = eta.max()
+    wexp = it["W"] * np.exp(eta - mx)
+    Z = wexp.sum()
+    q = wexp / Z
+    Ex = q @ it["G"]
+    ll = it["S"] @ beta - it["n"] * (np.log(Z) + mx)
+    g = it["S"] - it["n"] * Ex
+    Gc = it["G"] - Ex
+    H = -it["n"] * (Gc.T * q) @ Gc
+    return ll, g, H
+
+
+def fit_structure(data, maps, n_theta, P, iters=60):
+    """Maximize sum ll - 0.5 theta' P theta, with beta_c = M_c theta (Newton)."""
+    theta = np.zeros(n_theta)
+    if n_theta == 0:
+        return theta
+
+    def total(th):
+        f, g, H = -0.5 * th @ P @ th, -P @ th, -P.copy()
+        for it in data.items:
+            M = maps[it["key"]]
+            ll, gb, Hb = loglik_grad_hess(M @ th, it)
+            f += ll
+            g += M.T @ gb
+            H += M.T @ Hb @ M
+        return f, g, H
+
+    f, g, H = total(theta)
+    for _ in range(iters):
+        step = np.linalg.solve(-H + 1e-9 * np.eye(n_theta), g)
+        t = 1.0
+        while t > 1e-6:
+            f2, g2, H2 = total(theta + t * step)
+            if f2 >= f - 1e-10:
+                break
+            t /= 2
+        theta, f, g, H = theta + t * step, f2, g2, H2
+        if np.abs(t * step).max() < 1e-7:
+            break
+    return theta
+
+
+def structure_maps(pooling, keys, agents, p):
+    """Parameter layout: returns (maps, n_theta, blocks) with blocks the index
+    ranges of the fleet part and of each offset/independent part."""
+    if pooling == "P0":
+        return {k: np.eye(p) for k in keys}, p, {"fleet": range(0, p), "off": []}
+    if pooling == "P3":
+        maps, off = {}, []
+        for i, k in enumerate(keys):
+            M = np.zeros((p, p * len(keys)))
+            M[:, i * p:(i + 1) * p] = np.eye(p)
+            maps[k] = M
+            off.append(range(i * p, (i + 1) * p))
+        return maps, p * len(keys), {"fleet": [], "off": off}
+    if pooling == "P2":
+        maps, off = {}, []
+        for k in keys:
+            a = agents.index(k[0])
+            M = np.zeros((p, p * (1 + len(agents))))
+            M[:, :p] = np.eye(p)
+            M[:, p * (1 + a):p * (2 + a)] = np.eye(p)
+            maps[k] = M
+        off = [range(p * (1 + a), p * (2 + a)) for a in range(len(agents))]
+        return maps, p * (1 + len(agents)), {"fleet": range(0, p), "off": off}
+    raise ValueError(pooling)
+
+
+def penalty(pooling, n_theta, blocks, p, lam, family):
+    P = np.zeros((n_theta, n_theta))
+    Sm = smooth_penalty(family, p)
+    base = 1e-3
+    for i in blocks["fleet"]:
+        P[i, i] += base
+    if len(blocks["fleet"]):
+        f = list(blocks["fleet"])
+        P[np.ix_(f, f)] += lam["smooth"] * Sm
+    for r in blocks["off"]:
+        r = list(r)
+        P[np.ix_(r, r)] += lam["ridge"] * np.eye(p) + lam["smooth"] * Sm if pooling != "P3" else \
+            base * np.eye(p) + lam["smooth"] * Sm
+    return P
+
+
+def score(data, betas):
+    """Per (cell, week): total log-density gain over flat, and tick count."""
+    out = []
+    for it in data.items:
+        beta = betas[it["key"]]
+        L = it["W"].sum()
+        if beta is None or len(beta) == 0:
+            gain = 0.0
+        else:
+            eta_g = it["G"] @ beta
+            mx = eta_g.max()
+            logZ = np.log((it["W"] * np.exp(eta_g - mx)).sum()) + mx
+            gain = (it["Xt"] @ beta).sum() - it["n"] * logZ + it["n"] * np.log(L)
+        out.append((it["key"], it["week"], gain, it["n"]))
+    return out
+
+
+def fit_variant(cells, how, week, family, K, pooling, train_weeks, agents, lam):
+    feat, p = features(family, K)
+    keys = sorted(cells)
+    data = Data(cells, how, week, feat, train_weeks)
+    if pooling == "P1":
+        # Fleet shape, then per-agent transforms of it: shift, contrast, weekend.
+        maps, n_theta, blocks = structure_maps("P0", keys, agents, p)
+        beta_f = fit_structure(data, maps, n_theta, penalty("P0", n_theta, blocks, p, lam, family))
+        return {"kind": "P1", "feat": feat, "beta_f": beta_f,
+                "tf": fit_transforms(cells, how, week, feat, beta_f, train_weeks, agents)}
+    maps, n_theta, blocks = structure_maps(pooling, keys, agents, p)
+    theta = fit_structure(data, maps, n_theta, penalty(pooling, n_theta, blocks, p, lam, family))
+    return {"kind": "lin", "feat": feat, "betas": {k: maps[k] @ theta for k in keys}}
+
+
+def transformed_logshape(feat, beta_f, h, s, gam, om):
+    return gam * (feat((h - s) % 168) @ beta_f) + om * ((np.floor(h / 24).astype(int) % 7) >= 5)
+
+
+def fit_transforms(cells, how, week, feat, beta_f, weeks, agents):
+    tf = {}
+    for a in agents:
+        its = []
+        for key, c in cells.items():
+            if key[0] != a:
+                continue
+            for w in weeks:
+                m = c["tick_week"] == w
+                sl = (week == w) & (c["live"] > 0)
+                if m.sum() and sl.any():
+                    its.append((c["tick_how"][m], how[sl], c["live"][sl]))
+        if not its:
+            tf[a] = (0.0, 1.0, 0.0)
+            continue
+
+        def nll(x):
+            s, lg, om = x
+            gam = math.exp(lg)
+            f = 0.5 * (s / 3) ** 2 + 0.5 * (lg / 0.5) ** 2 + 0.5 * om ** 2
+            for th, gh, gw in its:
+                eg = transformed_logshape(feat, beta_f, gh, s, gam, om)
+                mx = eg.max()
+                f -= transformed_logshape(feat, beta_f, th, s, gam, om).sum() - len(th) * (
+                    np.log((gw * np.exp(eg - mx)).sum()) + mx)
+            return f
+
+        r = optimize.minimize(nll, [0.0, 0.0, 0.0], method="Nelder-Mead",
+                              options={"xatol": 1e-3, "fatol": 1e-3, "maxiter": 400})
+        tf[a] = (r.x[0], math.exp(r.x[1]), r.x[2])
+    return tf
+
+
+def score_variant(model, cells, how, week, weeks):
+    if model["kind"] == "lin":
+        data = Data(cells, how, week, model["feat"], weeks)
+        return score(data, model["betas"])
+    out = []
+    for key, c in cells.items():
+        s, gam, om = model["tf"].get(key[0], (0.0, 1.0, 0.0))
+        for w in weeks:
+            m = c["tick_week"] == w
+            sl = (week == w) & (c["live"] > 0)
+            n = int(m.sum())
+            if not n or not sl.any():
+                continue
+            eg = transformed_logshape(model["feat"], model["beta_f"], how[sl], s, gam, om)
+            W = c["live"][sl] * SLOT_MIN / 60
+            mx = eg.max()
+            logZ = np.log((W * np.exp(eg - mx)).sum()) + mx
+            gain = transformed_logshape(model["feat"], model["beta_f"], c["tick_how"][m], s, gam, om).sum() \
+                - n * logZ + n * np.log(W.sum())
+            out.append((key, w, gain, n))
+    return out
+
+
+# --- experiment ---------------------------------------------------------------
+
+VARIANTS = ([("S0", 0)] + [("S1", 0)] + [("S2", k) for k in (1, 2, 3, 4, 6, 8)]
+            + [("S3", k) for k in (3, 4, 6)] + [("S4", 0), ("S5", 0)])
+POOLINGS = ["P0", "P1", "P2", "P3"]
+
+
+def n_params(family, K, pooling, n_agents, n_cells):
+    p = features(family, K)[1]
+    return {"P0": p, "P1": p + 3 * n_agents, "P2": p * (1 + n_agents), "P3": p * n_cells}[pooling]
+
+
+def needs_lambda(family, pooling):
+    return pooling == "P2" or family == "S5"
+
+
+def choose_lambda(cells, how, week, family, K, pooling, train_weeks, agents):
+    """Inner validation: fit on all but the last two training weeks, score
+    those two, and keep the best penalty."""
+    if not needs_lambda(family, pooling) or len(train_weeks) < 4:
+        return {"ridge": 3.0, "smooth": 3.0}
+    inner, val = train_weeks[:-2], train_weeks[-2:]
+    best, best_lam = -math.inf, None
+    for lr in (LAMBDAS if pooling == "P2" else [3.0]):
+        for ls in (LAMBDAS if family == "S5" else [0.0]):
+            lam = {"ridge": lr, "smooth": ls}
+            m = fit_variant(cells, how, week, family, K, pooling, inner, agents, lam)
+            g = sum(x[2] for x in score_variant(m, cells, how, week, val))
+            if g > best:
+                best, best_lam = g, lam
+    return best_lam
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--db", default=os.path.expanduser("~/.local/share/cch/events.db"))
+    ap.add_argument("--tz", help="IANA zone for hour of week (default: the system zone)")
+    ap.add_argument("--min-train", type=int, default=4)
+    ap.add_argument("--only", help="comma-separated variant names to run, e.g. S0,S2K3,S5")
+    ap.add_argument("--plot")
+    a = ap.parse_args()
+    tz = a.tz or os.environ.get("TZ") or "/".join(os.path.realpath("/etc/localtime").split("/")[-2:])
+    only = set(a.only.split(",")) if a.only else None
+    cells, how, week = build(a.db, tz)
+    agents = sorted({k[0] for k in cells})
+    weeks = sorted({int(w) for c in cells.values() for w in np.unique(c["tick_week"])})
+    test_weeks = weeks[a.min_train:]
+    print(f"cells: {len(cells)}  agents: {len(agents)}  weeks: {len(weeks)}  test weeks: {len(test_weeks)}  "
+          f"ticks: {sum(len(c['ticks']) for c in cells.values())}")
+    results = {}
+    for family, K in VARIANTS:
+        if only and f"{family}{'K' + str(K) if K else ''}" not in only:
+            continue
+        for pooling in POOLINGS:
+            if family == "S0" and pooling != "P0":
+                continue
+            per_week, rows = {}, []
+            for w in test_weeks:
+                train = [x for x in weeks if x < w]
+                lam = choose_lambda(cells, how, week, family, K, pooling, train, agents)
+                m = fit_variant(cells, how, week, family, K, pooling, train, agents, lam)
+                rows += score_variant(m, cells, how, week, [w])
+            for key, w, g, n in rows:
+                per_week.setdefault(w, [0.0, 0])
+                per_week[w][0] += g
+                per_week[w][1] += n
+            tot_g = sum(v[0] for v in per_week.values())
+            tot_n = sum(v[1] for v in per_week.values())
+            results[(family, K, pooling)] = {"rows": rows, "per_week": per_week, "gain": tot_g / tot_n,
+                                             "params": n_params(family, K, pooling, len(agents), len(cells))}
+            print(f"  {family}{'' if not K else ' K=' + str(K):6s} {pooling}: {tot_g / tot_n:+.4f} nats/tick", flush=True)
+    report(results, agents, cells, a.plot)
+
+
+def report(results, agents, cells, plot):
+    best_key = max(results, key=lambda k: results[k]["gain"])
+    best = results[best_key]
+    weeks = sorted(best["per_week"])
+
+    def paired_se(r):
+        d = [r["per_week"][w][0] / r["per_week"][w][1] - best["per_week"][w][0] / best["per_week"][w][1]
+             for w in weeks if w in r["per_week"]]
+        return np.mean(d), np.std(d, ddof=1) / math.sqrt(len(d))
+
+    print("\nvariant        pooling  params  gain(nats/tick)  vs best (se, clustered by week)")
+    order = sorted(results, key=lambda k: (results[k]["params"], k))
+    for k in order:
+        r = results[k]
+        d, se = paired_se(r)
+        name = f"{k[0]}{'' if not k[1] else ' K=' + str(k[1])}"
+        print(f"  {name:12s} {k[2]:6s} {r['params']:6d}   {r['gain']:+.4f}        {d:+.4f} ({se:.4f})")
+    within = [k for k in results if paired_se(results[k])[0] >= -paired_se(results[k])[1]]
+    simplest = min(within, key=lambda k: results[k]["params"])
+    print(f"\nbest: {best_key}  gain {best['gain']:+.4f}")
+    print(f"simplest within 1 SE of best: {simplest}  params {results[simplest]['params']}  "
+          f"gain {results[simplest]['gain']:+.4f}")
+    print("\nper-agent gain (nats/tick) for best and simplest:")
+    for k in {best_key, simplest}:
+        by = {}
+        for key, w, g, n in results[k]["rows"]:
+            by.setdefault(key[0], [0.0, 0])
+            by[key[0]][0] += g
+            by[key[0]][1] += n
+        print(f"  {k}: " + "  ".join(f"{a} {v[0] / v[1]:+.3f} ({v[1]} ticks)" for a, v in sorted(by.items())))
+    if plot:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(6.5, 3.2))
+        for pooling, mk in zip(POOLINGS, "osD^"):
+            ks = sorted([k for k in results if k[2] == pooling], key=lambda k: results[k]["params"])
+            xs = [max(results[k]["params"], 1) for k in ks]
+            ax.plot(xs, [results[k]["gain"] for k in ks], marker=mk, lw=0.8, ms=3.5, label=pooling)
+        ax.set_xscale("log")
+        ax.set_xlabel("parameters (log scale)")
+        ax.set_ylabel("held-out gain over flat (nats/tick)")
+        ax.legend(frameon=False, fontsize=7)
+        fig.tight_layout()
+        fig.savefig(plot)
+
+
+if __name__ == "__main__":
+    main()
