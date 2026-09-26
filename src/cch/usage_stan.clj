@@ -57,6 +57,7 @@
                       ;; stopped reporting a window) only adds cost.
                       (filter #(pos? (reduce + (map :y (:blocks %)))))
                       vec)
+        agents (vec (distinct (map (comp first :cell) per-cell)))
         fleet (m/smooth-profile (m/pooled-rates (map #(m/bin-stats (:series %) zone) per-cell)))
         blocks (mapcat :blocks per-cell)
         entries (mapcat :entries blocks)
@@ -67,6 +68,8 @@
                   {:C (count per-cell)
                    :T 2
                    :ctype (mapv #(type-index (second (:cell %))) per-cell)
+                   :A (count agents)
+                   :agent (mapv #(inc (.indexOf ^java.util.List agents (first (:cell %)))) per-cell)
                    :x0 [(get-in m/specs [:seven-day :x0]) (get-in m/specs [:five-hour :x0])]
                    :NB (count blocks)
                    :y (mapv :y blocks)

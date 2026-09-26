@@ -323,15 +323,29 @@
 
 ;; --- filter ---
 
-(defn- interval-prob
-  "P(y in [y-q, y+q]) under y/(y+beta) ~ Beta(kappa*A, alpha)."
+(defn interval-prob
+  "P(y in [y-q, y+q]) under y/(y+beta) ~ Beta(kappa*A, alpha).
+
+  Differences are taken in the smaller tail. When both CDF values are near
+  1 (a heavy block the parameters did not expect), I(x_hi) - I(x_lo) cancels
+  to zero in double precision; the upper-tail form
+  I_{1-x_lo}(alpha, k) - I_{1-x_hi}(alpha, k), with 1-x = beta/(y+beta)
+  computed without subtraction, keeps full precision (exact to ~1e-12
+  against a 40-digit reference, where the naive difference hit the 1e-300
+  floor on outcomes with true log probability near -38)."
   [y A al be kappa]
   (let [k (* kappa A) q 0.5]
     (if (<= k 1e-9)
       (if (< y q) 1.0 1e-300)
-      (let [hi (+ y q) lo (max 0.0 (- y q))]
-        (max 1e-300 (- (num/beta-inc k al (/ hi (+ hi be)))
-                       (num/beta-inc k al (/ lo (+ lo be)))))))))
+      (let [hi (+ y q)
+            lo (max 0.0 (- y q))
+            x-lo (/ lo (+ lo be))
+            i-lo (num/beta-inc k al x-lo)]
+        (max 1e-300
+             (if (> i-lo 0.5)
+               (- (num/beta-inc al k (/ be (+ lo be)))
+                  (num/beta-inc al k (/ be (+ hi be))))
+               (- (num/beta-inc k al (/ hi (+ hi be))) i-lo)))))))
 
 (defn run-filter
   "Filter the intensity and on/off states through `blks`. Returns

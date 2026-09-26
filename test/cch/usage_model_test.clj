@@ -173,3 +173,13 @@
         {:keys [x theta]} (m/fit blks seven (:x0 seven) :fixed {5 -30.0})]
     (is (= -30.0 (nth x 5)))
     (is (< (nth theta 5) 1e-9) "d pinned at ~0: no memory between blocks")))
+
+(deftest interval-prob-keeps-precision-in-the-upper-tail
+  (testing "log P matches a 40-digit reference where CDF differencing cancels"
+    ;; [y kappa*A alpha beta log-P]; the naive difference returned 1e-300 here.
+    (doseq [[y k al be expected] [[8 0.0170749 39.9094 6.66726 -37.22500457]
+                                  [2 3.28059 42.9453 0.803522 -38.48696716]
+                                  [21 1.35711 10.4581 0.518352 -38.70770448]
+                                  [3 4.43641 64.1322 2.16049 -39.34885232]]]
+      (is (< (Math/abs (- expected (Math/log (m/interval-prob y 1.0 al be k)))) 1e-3)
+          (str [y k al be])))))
