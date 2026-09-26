@@ -433,7 +433,12 @@
   [stps x-start x-hat {:keys [z-draws]} k & {:keys [seed] :or {seed 9}}]
   (let [obj (objective-c stps x-start)
         f0 (obj x-hat)
-        lw (mapv (fn [[z x]] (+ (- f0 (obj x)) (* 0.5 (reduce + (map * z z))))) z-draws)
+        ;; a draw whose likelihood is not finite (overflowing rates) gets no weight
+        lw (mapv (fn [[z x]] (let [fx (obj x)]
+                               (if (Double/isFinite fx)
+                                 (+ (- f0 fx) (* 0.5 (reduce + (map * z z))))
+                                 Double/NEGATIVE_INFINITY)))
+                 z-draws)
         mx (apply max lw)
         w (mapv #(Math/exp (- % mx)) lw)
         tot (reduce + w)
