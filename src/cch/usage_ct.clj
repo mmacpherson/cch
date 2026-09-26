@@ -60,6 +60,21 @@
         stat (/ q-on s)]
     (+ stat (* (- p stat) (Math/exp (- (* s dt)))))))
 
+(defn- on-off-mix
+  "Mix an on branch with log evidence `lz` (prior weight `pp`) and an off
+  branch that emits only zeros. Returns [r log-p]: the on responsibility
+  and log P(y), in log space so an observation the on branch finds nearly
+  impossible cannot underflow to 0/0. Usage in the hour means the hour was
+  on, so r = 1 exactly."
+  [pp lz y]
+  (let [a (+ (Math/log pp) lz)]
+    (if (>= y 0.5)
+      [1.0 a]
+      (let [b (Math/log (- 1.0 pp))
+            mx (max a b)
+            lt (+ mx (Math/log (+ (Math/exp (- a mx)) (Math/exp (- b mx)))))]
+        [(Math/exp (- a lt)) lt]))))
+
 (defn run-filter
   "Filter the on/off chain and the two intensity beliefs through hourly
   `stps`. Returns {:fast [a b] :slow [a b] :p-on p :loglik L}."
@@ -76,14 +91,12 @@
               af (+ (* df af) (* (- 1.0 df) as))
               bf (+ (* df bf) (* (- 1.0 df) bs))
               pp (on-transition p q-on q-off 1.0)
-              pg (m/interval-prob y A af bf kappa)
-              tot (+ (* pp pg) (* (- 1.0 pp) (if (< y 0.5) 1.0 0.0)))
-              r (/ (* pp pg) tot)]
+              [r lp] (on-off-mix pp (Math/log (m/interval-prob y A af bf kappa)) y)]
           (recur more
                  (+ af (* r kappa A)) (+ bf (* r y))
                  (+ as (* w r kappa A)) (+ bs (* w r y))
                  r
-                 (if score? (+ ll (Math/log (max tot 1e-300))) ll)))))))
+                 (if score? (+ ll lp) ll)))))))
 
 (defn fit
   "Maximum-likelihood parameters for `stps` (with a weak prior), holding the
@@ -262,11 +275,18 @@
   by Newton with numerical derivatives."
   [y A kappa m v]
   (let [g (fn [e] (- (Math/log (obs-prob y A kappa e)) (/ (Math/pow (- e m) 2) (* 2.0 v))))
-        h 1e-4]
+        ;; the likelihood is a difference of tail probabilities; at tiny
+        ;; shapes both sit near 1e-8 with ~1e-16 absolute error, so a small
+        ;; step turns that rounding into O(1) curvature noise
+        h 1e-2]
     (loop [e m i 0]
       (let [g0 (g e) gp (g (+ e h)) gm (g (- e h))
             d1 (/ (- gp gm) (* 2 h))
-            d2 (min -1e-9 (/ (+ gp gm (* -2 g0)) (* h h)))
+            ;; the prior alone contributes -1/v and a likelihood can only
+            ;; sharpen it; on a near-uninformative hour the finite-difference
+            ;; curvature of the likelihood is noise, and letting it flatten d2
+            ;; would give v-hat > v and inflate the state covariance
+            d2 (min (/ -1.0 v) (/ (+ gp gm (* -2 g0)) (* h h)))
             e2 (- e (/ d1 d2))
             e2 (max (- m (* 10 (Math/sqrt v))) (min (+ m (* 10 (Math/sqrt v))) e2))]
         (if (or (> i 30) (< (Math/abs (- e2 e)) 1e-7))
@@ -274,7 +294,7 @@
           (recur e2 (inc i)))))))
 
 (defn- posterior-moments
-  "Evidence P(y | past), mean, and variance of p(eta | y) proportional to
+  "Log evidence log P(y | past), mean, and variance of p(eta | y) proportional to
   P(y | eta) N(eta; m, v), by Gauss-Hermite centered on the Laplace mode
   (adaptive, so an observation far sharper than the prior is still
   resolved). Matching the posterior's moments rather than its mode keeps
@@ -284,20 +304,22 @@
   (let [[e-hat v-hat] (laplace-eta y A kappa m v)
         {xs :x ws :w} num/gauss-hermite-10
         s (Math/sqrt (* 2.0 v-hat))
-        ;; integrand divided by the Gauss-Hermite weight function exp(-x^2)
-        terms (map (fn [x w]
-                     (let [e (+ e-hat (* s x))]
-                       [e (* w (Math/exp (* x x)) s
-                             (obs-prob y A kappa e)
-                             (/ (Math/exp (- (/ (Math/pow (- e m) 2) (* 2.0 v))))
-                                (Math/sqrt (* 2.0 Math/PI v))))]))
-                   xs ws)
-        z (reduce + (map second terms))]
-    (if (or (not (pos? z)) (Double/isNaN z))
-      [(predictive-on y A kappa m v) e-hat v-hat]
-      (let [mean (/ (reduce + (map (fn [[e t]] (* e t)) terms)) z)
-            var (/ (reduce + (map (fn [[e t]] (* (Math/pow (- e mean) 2) t)) terms)) z)]
-        [z mean (max 1e-12 (min v var))]))))
+        ;; log of the integrand divided by the Gauss-Hermite weight exp(-x^2)
+        terms (mapv (fn [x w]
+                      (let [e (+ e-hat (* s x))]
+                        [e (+ (Math/log w) (* x x) (Math/log s)
+                              (Math/log (obs-prob y A kappa e))
+                              (- (/ (Math/pow (- e m) 2) (* 2.0 v)))
+                              (* -0.5 (Math/log (* 2.0 Math/PI v))))]))
+                    xs ws)
+        mx (apply max (map second terms))]
+    (if-not (Double/isFinite mx)
+      [(Math/log (predictive-on y A kappa m v)) e-hat v-hat]
+      (let [ws (mapv (fn [[_ lt]] (Math/exp (- lt mx))) terms)
+            z (reduce + ws)
+            mean (/ (reduce + (map (fn [[e _] w] (* e w)) terms ws)) z)
+            var (/ (reduce + (map (fn [[e _] w] (* (Math/pow (- e mean) 2) w)) terms ws)) z)]
+        [(+ mx (Math/log z)) mean (max 1e-12 (min v var))]))))
 
 (defn run-filter-c
   "Filter arm C through hourly `stps`. Returns
@@ -317,9 +339,8 @@
               pp (on-transition p q-on q-off 1.0)
               m (+ mu mf ms)
               v (+ pff pss (* 2 pfs))
-              [pon e-hat v-hat] (posterior-moments y A kappa m v)
-              tot (+ (* pp pon) (* (- 1.0 pp) (if (< y 0.5) 1.0 0.0)))
-              r (/ (* pp pon) tot)
+              [lz e-hat v-hat] (posterior-moments y A kappa m v)
+              [r lp] (on-off-mix pp lz y)
               ;; on branch: condition the state on the posterior moments of eta
               gf (/ (+ pff pfs) v) gs (/ (+ pss pfs) v)
               shrink (/ (- v v-hat) v)
@@ -335,7 +356,7 @@
               pfs2 (+ (* r (+ pfs-on (* (- mf-on mf2) (- ms-on ms2))))
                       (* (- 1.0 r) (+ pfs (* (- mf mf2) (- ms ms2)))))]
           (recur more mf2 ms2 pff2 pss2 pfs2 r
-                 (if score? (+ ll (Math/log (max tot 1e-300))) ll)))))))
+                 (if score? (+ ll lp) ll)))))))
 
 (defn- objective-c
   "Negative log likelihood of `stps` plus the weak sd-3 prior around `x-start`."
