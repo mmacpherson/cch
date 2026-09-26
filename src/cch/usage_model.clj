@@ -274,13 +274,13 @@
 
 (defn harmonic-design
   "Design row for hour-of-week bin h (evaluated at the bin midpoint):
-  intercept, six weekday levels (Monday is the reference), and `k` daily
-  harmonic pairs."
-  [k h]
+  intercept, six weekday levels (Monday is the reference) unless `weekday?`
+  is false, and `k` daily harmonic pairs."
+  [k h & {:keys [weekday?] :or {weekday? true}}]
   (let [hod (+ (mod h 24) 0.5)
         day (quot h 24)]
     (vec (concat [1.0]
-                 (for [d (range 1 7)] (if (= day d) 1.0 0.0))
+                 (when weekday? (for [d (range 1 7)] (if (= day d) 1.0 0.0)))
                  (mapcat (fn [m] (let [w (/ (* 2 Math/PI m hod) 24)] [(Math/cos w) (Math/sin w)]))
                          (range 1 (inc k)))))))
 
@@ -291,10 +291,10 @@
   The profile ladder (claude-code-hooks-jgb) found one fleet shape with k = 4
   (14 parameters) best out of sample: more harmonics, per-agent shapes, and
   168 free bins all did no better or worse. Returns a 168-vector, mean 1."
-  [stats k]
+  [stats k & {:keys [weekday?] :or {weekday? true}}]
   (let [u (apply mapv + (map normalized-usage stats))
         e (apply mapv + (map :exposure stats))
-        xs (mapv #(harmonic-design k %) (range 168))
+        xs (mapv #(harmonic-design k % :weekday? weekday?) (range 168))
         p (count (first xs))
         ridge 1e-3
         step (fn [beta]

@@ -182,11 +182,12 @@
    ["fleet k=4" :fleet 4] ["fleet k=12" :fleet 12] ["fleet k=36" :fleet 36]
    ["two-level 12/12" [:two-level 12] 12] ["two-level 36/12" [:two-level 12] 36]
    ["fleet EB k" :fleet :eb]
-   ["fleet harmonic K=4" :harmonic 4]])
+   ["fleet harmonic K=4" :harmonic 4]
+   ["harmonic K=4, no weekday" :harmonic-flat 4]])
 
 (def ^:private focus-variants
   "The comparison that decides adoption (claude-code-hooks-20r)."
-  #{"independent" "fleet EB k" "fleet harmonic K=4"})
+  #{"independent" "fleet EB k" "fleet harmonic K=4" "harmonic K=4, no weekday"})
 
 (defn- variant-profile
   "Smoothed profile for `cell` at time t under `variant`; nil = independent.
@@ -196,6 +197,9 @@
   (cond
     (= target :harmonic)
     (m/harmonic-profile (keep #(stats-at % t) cells) k)
+
+    (= target :harmonic-flat)
+    (m/harmonic-profile (keep #(stats-at % t) cells) k :weekday? false)
 
     target
     (let [own (stats-at cell t)
