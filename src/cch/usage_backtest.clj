@@ -275,9 +275,13 @@
         bool (fn [k] #(if (k %) 1.0 0.0))
         cov90 (ev/level rows window-key (bool :cov90) :estimator estimator)
         {:keys [delta lo hi]} (ev/paired rows base window-key :crps :estimator estimator)]
-    (format "  %-24s %6.2f  %+6.2f [%+6.2f, %+6.2f]  %6.1f %5.0f%% %3.0f%% [%2.0f-%3.0f] %s"
-            label (lv :crps) delta lo hi (lv :err) (* 100 (lv (bool :cov50)))
-            (* 100 (:est cov90)) (* 100 (:lo cov90)) (* 100 (:hi cov90))
+    ;; too few calendar weeks for an interval: say so, rather than print a
+    ;; NaN that reads like a numerical failure
+    (format "  %-24s %6.2f  %+6.2f %-17s  %6.1f %5.0f%% %3.0f%% %-9s %s"
+            label (lv :crps) delta
+            (if (Double/isNaN lo) "[n/a: few weeks]" (format "[%+6.2f, %+6.2f]" lo hi))
+            (lv :err) (* 100 (lv (bool :cov50))) (* 100 (:est cov90))
+            (if (Double/isNaN (:lo cov90)) "[n/a]" (format "[%2.0f-%3.0f]" (* 100 (:lo cov90)) (* 100 (:hi cov90))))
             (if (:brier (first rows)) (format "%7.4f" (lv :brier)) ""))))
 
 (defn- print-pooled-7d
@@ -303,7 +307,8 @@
         (println (summary-line label (pooled label) base-rows :seven-day :estimator estimator)))
       (doseq [[a b] contrasts
               :let [{:keys [delta lo hi]} (ev/paired (pooled a) (pooled b) :seven-day :crps :estimator estimator)]]
-        (println (format "  %s vs %s  %+6.2f [%+.2f, %+.2f]" a b delta lo hi))))))
+        (println (format "  %s vs %s  %+6.2f %s" a b delta
+                         (if (Double/isNaN lo) "[n/a: few weeks]" (format "[%+.2f, %+.2f]" lo hi))))))))
 
 (defn run-pooling
   "Print the profile pooling experiment for every agent/window with history.
