@@ -370,10 +370,27 @@ bin/cch-usage-stan-fit data.json draws.json --warmup 300 --samples 200
   zero usage. They should be missing (dropped from the likelihood), and a jump
   after a gap should enter as an observed total over the gap, which the gamma
   process handles exactly.
+- *Calendar blocks.* The gamma process @eq-gp is invariant to aggregation:
+  increments over adjacent intervals add up exactly. The block structure is not.
+  The on/off state is defined per block, the discount $d$ counts blocks, and the
+  intensity is constant within a block. This is why the burstiness $kappa$ is
+  scale dependent, and why the block length (24 h at a 04:00 anchor for the
+  7-day window, 1 h for the 5-hour window) is a discrete model choice made by
+  predictive comparison rather than something the data identify. A
+  continuous-time formulation removes it. The discounted update
+  @eq-relax is the moment-matched filter of a mean-reverting gamma-type
+  intensity (a CIR or gamma-OU process) with $d = e^(-theta Delta t)$. With
+  $d$ indexed by elapsed time, irregular observation intervals enter natively.
+  On/off becomes a two-state continuous-time Markov chain whose transition over
+  $Delta t$ is a closed-form $2 times 2$ matrix exponential.
 - *Two timescales.* Usage has session momentum within a day and persistence
   across days. One discount cannot hold both, and hourly blocks for the 7-day
-  window were worse for weekly totals. A two-level state (hourly and daily
-  intensity) would capture both.
+  window were worse for weekly totals. In continuous time this is a sum of a
+  fast and a slow intensity component with separate decay rates. With
+  parameters as per-hour rates, an agent's 5-hour and 7-day meters could share
+  one parameter set, fitted jointly. The likelihood stays a deterministic
+  filter recursion, so both the maximum-likelihood fit and the Stan model carry
+  over. The latent paths are marginalized, not sampled.
 - *Sequential updating.* Between weekly posterior fits, draws could be
   reweighted daily by the likelihood of new blocks (PSIS, refitting when the
   Pareto $hat(k)$ exceeds about 0.7). Parameter drift, as a slow random walk,
@@ -386,6 +403,11 @@ bin/cch-usage-stan-fit data.json draws.json --warmup 300 --samples 200
 
 #set text(size: 8pt)
 #set par(spacing: 0.4em)
+- Barndorff-Nielsen, O. E. and Shephard, N. (2001). Non-Gaussian
+  Ornstein-Uhlenbeck-based models and some of their uses in financial
+  economics. _JRSS B_ 63, 167--241.
+- Cox, J. C., Ingersoll, J. E. and Ross, S. A. (1985). A theory of the term
+  structure of interest rates. _Econometrica_ 53, 385--407.
 - Fay, R. E. and Herriot, R. A. (1979). Estimates of income for small places:
   an application of James-Stein procedures to census data. _JASA_ 74, 269--277.
 - Gneiting, T. and Raftery, A. E. (2007). Strictly proper scoring rules,
