@@ -14,6 +14,7 @@
             [cch.forecast :as forecast]
             [cch.projections :as proj]
             [cch.usage-ct :as ct]
+            [cch.usage-eval :as ev]
             [cch.usage-model :as m]
             [cch.usage-stan :as stan]
             [clojure.java.shell :as shell]
@@ -246,7 +247,7 @@
             t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
             :let [g (m/forecast model (rows-before t) spec zone t (:eff-end w) (pct-at wobs t) :path? false)
                   in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))]]
-        {:win i
+        {:win i :week (quot (:start w) 604800) :hours (/ (- t (:start w)) 3600.0)
          :crps (m/crps (:draws g) final 100.0)
          :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
          :cov50 (in? (:q25 g) (:q75 g))
@@ -256,18 +257,28 @@
 (defn- mean [xs] (if (seq xs) (/ (reduce + 0.0 xs) (count xs)) Double/NaN))
 
 (defn- paired-delta
-  "Mean CRPS difference vs `base` rows (same checkpoints), with a standard
-  error clustered by window (checkpoints within a window are correlated)."
-  [rows base]
-  (let [by-win (->> (map (fn [r b] [(:win r) (- (:crps r) (:crps b))]) rows base)
-                    (group-by first)
-                    vals
-                    (map #(mean (map second %))))
-        n (count by-win)
-        m (mean by-win)
-        sd (Math/sqrt (/ (reduce + (map #(Math/pow (- % m) 2) by-win)) (max 1 (dec n))))]
-    {:delta (/ (reduce + (map #(- (:crps %1) (:crps %2)) rows base)) (max 1 (count rows)))
-     :se (/ sd (Math/sqrt (max 1 n)))}))
+  "CRPS difference vs `base` rows (same checkpoints) under cch.usage-eval's
+  estimand (equal weight per window, then per horizon stratum), with a
+  calendar-week block-bootstrap SE and 95% interval."
+  [rows base window-key]
+  (ev/paired rows base window-key :crps))
+
+(def ^:private summary-header
+  (format "  %-24s %6s  %-24s %6s %6s %-14s %7s" "variant" "CRPS" "dCRPS vs base [95%]" "MAE" "cov50" "cov90 [95%]" "Brier"))
+
+(defn- summary-line
+  "One variant under cch.usage-eval's estimand (equal weight per window,
+  then per horizon stratum): levels, the paired CRPS difference vs `base`,
+  and calendar-week block-bootstrap intervals."
+  [label rows base window-key]
+  (let [lv (fn [f] (:est (ev/level rows window-key f)))
+        bool (fn [k] #(if (k %) 1.0 0.0))
+        cov90 (ev/level rows window-key (bool :cov90))
+        {:keys [delta lo hi]} (paired-delta rows base window-key)]
+    (format "  %-24s %6.2f  %+6.2f [%+6.2f, %+6.2f]  %6.1f %5.0f%% %3.0f%% [%2.0f-%3.0f] %s"
+            label (lv :crps) delta lo hi (lv :err) (* 100 (lv (bool :cov50)))
+            (* 100 (:est cov90)) (* 100 (:lo cov90)) (* 100 (:hi cov90))
+            (if (:brier (first rows)) (format "%7.4f" (lv :brier)) ""))))
 
 (defn run-pooling
   "Print the profile pooling experiment for every agent/window with history.
@@ -288,14 +299,9 @@
             :when (seq base-rows)]
       (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
                        (count base-rows) (count (distinct (map :win base-rows)))))
-      (println (format "  %-16s %7s %16s %6s %6s %6s %7s" "variant" "CRPS" "dCRPS (+-se)" "MAE" "cov50" "cov90" "Brier"))
-      (doseq [[label] chosen
-              :let [rows (results label)
-                    {:keys [delta se]} (paired-delta rows base-rows)
-                    frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) rows))))]]
-        (println (format "  %-16s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
-                         label (mean (map :crps rows)) delta se (mean (map :err rows))
-                         (frac :cov50) (frac :cov90) (mean (map :brier rows))))))))
+      (println summary-header)
+      (doseq [[label] chosen]
+        (println (summary-line label (results label) base-rows (second cell)))))))
 
 ;; --- hierarchical Stan comparison ---
 ;;
@@ -383,23 +389,18 @@
                                       :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
                                       :cov50 (in? (:q25 g) (:q75 g)) :cov90 (in? (:lo g) (:hi g))
                                       :brier (Math/pow (- (:p-cap g) (if capped? 1.0 0.0)) 2)}))]]
-                 {:cell cell :win i
+                 {:cell cell :win i :week (quot (:start w) 604800) :hours (/ (- t (:start w)) 3600.0)
                   "independent" (score (m/forecast (fit-at cell refit false) rows spec zone t (:eff-end w) x :path? false))
                   "fleet EB k" (score (m/forecast (fit-at cell refit true) rows spec zone t (:eff-end w) x :path? false))
                   "stan" (score (stan/mixture-forecast (take draws fits) rows spec zone t (:eff-end w) x))}))]
     (doseq [[cell cell-rows] (sort-by key (group-by :cell rows))
-            :let [base (mapv #(get % "independent") cell-rows)
-                  wins (mapv :win cell-rows)]]
+            :let [ids (mapv #(select-keys % [:win :week :hours]) cell-rows)
+                  base (mapv #(merge %2 (get %1 "independent")) cell-rows ids)]]
       (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
-                       (count cell-rows) (count (distinct wins))))
-      (println (format "  %-12s %7s %16s %6s %6s %6s %7s" "variant" "CRPS" "dCRPS (+-se)" "MAE" "cov50" "cov90" "Brier"))
-      (doseq [label ["independent" "fleet EB k" "stan"]
-              :let [scored (mapv #(assoc (get % label) :win (:win %)) cell-rows)
-                    {:keys [delta se]} (paired-delta scored (mapv #(assoc %1 :win %2) base wins))
-                    frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) scored))))]]
-        (println (format "  %-12s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
-                         label (mean (map :crps scored)) delta se (mean (map :err scored))
-                         (frac :cov50) (frac :cov90) (mean (map :brier scored))))))))
+                       (count cell-rows) (count (distinct (map :win cell-rows)))))
+      (println summary-header)
+      (doseq [label ["independent" "fleet EB k" "stan"]]
+        (println (summary-line label (mapv #(merge %2 (get %1 label)) cell-rows ids) base (second cell)))))))
 
 ;; --- momentum experiment (claude-code-hooks-w7v) ---
 ;;
@@ -441,7 +442,7 @@
             t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
             :let [g (m/forecast model (rows-before t) spec zone t (:eff-end w) (pct-at wobs t) :path? false)
                   in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))]]
-        {:win i :hours (/ (- t (:start w)) 3600.0)
+        {:win i :week (quot (:start w) 604800) :hours (/ (- t (:start w)) 3600.0)
          :crps (m/crps (:draws g) final 100.0)
          :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
          :cov50 (in? (:q25 g) (:q75 g))
@@ -469,14 +470,9 @@
             :when (seq base)]
       (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs %s)" (first cell) (name wk)
                        (count base) (count (distinct (map :win base))) (ffirst arms)))
-      (println (format "  %-15s %7s %16s %6s %6s %6s %7s" "arm" "CRPS" "dCRPS (+-se)" "MAE" "cov50" "cov90" "Brier"))
-      (doseq [[label] arms
-              :let [rows (results label)
-                    {:keys [delta se]} (paired-delta rows base)
-                    frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) rows))))]]
-        (println (format "  %-15s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
-                         label (mean (map :crps rows)) delta se (mean (map :err rows))
-                         (frac :cov50) (frac :cov90) (mean (map :brier rows)))))
+      (println summary-header)
+      (doseq [[label] arms]
+        (println (summary-line label (results label) base (second cell))))
       (let [span (if (= wk :seven-day) 24.0 1.0)
             bucket #(min 5 (int (Math/ceil (/ (:hours %) span))))]
         (println (format "  CRPS by elapsed %s:" (if (= wk :seven-day) "day" "hour")))
@@ -531,7 +527,8 @@
                        (for [t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
                              :let [rows (rows-before t) x (pct-at wobs t)
                                    in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))
-                                   score (fn [g] {:win i :crps (m/crps (:draws g) final 100.0)
+                                   score (fn [g] {:win i :week (quot (:start w) 604800) :hours (/ (- t (:start w)) 3600.0)
+                                                  :crps (m/crps (:draws g) final 100.0)
                                                   :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
                                                   :cov90 (in? (:lo g) (:hi g)) :cov50 (in? (:q25 g) (:q75 g))})]]
                          {:cell cell :win i
@@ -543,11 +540,8 @@
     (doseq [[cell cr] (sort-by key (group-by :cell rows))]
       (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs A)" (first cell) (name (second cell))
                        (count cr) (count (distinct (map :win cr)))))
-      (doseq [arm [:A :B :C]
-              :let [sc (mapv arm cr) base (mapv :A cr)
-                    {:keys [delta se]} (paired-delta sc base)
-                    frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) sc))))]]
-        (println (format "  %s  CRPS %6.2f  %+6.2f (%.2f)  MAE %5.1f  cov50 %3.0f%%  cov90 %3.0f%%"
-                         (name arm) (mean (map :crps sc)) delta se (mean (map :err sc)) (frac :cov50) (frac :cov90))))
-      (let [{:keys [delta se]} (paired-delta (mapv :C cr) (mapv :B cr))]
-        (println (format "  C vs B  %+6.2f (%.2f)" delta se))))))
+      (println summary-header)
+      (doseq [arm [:A :B :C]]
+        (println (summary-line (name arm) (mapv arm cr) (mapv :A cr) (second cell))))
+      (let [{:keys [delta lo hi]} (paired-delta (mapv :C cr) (mapv :B cr) (second cell))]
+        (println (format "  C vs B  %+6.2f [%+.2f, %+.2f]" delta lo hi))))))
