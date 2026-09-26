@@ -273,6 +273,32 @@
           [e2 (/ -1.0 d2)]
           (recur e2 (inc i)))))))
 
+(defn- posterior-moments
+  "Evidence P(y | past), mean, and variance of p(eta | y) proportional to
+  P(y | eta) N(eta; m, v), by Gauss-Hermite centered on the Laplace mode
+  (adaptive, so an observation far sharper than the prior is still
+  resolved). Matching the posterior's moments rather than its mode keeps
+  the state unbiased: with small gamma shapes the posterior in log rate is
+  right-skewed, and its mode sits below its mean."
+  [y A kappa m v]
+  (let [[e-hat v-hat] (laplace-eta y A kappa m v)
+        {xs :x ws :w} num/gauss-hermite-10
+        s (Math/sqrt (* 2.0 v-hat))
+        ;; integrand divided by the Gauss-Hermite weight function exp(-x^2)
+        terms (map (fn [x w]
+                     (let [e (+ e-hat (* s x))]
+                       [e (* w (Math/exp (* x x)) s
+                             (obs-prob y A kappa e)
+                             (/ (Math/exp (- (/ (Math/pow (- e m) 2) (* 2.0 v))))
+                                (Math/sqrt (* 2.0 Math/PI v))))]))
+                   xs ws)
+        z (reduce + (map second terms))]
+    (if (or (not (pos? z)) (Double/isNaN z))
+      [(predictive-on y A kappa m v) e-hat v-hat]
+      (let [mean (/ (reduce + (map (fn [[e t]] (* e t)) terms)) z)
+            var (/ (reduce + (map (fn [[e t]] (* (Math/pow (- e mean) 2) t)) terms)) z)]
+        [z mean (max 1e-12 (min v var))]))))
+
 (defn run-filter-c
   "Filter arm C through hourly `stps`. Returns
   {:m [m-fast m-slow] :P [[pff pfs] [pfs pss]] :p-on p :loglik L}."
@@ -291,11 +317,10 @@
               pp (on-transition p q-on q-off 1.0)
               m (+ mu mf ms)
               v (+ pff pss (* 2 pfs))
-              pon (predictive-on y A kappa m v)
+              [pon e-hat v-hat] (posterior-moments y A kappa m v)
               tot (+ (* pp pon) (* (- 1.0 pp) (if (< y 0.5) 1.0 0.0)))
               r (/ (* pp pon) tot)
-              ;; on branch: condition the state on the Laplace posterior of eta
-              [e-hat v-hat] (laplace-eta y A kappa m v)
+              ;; on branch: condition the state on the posterior moments of eta
               gf (/ (+ pff pfs) v) gs (/ (+ pss pfs) v)
               shrink (/ (- v v-hat) v)
               mf-on (+ mf (* gf (- e-hat m))) ms-on (+ ms (* gs (- e-hat m)))
@@ -395,9 +420,31 @@
         rng (num/rng seed)]
     {:ridge ridge
      :sd (mapv #(Math/sqrt (reduce + (map (fn [v] (* v v)) %))) l)
+     :z-draws (vec (for [_ (range k)]
+                     (let [z (vec (repeatedly n #(.nextGaussian rng)))]
+                       [z (mapv (fn [xi row] (+ xi (reduce + (map * row z)))) x-hat l)])))}))
+
+(defn importance-resample
+  "Reweight Laplace draws by the penalized likelihood: log w = -obj(x) +
+  obj(x-hat) + |z|^2/2 (target over the Gaussian proposal, which is exact
+  up to the ridge). Resample `k` draws by weight. Draws the Gaussian
+  proposes but the likelihood rejects (absurd rates) get ~0 weight.
+  Returns {:draws [x ...] :ess e}."
+  [stps x-start x-hat {:keys [z-draws]} k & {:keys [seed] :or {seed 9}}]
+  (let [obj (objective-c stps x-start)
+        f0 (obj x-hat)
+        lw (mapv (fn [[z x]] (+ (- f0 (obj x)) (* 0.5 (reduce + (map * z z))))) z-draws)
+        mx (apply max lw)
+        w (mapv #(Math/exp (- % mx)) lw)
+        tot (reduce + w)
+        w (mapv #(/ % tot) w)
+        cum (vec (reductions + w))
+        rng (num/rng seed)]
+    {:ess (/ 1.0 (reduce + (map #(* % %) w)))
      :draws (vec (for [_ (range k)]
-                   (let [z (vec (repeatedly n #(.nextGaussian rng)))]
-                     (mapv (fn [xi row] (+ xi (reduce + (map * row z)))) x-hat l))))}))
+                   (let [u (.nextDouble rng)
+                         i (or (first (keep-indexed (fn [i c] (when (< u c) i)) cum)) (dec (count cum)))]
+                     (second (nth z-draws i)))))}))
 
 (defn forecast-steps-c-mix
   "Arm-C predictive mixing over unconstrained parameter draws `xs`: each draw
