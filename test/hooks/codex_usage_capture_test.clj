@@ -54,6 +54,35 @@
         result   (h/latest-token-count [earlier non-tc later])]
     (is (= 12.0 (get-in result [:payload :rate_limits :primary :used_percent])))))
 
+(defn- token-count-for-limit [limit-id used-percent]
+  (-> (json/parse-string sample-token-count-line true)
+      (assoc-in [:payload :rate_limits :limit_id] limit-id)
+      (assoc-in [:payload :rate_limits :primary :used_percent] used-percent)))
+
+(deftest latest-token-count-ignores-per-model-limits
+  (testing "a later per-model limit (Spark) does not replace the account limit"
+    (let [account (token-count-for-limit "codex" 12.0)
+          spark (token-count-for-limit "codex_bengalfox" 40.0)
+          result (h/latest-token-count [account spark])]
+      (is (= "codex" (get-in result [:payload :rate_limits :limit_id])))
+      (is (= 12.0 (get-in result [:payload :rate_limits :primary :used_percent])))))
+  (testing "events without limit_id (older Codex) still count as the account limit"
+    (let [legacy (update-in (token-count-for-limit nil 7.0) [:payload :rate_limits] dissoc :limit_id)]
+      (is (= 7.0 (get-in (h/latest-token-count [legacy]) [:payload :rate_limits :primary :used_percent])))))
+  (testing "only per-model events: nothing to record"
+    (is (nil? (h/latest-token-count [(token-count-for-limit "codex_bengalfox" 40.0)])))))
+
+(deftest reverse-file-scan-skips-per-model-limits
+  (with-temp-rollout
+    (fn [path]
+      (spit (str path)
+            (str (json/generate-string (token-count-for-limit "codex" 12.0)) "\n"
+                 (json/generate-string (token-count-for-limit "codex_bengalfox" 40.0)) "\n"
+                 (json/generate-string (token-count-for-limit "premium" 55.0)) "\n")))
+    (fn [path]
+      (is (= 12.0 (get-in (h/latest-token-count-in-file path)
+                          [:payload :rate_limits :primary :used_percent]))))))
+
 (deftest latest-token-count-returns-nil-when-absent
   (is (nil? (h/latest-token-count [{:type "response_item"}]))))
 

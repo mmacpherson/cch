@@ -37,13 +37,26 @@
                       (catch Exception _ nil)))))
        vec))
 
+(def ^:private account-limit-id
+  "Codex's account-wide limit. Rollouts also carry per-model limits (for
+  example `codex_bengalfox`, a Spark model's own 5h/7d windows) and
+  `premium`; recording those as the account's windows would mix quotas."
+  "codex")
+
+(defn- account-token-count?
+  "A token_count event for the account-wide limit. Older Codex versions omit
+  limit_id, and those events describe the account limit."
+  [parsed]
+  (and (= "event_msg" (:type parsed))
+       (= "token_count" (get-in parsed [:payload :type]))
+       (contains? #{nil account-limit-id} (get-in parsed [:payload :rate_limits :limit_id]))))
+
 (defn latest-token-count
-  "Most recent `event_msg`/`token_count` entry in a Codex rollout JSONL,
-  or nil if none. Pure."
+  "Most recent account-limit `event_msg`/`token_count` entry in a Codex
+  rollout JSONL, or nil if none. Pure."
   [parsed-lines]
   (->> parsed-lines
-       (filter #(and (= "event_msg" (:type %))
-                     (= "token_count" (get-in % [:payload :type]))))
+       (filter account-token-count?)
        last))
 
 (def ^:private reverse-scan-chunk-bytes (* 64 1024))
@@ -72,13 +85,13 @@
                  (str/includes? line "\"token_count\""))
         (try
           (let [parsed (json/parse-string line true)]
-            (when (and (= "event_msg" (:type parsed))
-                       (= "token_count" (get-in parsed [:payload :type])))
+            (when (account-token-count? parsed)
               parsed))
           (catch Exception _ nil))))))
 
 (defn latest-token-count-in-file
-  "Find the newest valid token-count record by scanning a rollout backward.
+  "Find the newest valid account-limit token-count record by scanning a
+  rollout backward.
 
   Memory is bounded by one fixed read chunk plus at most 1 MiB for a JSONL
   record. Oversized and malformed records are skipped. Taking the file length
