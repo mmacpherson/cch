@@ -313,7 +313,10 @@
   restricts target cells and `max-refits` keeps the latest N refit weeks
   (for smoke tests)."
   [& {:keys [dir draws warmup samples only max-refits]
-      :or {dir "target/usage-stan" draws 40 warmup 300 samples 200}}]
+      ;; Outside target/: a build cleans target/ and would delete a running
+      ;; comparison's inputs and cached fits.
+      :or {dir (str (System/getProperty "user.home") "/.cache/cch/usage-stan-backtest")
+           draws 40 warmup 300 samples 200}}]
   (.mkdirs (java.io.File. ^String dir))
   (let [now (quot (System/currentTimeMillis) 1000)
         zone (ZoneId/systemDefault)
