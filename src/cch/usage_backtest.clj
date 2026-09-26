@@ -181,17 +181,23 @@
    ["agent k=4" :agent 4] ["agent k=12" :agent 12] ["agent k=36" :agent 36]
    ["fleet k=4" :fleet 4] ["fleet k=12" :fleet 12] ["fleet k=36" :fleet 36]
    ["two-level 12/12" [:two-level 12] 12] ["two-level 36/12" [:two-level 12] 36]
-   ["fleet EB k" :fleet :eb]])
+   ["fleet EB k" :fleet :eb]
+   ["fleet harmonic K=4" :harmonic 4]])
 
 (def ^:private focus-variants
   "The comparison that decides adoption (claude-code-hooks-20r)."
-  #{"independent" "fleet-shared" "fleet k=36" "fleet EB k"})
+  #{"independent" "fleet EB k" "fleet harmonic K=4"})
 
 (defn- variant-profile
   "Smoothed profile for `cell` at time t under `variant`; nil = independent.
-  k = :eb estimates the shrinkage strength per cell (eb-rates)."
+  k = :eb estimates the shrinkage strength per cell (eb-rates); target
+  :harmonic fits one fleet shape in the weekday + daily-harmonic basis."
   [{:keys [stats-at weekly-at]} cell t [_ target k]]
-  (when target
+  (cond
+    (= target :harmonic)
+    (m/harmonic-profile (keep #(stats-at % t) cells) k)
+
+    target
     (let [own (stats-at cell t)
           agent-cells (filter #(= (first %) (first cell)) cells)
           pooled (fn [cs] (m/pooled-rates (keep #(stats-at % t) cs)))
@@ -260,8 +266,9 @@
 
 (defn run-pooling
   "Print the profile pooling experiment for every agent/window with history.
-  With `:focus true`, only the variants that decide adoption."
-  [& {:keys [focus]}]
+  With `:focus true`, only the variants that decide adoption. `:base` names
+  the variant deltas are paired against (default \"independent\")."
+  [& {:keys [focus base] :or {base "independent"}}]
   (let [now (quot (System/currentTimeMillis) 1000)
         zone (ZoneId/systemDefault)
         data (into {} (map (fn [c] [c (cell-data now c)]) cells))
@@ -272,14 +279,14 @@
     (doseq [cell cells
             :let [d (data cell)
                   results (into {} (pmap (fn [v] [(first v) (replay-variant d access v now zone)]) chosen))
-                  base (results "independent")]
-            :when (seq base)]
+                  base-rows (results base)]
+            :when (seq base-rows)]
       (println (format "\n%s %s  (%d checkpoints, %d windows)" (first cell) (name (second cell))
-                       (count base) (count (distinct (map :win base)))))
+                       (count base-rows) (count (distinct (map :win base-rows)))))
       (println (format "  %-16s %7s %16s %6s %6s %6s %7s" "variant" "CRPS" "dCRPS (+-se)" "MAE" "cov50" "cov90" "Brier"))
       (doseq [[label] chosen
               :let [rows (results label)
-                    {:keys [delta se]} (paired-delta rows base)
+                    {:keys [delta se]} (paired-delta rows base-rows)
                     frac (fn [k] (* 100.0 (mean (map #(if (k %) 1.0 0.0) rows))))]]
         (println (format "  %-16s %7.2f %+8.2f (%.2f) %6.1f %5.0f%% %5.0f%% %7.4f"
                          label (mean (map :crps rows)) delta se (mean (map :err rows))

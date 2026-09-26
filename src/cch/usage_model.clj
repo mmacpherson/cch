@@ -272,6 +272,47 @@
                     bins)]
     {:rates rates :phi phi :t t :k (if (pos? t) (/ phi t) Double/POSITIVE_INFINITY)}))
 
+(defn harmonic-design
+  "Design row for hour-of-week bin h (evaluated at the bin midpoint):
+  intercept, six weekday levels (Monday is the reference), and `k` daily
+  harmonic pairs."
+  [k h]
+  (let [hod (+ (mod h 24) 0.5)
+        day (quot h 24)]
+    (vec (concat [1.0]
+                 (for [d (range 1 7)] (if (= day d) 1.0 0.0))
+                 (mapcat (fn [m] (let [w (/ (* 2 Math/PI m hod) 24)] [(Math/cos w) (Math/sin w)]))
+                         (range 1 (inc k)))))))
+
+(defn harmonic-profile
+  "Profile from a low-dimensional basis: weekday levels plus `k` daily
+  harmonics, fit to the pooled usage of all cells by Poisson regression
+  (log E[usage_h] = log exposure_h + X_h beta, Newton with a small ridge).
+  The profile ladder (claude-code-hooks-jgb) found one fleet shape with k = 4
+  (14 parameters) best out of sample: more harmonics, per-agent shapes, and
+  168 free bins all did no better or worse. Returns a 168-vector, mean 1."
+  [stats k]
+  (let [u (apply mapv + (map normalized-usage stats))
+        e (apply mapv + (map :exposure stats))
+        xs (mapv #(harmonic-design k %) (range 168))
+        p (count (first xs))
+        ridge 1e-3
+        step (fn [beta]
+               (let [mu (mapv (fn [x ei] (* ei (Math/exp (reduce + (map * x beta))))) xs e)
+                     g (mapv (fn [j] (- (reduce + (map (fn [x ui mi] (* (- ui mi) (nth x j))) xs u mu))
+                                        (* ridge (nth beta j))))
+                             (range p))
+                     h (vec (for [i (range p)]
+                              (vec (for [j (range p)]
+                                     (+ (reduce + (map (fn [x mi] (* mi (nth x i) (nth x j))) xs mu))
+                                        (if (= i j) ridge 0.0))))))]
+                 (mapv + beta (num/solve h g))))
+        start (assoc (vec (repeat p 0.0)) 0 (Math/log (max 1e-9 (/ (reduce + u) (max 1e-9 (reduce + e))))))
+        beta (nth (iterate step start) 25)
+        raw (mapv #(Math/exp (reduce + (map * % beta))) xs)
+        mean (/ (reduce + raw) 168.0)]
+    (mapv #(/ % mean) raw)))
+
 (defn fleet-profiles
   "Activity profiles for several cells (agent/window pairs), each shrunk
   toward the pooled fleet shape with its own estimated strength (eb-rates),

@@ -193,3 +193,15 @@
       ;; a+b starts at 4; block 1 adds 1 (5); relaxing toward 4 with d = 0.8
       ;; gives 4.8 before block 2, which as a sliver adds nothing (else 5.8).
       (is (< (Math/abs (- 4.8 (+ (nth state 2) (nth state 3)))) 1e-9)))))
+
+(deftest harmonic-profile-recovers-a-smooth-rhythm
+  (let [truth (vec (for [h (range 168)]
+                     (let [hod (+ (mod h 24) 0.5)]
+                       (Math/exp (* 1.5 (Math/cos (/ (* 2 Math/PI (- hod 13)) 24)))))))
+        stats {:usage (mapv #(* 50.0 %) truth) :exposure (vec (repeat 168 1.0))}
+        prof (m/harmonic-profile [stats] 4)
+        mean-t (/ (reduce + truth) 168.0)]
+    (is (= 168 (count prof)))
+    (is (< (Math/abs (- 1.0 (/ (reduce + prof) 168.0))) 1e-9))
+    (is (< (apply max (map #(Math/abs (- %1 (/ %2 mean-t))) prof truth)) 1e-3)
+        "a rhythm inside the basis is recovered exactly")))

@@ -48,3 +48,9 @@
     (is (< fx 1e-8))
     (is (close? (first x) 1.0 1e-3))
     (is (close? (second x) 1.0 1e-3))))
+
+(deftest solve-small-systems
+  (let [x (s/solve [[2.0 1.0 0.0] [1.0 3.0 1.0] [0.0 1.0 4.0]] [3.0 5.0 5.0])]
+    (is (every? true? (map #(< (Math/abs (- %1 %2)) 1e-12) x [1.0 1.0 1.0]))))
+  (testing "needs pivoting"
+    (is (= [2.0 1.0] (mapv #(Math/rint %) (s/solve [[0.0 1.0] [1.0 0.0]] [1.0 2.0]))))))

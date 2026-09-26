@@ -155,3 +155,31 @@
                                         (for [[_ x] (rest simplex)]
                                           (evaluate (add xb (scale 0.5 (sub x xb)))))))))))
               (inc iter))))))))
+
+;; --- linear algebra ---
+
+(defn solve
+  "Solve A x = b for a small dense system (Gaussian elimination with partial
+  pivoting). `a` is a vector of row vectors, `b` a vector."
+  [a b]
+  (let [n (count b)
+        m (into-array (map (fn [row bi] (double-array (conj (vec row) bi))) a b))]
+    (dotimes [col n]
+      (let [piv (apply max-key #(Math/abs (aget ^doubles (aget m %) col)) (range col n))
+            tmp (aget m col)]
+        (aset m col (aget m piv))
+        (aset m piv tmp)
+        (let [^doubles prow (aget m col)
+              p (aget prow col)]
+          (doseq [r (range (inc col) n)
+                  :let [^doubles row (aget m r)
+                        f (/ (aget row col) p)]]
+            (dotimes [k (inc n)]
+              (aset row k (- (aget row k) (* f (aget prow k)))))))))
+    (let [x (double-array n)]
+      (doseq [r (range (dec n) -1 -1)
+              :let [^doubles row (aget m r)]]
+        (aset x r (/ (- (aget row n)
+                        (reduce + 0.0 (map #(* (aget row %) (aget x %)) (range (inc r) n))))
+                     (aget row r))))
+      (vec x))))
