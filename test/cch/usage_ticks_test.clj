@@ -197,3 +197,22 @@
     (testing "forecasts are finite and never below the current reading"
       (let [f (tk/forecast-p3 fit prof zone units horizon (+ horizon (* 24 3600)) 20.0)]
         (is (every? #(and (Double/isFinite %) (>= % 20.0)) (:draws f)))))))
+
+(deftest closed-forms-match-uniformization
+  (testing "no-tick matrix: closed form equals the series"
+    (doseq [[a b lam dt] [[0.4 1.2 3.0 2.5] [0.01 0.02 0.5 0.001] [2.0 2.0 0.0 1.0] [0.3 0.3 1e-9 10.0]]]
+      (is (every? #(< (Math/abs %) 1e-8)
+                  (map - (tk/zero-tick-matrix a b lam dt) (tk/interval-matrix a b lam dt 0)))
+          (str [a b lam dt]))))
+  (testing "a precisely timed tick: the point-process form matches the exact count to first order"
+    (let [dt (/ 1.0 3600) exact (tk/interval-matrix 0.4 1.2 3.0 dt 1)
+          fast (#'tk/unit-matrix 0.4 1.2 3.0 dt 1)]
+      (is (every? #(< (Math/abs %) 1e-6) (map - exact fast))))))
+
+(deftest same-second-ticks-have-finite-likelihood
+  (testing "a tick between two readings in the same second (a zero-length interval) keeps the likelihood finite"
+    (let [zone (java.time.ZoneId/of "UTC")
+          prof (vec (repeat 168 1.0))
+          ivs (tk/intervals [[100 1.0 604800] [100 2.0 604800] [4000 3.0 604800]] 300 604800)
+          units (tk/mmpp-units ivs prof zone)]
+      (is (Double/isFinite (:loglik (tk/p3-filter units {:c 2.0 :a 0.3 :b 1.0})))))))

@@ -404,8 +404,11 @@
       (if (nil? iv)
         (persistent! (flush units acc))
         (if (pos? k)
-          (recur more nil (conj! (flush units acc)
-                                 {:dt (/ (- t1 t0) 3600.0) :mass (m/mass prof zone t0 t1) :k k :hour nil}))
+          ;; readings have one-second resolution: a tick between two readings
+          ;; in the same second happened within that second
+          (let [t0 (min t0 (dec t1))]
+            (recur more nil (conj! (flush units acc)
+                                   {:dt (/ (- t1 t0) 3600.0) :mass (m/mass prof zone t0 t1) :k k :hour nil})))
           ;; zero-tick: split at hours, merge pieces into the running hour unit
           (let [[acc units] (loop [t t0 acc acc units units]
                               (if (>= t t1) [acc units]
@@ -450,6 +453,39 @@
               acc (mapv + acc (mapv #(* w %) coef))]
           (recur (inc n) (poly-mul pw step k) (* w (/ x (inc n))) acc))))))
 
+(defn zero-tick-matrix
+  "[m00 m01 m10 m11] = P(no ticks over dt hours, end state | start state),
+  exp((Q - Lambda) dt) for Q = [[-a a] [b -b]], Lambda = diag(0, lam), in
+  closed form from the two eigenvalues of the 2x2 generator."
+  [a b lam dt]
+  (let [g00 (- a) g01 a g10 b g11 (- (+ b lam))
+        tr (+ g00 g11) det (- (* g00 g11) (* g01 g10))
+        disc (Math/sqrt (max 0.0 (- (* 0.25 tr tr) det)))
+        l1 (+ (* 0.5 tr) disc) l2 (- (* 0.5 tr) disc)
+        e1 (Math/exp (* l1 dt)) e2 (Math/exp (* l2 dt))]
+    (if (< disc 1e-12)
+      ;; repeated eigenvalue: exp(G dt) = e^(l dt) (I + (G - l I) dt)
+      [(* e1 (+ 1.0 (* (- g00 l1) dt))) (* e1 g01 dt) (* e1 g10 dt) (* e1 (+ 1.0 (* (- g11 l1) dt)))]
+      ;; Sylvester: exp(G dt) = (e1 (G - l2 I) - e2 (G - l1 I)) / (l1 - l2)
+      (let [d (- l1 l2)]
+        [(/ (- (* e1 (- g00 l2)) (* e2 (- g00 l1))) d) (/ (* (- e1 e2) g01) d)
+         (/ (* (- e1 e2) g10) d) (/ (- (* e1 (- g11 l2)) (* e2 (- g11 l1))) d)]))))
+
+(defn- unit-matrix
+  "The unit's transition-with-ticks matrix: closed form for no ticks; for
+  one tick over a short interval (a precisely timed tick), the point-process
+  form exp((Q - Lambda) dt) Lambda dt / ... evaluated as no-event then an
+  event at the end; otherwise (several ticks at unknown times) the general
+  uniformization count."
+  [a b lam dt k]
+  (cond
+    (zero? k) (zero-tick-matrix a b lam dt)
+    (and (== k 1) (< dt (/ 1.0 60)))
+    (let [[m00 m01 m10 m11] (zero-tick-matrix a b lam dt)]
+      ;; a tick can only come from the on state
+      [0.0 (* m01 lam dt) 0.0 (* m11 lam dt)])
+    :else (interval-matrix a b lam dt k)))
+
 (defn p3-filter
   "Forward filter over session units: {:p [P(off) P(on)] :loglik L}."
   [units {:keys [c a b]}]
@@ -457,7 +493,7 @@
     (if (empty? us)
       {:p [p0 p1] :loglik ll}
       (let [lam (if (pos? dt) (/ (* c mass) dt) 0.0)
-            [m00 m01 m10 m11] (interval-matrix a b lam dt k)
+            [m00 m01 m10 m11] (unit-matrix a b lam dt k)
             q0 (+ (* p0 m00) (* p1 m10)) q1 (+ (* p0 m01) (* p1 m11))
             z (+ q0 q1)]
         (if (and (pos? z) (Double/isFinite z))
