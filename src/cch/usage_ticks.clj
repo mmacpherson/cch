@@ -37,6 +37,8 @@
         of the session state; each minute has a reading with probability
         rho-on while on and rho-off while off (presence, not counts:
         readings arrive in bursts)
+    P6  sessions + drifting pace + reading presence (P4's joint filter over
+        session state and pace, observed through P5's minute presence)
 
   Pure functions."
   (:require [cch.numeric :as num]
@@ -771,12 +773,19 @@
                                 x0 :tol 1e-6 :max-iter 1500)]
     (assoc (unpack x) :rung :P4)))
 
+(declare forecast-p4-from)
+
 (defn forecast-p4
   "Meter at `end` from reading `x` at `now`: (state, pace) from the joint
   filter, then pace steps per hour and session switching within each hour."
-  [{:keys [c a b s h] :as params} prof zone units now end x & {:keys [n seed] :or {n 3000 seed 1}}]
-  (let [{:keys [^doubles off ^doubles on]} (p4-filter units params)
-        g ^doubles pace-grid ng (alength g)
+  [params prof zone units now end x & opts]
+  (let [{:keys [off on]} (p4-filter units params)]
+    (apply forecast-p4-from off on params prof zone now end x opts)))
+
+(defn forecast-p4-from
+  "P4's simulation from joint (state, pace) grid vectors `off`, `on`."
+  [^doubles off ^doubles on {:keys [c a b s h]} prof zone now end x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [g ^doubles pace-grid ng (alength g)
         cum (double-array (reductions + (concat off on)))
         total (aget cum (dec (alength cum)))
         phi (Math/pow 2.0 (/ -1.0 h))
@@ -896,3 +905,86 @@
   needed ahead)."
   [params prof zone units now end x & opts]
   (apply forecast-p3-from (second (:p (p5-filter units params))) params prof zone now end x opts))
+
+;; --- P6: sessions, drifting pace, and reading presence ---
+
+(defn- run-matrix!
+  "Into `out`: (exp((Q - Lambda) dm) E)^n for a run of n like minutes
+  without ticks (E the presence emission diag(e0, e1)), by squaring, in
+  primitive arrays; `tmp` and `acc` are scratch of length 4."
+  [^doubles out ^doubles tmp ^doubles acc a b lam dm e0 e1 n]
+  (let [e0 (double e0) e1 (double e1)]
+    (zero-tick-into! tmp a b lam dm)
+    (aset tmp 0 (* (aget tmp 0) e0)) (aset tmp 1 (* (aget tmp 1) e1))
+    (aset tmp 2 (* (aget tmp 2) e0)) (aset tmp 3 (* (aget tmp 3) e1))
+    (aset acc 0 1.0) (aset acc 1 0.0) (aset acc 2 0.0) (aset acc 3 1.0)
+    (loop [n (long n)]
+      (when (pos? n)
+        (when (odd? n)
+          (let [a0 (aget acc 0) a1 (aget acc 1) a2 (aget acc 2) a3 (aget acc 3)
+                b0 (aget tmp 0) b1 (aget tmp 1) b2 (aget tmp 2) b3 (aget tmp 3)]
+            (aset acc 0 (+ (* a0 b0) (* a1 b2))) (aset acc 1 (+ (* a0 b1) (* a1 b3)))
+            (aset acc 2 (+ (* a2 b0) (* a3 b2))) (aset acc 3 (+ (* a2 b1) (* a3 b3)))))
+        (let [b0 (aget tmp 0) b1 (aget tmp 1) b2 (aget tmp 2) b3 (aget tmp 3)]
+          (aset tmp 0 (+ (* b0 b0) (* b1 b2))) (aset tmp 1 (+ (* b0 b1) (* b1 b3)))
+          (aset tmp 2 (+ (* b2 b0) (* b3 b2))) (aset tmp 3 (+ (* b2 b1) (* b3 b3))))
+        (recur (quot n 2))))
+    (System/arraycopy acc 0 out 0 4)
+    out))
+
+(defn p6-filter
+  "Joint filter (session state x pace grid) over presence units:
+  {:off :on (grid vectors) :loglik L}."
+  [units {:keys [c a b s h rho-on rho-off]}]
+  (let [phi (Math/pow 2.0 (/ -1.0 h))
+        kern (memoize (fn [nh] (pace-kernel (Math/pow phi nh) (* s (Math/sqrt (- 1.0 (Math/pow phi (* 2 nh))))))))
+        g ^doubles pace-grid ng (alength g)
+        dm (/ 1.0 60)
+        [off0 on0] (joint-prior a b s)
+        buf (double-array 4) tmp (double-array 4) acc (double-array 4)]
+    (loop [[{:keys [n active? mass k hour]} & more :as us] units
+           ^doubles off off0 ^doubles on on0 prev-hour nil ll 0.0]
+      (if (empty? us)
+        {:off off :on on :loglik ll}
+        (let [nh (if (and prev-hour hour) (- hour prev-hour) 0)   ; presence units carry hour indices
+              [^doubles off ^doubles on] (if (pos? nh) (step-pace off on (kern nh)) [off on])
+              e0 (if active? rho-off (- 1.0 rho-off)) e1 (if active? rho-on (- 1.0 rho-on))
+              o2 (double-array ng) n2 (double-array ng)
+              mass (double mass) k (double k)
+              z (loop [i 0 z 0.0]
+                  (if (= i ng) z
+                      (let [lam (/ (* c (Math/exp (aget g i)) mass) dm)
+                            po (aget off i) pn (aget on i)
+                            [q0 q1] (if (pos? k)
+                                      (let [_ (series-step! buf po pn a b lam dm k)]
+                                        [(* (aget buf 0) e0) (* (aget buf 1) e1)])
+                                      (do (run-matrix! buf tmp acc a b lam dm e0 e1 n)
+                                          [(+ (* po (aget buf 0)) (* pn (aget buf 2)))
+                                           (+ (* po (aget buf 1)) (* pn (aget buf 3)))]))]
+                        (aset o2 i (double q0)) (aset n2 i (double q1))
+                        (recur (inc i) (+ z (double q0) (double q1))))))]
+          (if (and (pos? z) (Double/isFinite z))
+            (do (dotimes [i ng] (aset o2 i (/ (aget o2 i) z)) (aset n2 i (/ (aget n2 i) z)))
+                (recur more o2 n2 (or hour prev-hour) (+ ll (Math/log z))))
+            {:off off :on on :loglik Double/NEGATIVE_INFINITY}))))))
+
+(defn fit-p6
+  "Penalized ML {:c :a :b :s :h :rho-on :rho-off}, started from P5's fit."
+  [units]
+  (let [{:keys [c a b rho-on rho-off]} (fit-p5 units)
+        logit (fn [p] (Math/log (/ p (- 1.0 p)))) sig (fn [x] (/ 1.0 (+ 1.0 (Math/exp (- x)))))
+        x0 [(Math/log c) (Math/log a) (Math/log b) (Math/log 0.5) (Math/log 72.0) (logit rho-on) (logit rho-off)]
+        sd [3.0 3.0 3.0 1.0 1.0 3.0 3.0]
+        unpack (fn [[lc la lb ls lh r1 r0]] {:c (Math/exp lc) :a (Math/exp la) :b (Math/exp lb)
+                                             :s (Math/exp ls) :h (Math/exp lh) :rho-on (sig r1) :rho-off (sig r0)})
+        penalty (fn [x] (* 0.5 (reduce + (map (fn [xi mi d] (Math/pow (/ (- xi mi) d) 2)) x x0 sd))))
+        {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (p6-filter units (unpack x)))]
+                                          (if (Double/isFinite v) (+ (- v) (penalty x)) 1e300)))
+                                x0 :tol 1e-6 :max-iter 1500)]
+    (assoc (unpack x) :rung :P6)))
+
+(defn forecast-p6
+  "Meter at `end`: (state, pace) from the P6 filter, then P4's simulation."
+  [params prof zone units now end x & opts]
+  (let [{:keys [off on]} (p6-filter units params)]
+    (apply forecast-p4-from off on params prof zone now end x opts)))

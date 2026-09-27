@@ -322,3 +322,14 @@
     (testing "forecasts are finite and never below the current reading"
       (let [f (tk/forecast-p5 fit prof zone units horizon (+ horizon (* 24 3600)) 10.0)]
         (is (every? #(and (Double/isFinite %) (>= % 10.0)) (:draws f)))))))
+
+(deftest p6-reduces-to-p5-without-pace
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (repeat 168 1.0))
+        readings (vec (for [k (range 1 400)] [(* 97 k) (double (quot k 9)) 604800]))
+        reading-ts (map first readings)
+        units (tk/presence-units (tk/intervals readings 300 604800) reading-ts prof zone)
+        base {:c 2.0 :a 0.3 :b 1.0 :rho-on 0.6 :rho-off 0.05}]
+    (is (< (Math/abs (- (:loglik (tk/p5-filter units base))
+                        (:loglik (tk/p6-filter units (assoc base :s 1e-4 :h 72.0)))))
+           1e-3))))
