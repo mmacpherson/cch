@@ -732,3 +732,118 @@
                                  ["R6 +bursts +weekly pace" "R3 +bursts (NB)"] ["R7 +on/off blocks" "R6 +bursts +weekly pace"]
                                  ["R8 +drifting pace" "R7 +on/off blocks"] ["A production" "R8 +drifting pace"]
                                  ["A production" "R7 +on/off blocks"]])))
+
+;; --- resolution check: does finer binning of the raw readings help? ---
+
+(defn- binned
+  "Usage per `step`-second bin over [start, end) from a window's raw readings
+  (one sweep): [[bin-start count] ...]."
+  [wobs start end step]
+  (loop [b (* step (quot start step)) obs (seq wobs) prev 0.0 out (transient [])]
+    (if (>= b end)
+      (persistent! out)
+      (let [bend (+ b step)
+            [cur obs] (loop [cur prev obs obs]
+                        (if (and obs (< (ffirst obs) bend))
+                          (recur (max cur (second (first obs))) (next obs))
+                          [cur obs]))]
+        (recur bend obs cur (conj! out [b (Math/rint (- cur prev))]))))))
+
+(defn run-resolution
+  "Fit rungs 6 and 7 from the raw readings binned hourly vs every 15 minutes.
+  Under the gamma process the forecast is invariant to bin size given the
+  parameters; only the burstiness estimate (from within-bin dispersion)
+  changes. Same refits, checkpoints, and estimands as run-ladder."
+  [& {:keys [only max-refits]}]
+  (let [now (quot (System/currentTimeMillis) 1000)
+        zone (ZoneId/systemDefault)
+        week 604800
+        data (into {} (map (fn [c] [c (cell-data now c)]) cells))
+        series-at (memoize (fn [cell t] ((:series (data cell)) t)))
+        profile-at (memoize (fn [t] (m/fleet-harmonic-profile
+                                      (into {} (for [c cells :let [s (series-at c t)] :when (seq s)] [c s]))
+                                      zone)))
+        refit-of (fn [w] (* week (quot (:start w) week)))
+        targets (for [[cell d] data
+                      :when (or (nil? only) (only cell))
+                      :let [[_ wk] cell {:keys [min-train]} (plan wk)]
+                      [i w] (map-indexed vector (:wins d))
+                      :when (and (>= i min-train) (or (:cap w) (< (:eff-end w) (- now 3600))))]
+                  {:cell cell :w w :i i :refit (refit-of w)})
+        keep (when max-refits (set (take-last max-refits (sort (distinct (map :refit targets))))))
+        targets (if keep (filter #(keep (:refit %)) targets) targets)
+        ;; training windows as bins: [[mass count] ...] with block membership
+        train (memoize (fn [cell t step]
+                         (let [{:keys [spec obs wins]} (data cell)
+                               prof (profile-at t)
+                               lookback (:fit-lookback-secs spec)
+                               per-hour (/ 3600.0 step)]
+                           (vec (for [w wins
+                                      :when (and (<= (:eff-end w) t) (or (nil? lookback) (>= (:start w) (- t lookback))))
+                                      :let [bins (binned (window-obs obs spec w) (:start w) (:eff-end w) step)]
+                                      :when (seq bins)]
+                                  (mapv (fn [[b y]] [b (/ (nth prof (m/hour-of-week zone b)) per-hour) y]) bins))))))
+        fit (memoize (fn [cell t step rung]
+                       (let [spec (:spec (data cell))
+                             wins (train cell t step)]
+                         (if (= rung 6)
+                           (base/fit-bursts-weekly
+                             (mapv (fn [bins] {:mass (reduce + 0.0 (map second bins)) :total (reduce + 0.0 (map #(nth % 2) bins))
+                                               :hours (mapv (fn [[_ a y]] [a y]) bins)})
+                                   wins))
+                           (base/fit-onoff
+                             (mapv (fn [bins]
+                                     {:blocks (reduce (fn [acc [b a y]]
+                                                        (if (or (empty? acc) (and (zero? (mod b 3600)) (m/block-start? zone spec b)))
+                                                          (conj acc [[a y]])
+                                                          (conj (pop acc) (conj (peek acc) [a y]))))
+                                                      [] bins)})
+                                   wins))))))
+        variants [["R6 hourly" 6 3600] ["R6 15-min" 6 900] ["R7 hourly" 7 3600] ["R7 15-min" 7 900]]
+        _ (dorun (pmap (fn [[cell t rung step]] (fit cell t step rung))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) [_ rung step] variants] [cell t rung step])))
+        rows (vec
+               (apply concat
+                      (pmap
+                        (fn [{:keys [cell w i refit]}]
+                          (let [{:keys [spec obs rows-before]} (data cell)
+                                [_ wk] cell
+                                {:keys [checkpoint-secs]} (plan wk)
+                                final (m/cum-at w (inc (:eff-end w)))
+                                capped? (boolean (:cap w))
+                                wobs (window-obs obs spec w)
+                                prof (profile-at refit)]
+                            (vec
+                              (for [t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
+                                    :let [x (pct-at wobs t)
+                                          in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))
+                                          score (fn [g] {:win i :week (quot (:start w) week) :hours (/ (- t (:start w)) 3600.0)
+                                                         :crps (m/crps (:draws g) final 100.0)
+                                                         :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
+                                                         :cov90 (in? (:lo g) (:hi g)) :cov50 (in? (:q25 g) (:q75 g))})
+                                          series (m/hour-series (m/windows (rows-before t) spec) t)
+                                          [done cur] (base/blocks-so-far series (:start w) t prof zone spec)]]
+                                (into {:cell cell}
+                                      (for [[label rung step] variants]
+                                        [label (score (if (= rung 6)
+                                                        (base/forecast-bursts-weekly (fit cell refit step 6) prof zone spec (:start w) t (:eff-end w) x)
+                                                        (base/forecast-onoff (fit cell refit step 7) prof zone spec done cur t (:eff-end w) x)))]))))))
+                        targets)))
+        labels (mapv first variants)
+        by-cell (into {} (for [[cell cr] (group-by :cell rows)]
+                           [cell (into {} (for [a labels] [a (mapv #(get % a) cr)]))]))]
+    (doseq [[cell arms] (sort-by key by-cell)
+            :let [base-rows (arms "R6 hourly")]]
+      (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs R6 hourly)" (first cell) (name (second cell))
+                       (count base-rows) (count (distinct (map :win base-rows)))))
+      (println summary-header)
+      (doseq [a labels]
+        (println (summary-line a (arms a) base-rows (second cell)))))
+    (print-pooled-7d by-cell labels "R6 hourly"
+                     :contrasts [["R6 15-min" "R6 hourly"] ["R7 15-min" "R7 hourly"]])
+    (println "\nburstiness kappa (latest refit): hourly vs 15-min")
+    (doseq [cell (sort (keys by-cell))
+            :let [t (reduce max (map :refit (filter #(= cell (:cell %)) targets)))]]
+      (println (format "  %-24s R6 %.3f vs %.3f   R7 %.3f vs %.3f" (str (first cell) " " (name (second cell)))
+                       (:kappa (fit cell t 3600 6)) (:kappa (fit cell t 900 6))
+                       (:kappa (fit cell t 3600 7)) (:kappa (fit cell t 900 7)))))))
