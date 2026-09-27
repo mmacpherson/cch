@@ -880,14 +880,15 @@
   "Continuous-time rungs, each beside its hourly counterpart and production."
   ["P0 Poisson process" "R1 Poisson (hourly)" "P1 +profile" "R2 +profile (hourly)"
    "P2 +weekly pace" "R5 +weekly pace (hourly)" "P3 sessions" "R7 +on/off blocks (hourly)"
-   "P4 +drifting pace" "R8 +drifting pace (hourly)" "A production"])
+   "P4 +drifting pace" "R8 +drifting pace (hourly)" "P5 sessions +reading presence" "A production"])
 
 (def ^:private ct-series-contrasts
   [["P0 Poisson process" "R1 Poisson (hourly)"] ["P1 +profile" "R2 +profile (hourly)"]
    ["P2 +weekly pace" "R5 +weekly pace (hourly)"]
    ["P1 +profile" "P0 Poisson process"] ["P2 +weekly pace" "P1 +profile"] ["P3 sessions" "P1 +profile"]
    ["P3 sessions" "R7 +on/off blocks (hourly)"] ["P4 +drifting pace" "P3 sessions"]
-   ["P4 +drifting pace" "R8 +drifting pace (hourly)"] ["A production" "P4 +drifting pace"]])
+   ["P4 +drifting pace" "R8 +drifting pace (hourly)"] ["A production" "P4 +drifting pace"]
+   ["P5 sessions +reading presence" "P3 sessions"] ["A production" "P5 sessions +reading presence"]])
 
 (defn run-ct-series
   "Print the continuous-time tick-process series against its hourly
@@ -928,6 +929,15 @@
         units-at (fn [cell t prof] (ticks/mmpp-units (ivs-at cell t) prof zone))
         fit-p3 (memoize (fn [cell t] (ticks/fit-p3 (units-at cell t (profile-at t)))))
         fit-p4 (memoize (fn [cell t] (ticks/fit-p4 (units-at cell t (profile-at t)))))
+        ;; P5: minute-level reading presence before t (within the lookback)
+        presence-at (fn [cell t prof]
+                      (let [{:keys [spec obs]} (data cell)
+                            lookback (:fit-lookback-secs spec)
+                            since (if lookback (- t lookback) 0)]
+                        (ticks/presence-units (ivs-at cell t)
+                                              (into [] (comp (map first) (filter #(and (< % t) (>= % since)))) obs)
+                                              prof zone)))
+        fit-p5 (memoize (fn [cell t] (ticks/fit-p5 (presence-at cell t (profile-at t)))))
         fit-r8 (memoize (fn [cell t]
                           (let [{:keys [spec rows-before]} (data cell)]
                             (base/fit-drift
@@ -959,9 +969,9 @@
                            (base/fit rung (base/training-steps series (profile-at t) zone)))))
         fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
                                       (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
-        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t) :p4 (fit-p4 cell t) :r7 (fit-r7 cell t) :r8 (fit-r8 cell t)
+        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t) :p4 (fit-p4 cell t) :p5 (fit-p5 cell t) :r7 (fit-r7 cell t) :r8 (fit-r8 cell t)
                                            :r1 (fit-r cell t 1) :r2 (fit-r cell t 2) :r5 (fit-r5 cell t) :a (fit-a cell t)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :p2 :p3 :p4 :r1 :r2 :r5 :r7 :r8 :a]] [cell t k])))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :p2 :p3 :p4 :p5 :r1 :r2 :r5 :r7 :r8 :a]] [cell t k])))
         rows (vec
                (apply concat
                       (pmap
@@ -990,6 +1000,7 @@
                                                                                            [done cur] (base/blocks-so-far series (:start w) t prof zone spec)]
                                                                                        (base/forecast-onoff (fit-r7 cell refit) prof zone spec done cur t % x))
                                                        "P4 +drifting pace" #(ticks/forecast-p4 (fit-p4 cell refit) prof zone (units-at cell t prof) t % x)
+                                                       "P5 sessions +reading presence" #(ticks/forecast-p5 (fit-p5 cell refit) prof zone (presence-at cell t prof) t % x)
                                                        "R8 +drifting pace (hourly)" #(let [series (m/hour-series (m/windows (rows-before t) spec) t)
                                                                                            [_ cur] (base/blocks-so-far series (:start w) t prof zone spec)
                                                                                            hist (base/training-blocks series t prof zone spec (:fit-lookback-secs spec))

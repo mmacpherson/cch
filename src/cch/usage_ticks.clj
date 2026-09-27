@@ -33,6 +33,10 @@
     P4  sessions + a drifting pace: the on-intensity is c * exp(u(t)) * profile(t),
         u an Ornstein-Uhlenbeck pace (spread s, half-life h hours) held
         constant within each clock hour
+    P5  sessions + reading presence: the collector's readings are evidence
+        of the session state; each minute has a reading with probability
+        rho-on while on and rho-off while off (presence, not counts:
+        readings arrive in bursts)
 
   Pure functions."
   (:require [cch.numeric :as num]
@@ -630,12 +634,18 @@
                                 x0 :tol 1e-6 :max-iter 1500)]
     (assoc (unpack x) :rung :P3)))
 
+(declare forecast-p3-from)
+
 (defn forecast-p3
   "Meter at `end` from reading `x` at `now`: the session state filtered up
   to now, then on/off switching and ticks simulated over the future profile."
-  [{:keys [c a b] :as params} prof zone units now end x & {:keys [n seed] :or {n 3000 seed 1}}]
-  (let [[_ p-on] (:p (p3-filter units params))
-        ;; future (duration h, mass) per clock hour
+  [params prof zone units now end x & opts]
+  (apply forecast-p3-from (second (:p (p3-filter units params))) params prof zone now end x opts))
+
+(defn forecast-p3-from
+  "Session-model simulation from P(on) = `p-on` at `now`."
+  [p-on {:keys [c a b]} prof zone now end x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [;; future (duration h, mass) per clock hour
         fut (loop [t now out []]
               (if (>= t end) out
                   (let [nxt (min end (* 3600 (inc (quot t 3600))))]
@@ -801,3 +811,88 @@
      :hi (num/quantile draws 0.95)
      :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
      :draws draws}))
+
+;; --- P5: sessions observed through reading presence ---
+;;
+;; Minute resolution for presence: a minute is active if it holds at least
+;; one reading. Given the state path, minutes emit independently (rho-on /
+;; rho-off), so a run of n like minutes without ticks contributes
+;; (exp((Q - Lambda) dm) E)^n, dm one minute, E the diagonal emission, a 2x2
+;; matrix power by squaring; a minute with ticks uses its tick matrix. Runs
+;; merge consecutive minutes with the same presence and no ticks, within a
+;; clock hour (the profile's resolution).
+
+(defn presence-units
+  "Session units at minute resolution with reading presence: [{:n minutes
+  :active? bool :mass per-minute-mass :k ticks}], from tick intervals `ivs`
+  (for ticks and exposure) and reading times `reading-ts` (seconds),
+  over the exposed span of `ivs`."
+  [ivs reading-ts prof zone]
+  (let [active (into #{} (map #(quot % 60)) reading-ts)
+        ;; ticks by the minute their interval ends in; exposure by minute
+        ticks (reduce (fn [m {:keys [t1 k]}] (if (pos? k) (update m (quot (dec (max t1 1)) 60) (fnil + 0.0) k) m)) {} ivs)
+        minutes (sort (into #{} (mapcat (fn [{:keys [t0 t1]}] (range (quot t0 60) (quot (+ t1 59) 60)))) ivs))]
+    (persistent!
+      (reduce (fn [out mi]
+                (let [act (contains? active mi)
+                      k (get ticks mi 0.0)
+                      h (quot mi 60)
+                      mass (/ (nth prof (m/hour-of-week zone (* 60 mi))) 60.0)
+                      prev (when (pos? (count out)) (nth out (dec (count out))))]
+                  (if (and prev (zero? k) (zero? (:k prev)) (= act (:active? prev)) (= h (:hour prev))
+                           (= (:last prev) (dec mi)))
+                    (assoc! out (dec (count out)) (-> prev (update :n inc) (assoc :last mi)))
+                    (conj! out {:n 1 :active? act :mass mass :k k :hour h :last mi}))))
+              (transient []) minutes))))
+
+(defn- mat-mul [[a0 a1 a2 a3] [b0 b1 b2 b3]]
+  [(+ (* a0 b0) (* a1 b2)) (+ (* a0 b1) (* a1 b3)) (+ (* a2 b0) (* a3 b2)) (+ (* a2 b1) (* a3 b3))])
+
+(defn- mat-pow [m n]
+  (loop [n n base m acc [1.0 0.0 0.0 1.0]]
+    (if (zero? n) acc
+        (recur (quot n 2) (mat-mul base base) (if (odd? n) (mat-mul acc base) acc)))))
+
+(defn p5-filter
+  "Forward filter over presence units: {:p [P(off) P(on)] :loglik L}."
+  [units {:keys [c a b rho-on rho-off]}]
+  (let [dm (/ 1.0 60)]
+    (loop [[{:keys [n active? mass k]} & more :as us] units p0 (/ b (+ a b)) p1 (/ a (+ a b)) ll 0.0]
+      (if (empty? us)
+        {:p [p0 p1] :loglik ll}
+        (let [lam (/ (* c mass) dm)
+              e0 (if active? rho-off (- 1.0 rho-off)) e1 (if active? rho-on (- 1.0 rho-on))
+              step (fn [[m00 m01 m10 m11]] [(* m00 e0) (* m01 e1) (* m10 e0) (* m11 e1)])
+              mtx (if (pos? k)
+                    (step (interval-matrix a b lam dm k))
+                    (mat-pow (step (zero-tick-matrix a b lam dm)) n))
+              [m00 m01 m10 m11] mtx
+              q0 (+ (* p0 m00) (* p1 m10)) q1 (+ (* p0 m01) (* p1 m11))
+              z (+ q0 q1)]
+          (if (and (pos? z) (Double/isFinite z))
+            (recur more (/ q0 z) (/ q1 z) (+ ll (Math/log z)))
+            {:p [p0 p1] :loglik Double/NEGATIVE_INFINITY}))))))
+
+(defn fit-p5
+  "Penalized ML {:c :a :b :rho-on :rho-off} (weak normal priors on the
+  log / logit scale, sd 3)."
+  [units]
+  (let [sig (fn [x] (/ 1.0 (+ 1.0 (Math/exp (- x)))))
+        logit (fn [p] (Math/log (/ p (- 1.0 p))))
+        ticks (reduce + 0.0 (map :k units))
+        mass (reduce + 0.0 (map #(* (:n %) (:mass %)) units))
+        x0 [(Math/log (max 1e-6 (* 3 (/ ticks (max 1e-9 mass))))) (Math/log 0.3) (Math/log 1.0) (logit 0.6) (logit 0.02)]
+        unpack (fn [[lc la lb lr1 lr0]] {:c (Math/exp lc) :a (Math/exp la) :b (Math/exp lb)
+                                         :rho-on (sig lr1) :rho-off (sig lr0)})
+        penalty (fn [x] (* 0.5 (reduce + (map (fn [xi mi] (Math/pow (/ (- xi mi) 3.0) 2)) x x0))))
+        {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (p5-filter units (unpack x)))]
+                                          (if (Double/isFinite v) (+ (- v) (penalty x)) 1e300)))
+                                x0 :tol 1e-6 :max-iter 2000)]
+    (assoc (unpack x) :rung :P5)))
+
+(defn forecast-p5
+  "Meter at `end`: the session state filtered through ticks and reading
+  presence up to now, then the session model's simulation (readings are not
+  needed ahead)."
+  [params prof zone units now end x & opts]
+  (apply forecast-p3-from (second (:p (p5-filter units params))) params prof zone now end x opts))

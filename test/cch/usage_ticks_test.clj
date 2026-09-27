@@ -284,3 +284,41 @@
           ivs (tk/window-intervals [w1 w2] [[1000 1.0 604800] [2000 2.0 604800] [25000 1.0 624800]] 300)
           spans (sort (map (juxt :t0 :t1) ivs))]
       (is (every? (fn [[[_ e] [s _]]] (<= e s)) (partition 2 1 spans))))))
+
+(deftest presence-sharpens-sessions
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (repeat 168 1.0))
+        r (num/rng 44)
+        a 0.25 b 1.0 c 2.0 rho-on 0.7 rho-off 0.02
+        horizon (* 20 86400)
+        switches (loop [t 0.0 on? false out []]
+                   (if (> t horizon) out
+                       (let [hold (* 3600 (/ (- (Math/log (- 1.0 (.nextDouble r)))) (if on? b a)))]
+                         (recur (+ t hold) (not on?) (conj out [t (+ t hold) on?])))))
+        on-at (fn [t] (some (fn [[t0 t1 on?]] (when (and (<= t0 t) (< t t1)) on?)) switches))
+        tick-times (sort (for [[t0 t1 on?] switches :when on?
+                               _ (range (num/poisson-sample r (* c (/ (- t1 t0) 3600.0))))]
+                           (+ t0 (* (.nextDouble r) (- t1 t0)))))
+        ;; readings: per minute, present with rho-on / rho-off
+        reading-ts (for [mi (range (/ horizon 60))
+                         :when (< (.nextDouble r) (if (on-at (* 60 mi)) rho-on rho-off))]
+                     (+ (* 60 mi) 30))
+        ;; meter readings for the tick intervals: at every reading time
+        readings (loop [[t & ts] reading-ts ticks tick-times pct 0.0 out []]
+                   (if (nil? t) out
+                       (let [[before after] (split-with #(< % t) ticks)
+                             reset (* 604800 (inc (quot t 604800)))
+                             pct (if (and (seq out) (not= reset (nth (peek out) 2))) (double (count before)) (+ pct (count before)))]
+                         (recur ts after pct (conj out [t pct reset])))))
+        ivs (tk/intervals readings 300 604800)
+        units (tk/presence-units ivs reading-ts prof zone)
+        fit (tk/fit-p5 units)]
+    (testing "recovers how readings depend on the session state"
+      (is (< 0.5 (:rho-on fit) 0.85))
+      (is (< (:rho-off fit) 0.06)))
+    (testing "and the session rates"
+      (is (< 0.12 (:a fit) 0.5))
+      (is (< 0.5 (:b fit) 2.0)))
+    (testing "forecasts are finite and never below the current reading"
+      (let [f (tk/forecast-p5 fit prof zone units horizon (+ horizon (* 24 3600)) 10.0)]
+        (is (every? #(and (Double/isFinite %) (>= % 10.0)) (:draws f)))))))
