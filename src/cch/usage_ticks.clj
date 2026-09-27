@@ -21,9 +21,11 @@
 
   Rungs, from the ground floor:
     P0  homogeneous Poisson process: constant tick rate lambda
+    P1  inhomogeneous Poisson process: lambda(t) = c * profile(time of week)
 
   Pure functions."
-  (:require [cch.numeric :as num]))
+  (:require [cch.numeric :as num]
+            [cch.usage-model :as m]))
 
 (defn intervals
   "Tick-count intervals from raw readings [[ts pct resets-at] ...] (any
@@ -106,3 +108,29 @@
      :hi (num/quantile draws 0.95)
      :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
      :draws draws}))
+
+;; --- P1: inhomogeneous Poisson process ---
+;;
+;; The intensity follows the shared fleet profile (hour units, piecewise
+;; constant by hour of week): lambda(t) = c * profile(t), so an interval's
+;; expected count is c times the profile mass over it.
+
+(defn fit-p1
+  "Maximum-likelihood scale c (ticks per unit profile mass): total ticks over
+  total profile mass of the intervals."
+  [ivs prof zone]
+  (let [mass (reduce + 0.0 (map #(m/mass prof zone (:t0 %) (:t1 %)) ivs))
+        ticks (reduce + 0.0 (map :k ivs))]
+    {:rung :P1 :c (/ ticks (max 1e-9 mass))}))
+
+(defn loglik-p1
+  "Log likelihood of interval counts under scale `c` and profile `prof`."
+  [ivs c prof zone]
+  (reduce + 0.0 (for [{:keys [t0 t1 k]} ivs
+                      :let [mu (* c (m/mass prof zone t0 t1))]]
+                  (- (* k (Math/log (max mu 1e-300))) mu (num/log-gamma (+ k 1.0))))))
+
+(defn forecast-p1
+  "Meter at `end` from reading `x` at `now`: x + Poisson(c * profile mass)."
+  [{:keys [c]} prof zone now end x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (forecast-p0 {:rate (/ (* c (m/mass prof zone now (max now end))) (max 1 (- end now)))} now end x :n n :seed seed))

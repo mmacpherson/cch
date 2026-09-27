@@ -878,7 +878,11 @@
 
 (def ^:private ct-series-arms
   "Continuous-time rungs, each beside its hourly counterpart and production."
-  ["P0 Poisson process" "R1 Poisson (hourly)" "A production"])
+  ["P0 Poisson process" "R1 Poisson (hourly)" "P1 +profile" "R2 +profile (hourly)" "A production"])
+
+(def ^:private ct-series-contrasts
+  [["P0 Poisson process" "R1 Poisson (hourly)"] ["P1 +profile" "R2 +profile (hourly)"]
+   ["P1 +profile" "P0 Poisson process"]])
 
 (defn run-ct-series
   "Print the continuous-time tick-process series against its hourly
@@ -911,16 +915,17 @@
                                 readings (filter #(and (< (first %) t) (or (nil? lookback) (>= (first %) (- t lookback)))) obs)]
                             (ticks/intervals readings (:cluster-secs spec) (span (second cell))))))
         fit-p0 (memoize (fn [cell t] (ticks/fit-p0 (ivs-at cell t))))
-        fit-r1 (memoize (fn [cell t]
-                          (let [{:keys [spec rows-before]} (data cell)
-                                series (m/hour-series (m/windows (rows-before t) spec) t)
-                                lookback (:fit-lookback-secs spec)
-                                series (if lookback (into (sorted-map) (filter #(>= (key %) (- t lookback)) series)) series)]
-                            (base/fit 1 (base/training-steps series (profile-at t) zone)))))
+        fit-p1 (memoize (fn [cell t] (ticks/fit-p1 (ivs-at cell t) (profile-at t) zone)))
+        fit-r (memoize (fn [cell t rung]
+                         (let [{:keys [spec rows-before]} (data cell)
+                               series (m/hour-series (m/windows (rows-before t) spec) t)
+                               lookback (:fit-lookback-secs spec)
+                               series (if lookback (into (sorted-map) (filter #(>= (key %) (- t lookback)) series)) series)]
+                           (base/fit rung (base/training-steps series (profile-at t) zone)))))
         fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
                                       (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
-        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :r1 (fit-r1 cell t) :a (fit-a cell t)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :r1 :a]] [cell t k])))
+        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :r1 (fit-r cell t 1) :r2 (fit-r cell t 2) :a (fit-a cell t)))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :r1 :r2 :a]] [cell t k])))
         rows (vec
                (apply concat
                       (pmap
@@ -935,7 +940,9 @@
                               (for [t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
                                     :let [x (pct-at wobs t)
                                           forecasters {"P0 Poisson process" #(ticks/forecast-p0 (fit-p0 cell refit) t % x)
-                                                       "R1 Poisson (hourly)" #(base/forecast (fit-r1 cell refit) prof zone spec t % x)
+                                                       "R1 Poisson (hourly)" #(base/forecast (fit-r cell refit 1) prof zone spec t % x)
+                                                       "P1 +profile" #(ticks/forecast-p1 (fit-p1 cell refit) prof zone t % x)
+                                                       "R2 +profile (hourly)" #(base/forecast (fit-r cell refit 2) prof zone spec t % x)
                                                        "A production" #(m/forecast (fit-a cell refit) (rows-before t) spec zone t % x :path? false)}
                                           horizons (for [h (conj (ladder-horizons wk) :reset)
                                                          :let [end (if (= h :reset) (:eff-end w) (+ t (* 3600 h)))]
@@ -965,6 +972,5 @@
         (println (summary-line a (arms a) base-rows (second cell)))))
     (doseq [h (ladder-horizons :seven-day)]
       (print-pooled-7d (at h) ct-series-arms "A production" :title (format "secondary: meter at +%dh" h)
-                       :contrasts [["P0 Poisson process" "R1 Poisson (hourly)"]]))
-    (print-pooled-7d (at :reset) ct-series-arms "A production"
-                     :contrasts [["P0 Poisson process" "R1 Poisson (hourly)"]])))
+                       :contrasts ct-series-contrasts))
+    (print-pooled-7d (at :reset) ct-series-arms "A production" :contrasts ct-series-contrasts)))
