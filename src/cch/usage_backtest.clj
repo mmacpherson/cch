@@ -657,19 +657,10 @@
                                          [(mass-of w) (m/cum-at w (inc (:eff-end w)))]))))))
         ;; rung 6 also needs each window's hours, for the burstiness term
         fit-bw (memoize (fn [cell t]
-                          (let [{:keys [spec rows-before]} (data cell)
-                                wins (m/windows (rows-before t) spec)
-                                series (m/hour-series wins t)
-                                prof (profile-at t)
-                                lookback (:fit-lookback-secs spec)]
+                          (let [{:keys [spec rows-before]} (data cell)]
                             (base/fit-bursts-weekly
-                              (vec (for [w wins
-                                         :when (and (<= (:eff-end w) t) (or (nil? lookback) (>= (:start w) (- t lookback))))
-                                         :let [hours (vec (for [[h [live y]] (subseq series >= (* 3600 (quot (:start w) 3600)) < (:eff-end w))]
-                                                            [(* live (nth prof (m/hour-of-week zone h))) (Math/rint y)]))]]
-                                     {:mass (reduce + 0.0 (map first hours))
-                                      :total (reduce + 0.0 (map second hours))
-                                      :hours hours}))))))
+                              (base/window-training (m/windows (rows-before t) spec) t (profile-at t) zone
+                                                    (:fit-lookback-secs spec))))))
         _ (dorun (pmap (fn [[cell t rung]] (case rung :A (fit-a cell t) :W (fit-weekly cell t) :BW (fit-bw cell t) (fit-rung cell t rung)))
                        (for [[cell t] (distinct (map (juxt :cell :refit) targets)) rung [:A :W :BW 1 2 3 4]] [cell t rung])))
         rows (vec

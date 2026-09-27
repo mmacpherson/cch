@@ -172,6 +172,20 @@
                    (log-sum-exp (window-log-terms c kappa alpha mass total))
                    (Math/log du))))))
 
+(defn window-training
+  "Rung-6 training data at time `t`: finished windows (within `lookback`
+  seconds, or all when nil) as {:mass :total :hours [[mass count] ...]},
+  each counting only the hours it covered."
+  [wins t prof zone lookback]
+  (let [series (m/hour-series wins t)]
+    (vec (for [w wins
+               :when (and (<= (:eff-end w) t) (or (nil? lookback) (>= (:start w) (- t lookback))))
+               :let [hours (vec (for [[h [live y]] (subseq series >= (* 3600 (quot (:start w) 3600)) < (:eff-end w))]
+                                  [(* live (nth prof (m/hour-of-week zone h))) (Math/rint y)]))]]
+           {:mass (reduce + 0.0 (map first hours))
+            :total (reduce + 0.0 (map second hours))
+            :hours hours}))))
+
 (defn fit-bursts-weekly
   "Maximum-likelihood rung-6 parameters from finished windows
   [{:mass :total :hours [[mass count] ...]}]."

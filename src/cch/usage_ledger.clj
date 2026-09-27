@@ -26,7 +26,8 @@
 (def models
   "Frozen ledger model ids."
   {"ml-harmonic-v1" "maximum-likelihood usage model, harmonic fleet profile (production since 85c953c)"
-   "rate-bayes-v1" "rate-Bayes projection with duration-weighted mean (baseline, 010ad44)"})
+   "rate-bayes-v1" "rate-Bayes projection with duration-weighted mean (baseline, 010ad44)"
+   "nb-weekly-v1" "count-process rung 6: negative binomial bursts with a per-window gamma pace, harmonic fleet profile, ML refit daily (challenger, 5b8be3c)"})
 
 (def levels
   "Quantile levels stored for every forecast."
