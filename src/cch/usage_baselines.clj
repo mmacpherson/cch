@@ -10,6 +10,9 @@
     rung 3  negative binomial         y_h ~ Poisson(L_h), L_h ~ Gamma(kappa A_h, kappa / c)
     rung 5  weekly pace               y_h ~ Poisson(c theta_w A_h), theta_w ~ Gamma(alpha, alpha)
     rung 6  bursts + weekly pace      y_h ~ Poisson(L_h), L_h ~ Gamma(kappa A_h, kappa / (c theta_w))
+    rung 7  + on/off blocks           each model block (a day for 7d, an hour for 5h) is on
+                                      with probability pi; off blocks emit nothing, on blocks
+                                      follow rung 6 with rate c / pi (so the mean is unchanged)
 
   where live_h is the fraction of the hour the collector observed and
   A_h = live_h * profile(hour of week) its activity mass. Rung 3 is rung 2
@@ -218,6 +221,147 @@
         (aset draws i (+ (double x)
                          (if (pos? m-fut)
                            (double (num/poisson-sample r (num/gamma-sample r (* kappa m-fut) (/ kappa (* c theta)))))
+                           0.0)))))
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
+     :hi (num/quantile draws 0.95)
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))
+
+;; --- rung 7: rung 6 with on/off model blocks ---
+;;
+;; Blocks follow the production model's structure (m/block-start?). Given
+;; theta and the on-block rate c' = c / pi, an on block's hourly likelihood is
+;; exp(C_b) (1 - p)^(kappa M_b) p^(Y_b), p = c' theta / (kappa + c' theta), with
+;; C_b the theta-free sum over its hours; an off block has likelihood 1 when
+;; empty and 0 otherwise. A window's likelihood is the product over blocks,
+;; integrated over theta on the log grid.
+
+(defn block-training
+  "Rung-7 training data: finished windows (as `window-training`) with their
+  hours grouped into model blocks: [{:blocks [[[mass count] ...] ...]}]."
+  [wins t prof zone spec lookback]
+  (let [series (m/hour-series wins t)]
+    (vec (for [w wins
+               :when (and (<= (:eff-end w) t) (or (nil? lookback) (>= (:start w) (- t lookback))))
+               :let [hrs (subseq series >= (* 3600 (quot (:start w) 3600)) < (:eff-end w))
+                     blocks (reduce (fn [acc [h [live y]]]
+                                      (let [hour [(* live (nth prof (m/hour-of-week zone h))) (Math/rint y)]]
+                                        (if (or (empty? acc) (m/block-start? zone spec h))
+                                          (conj acc [hour])
+                                          (conj (pop acc) (conj (peek acc) hour)))))
+                                    [] hrs)]
+               :when (seq blocks)]
+           {:blocks blocks}))))
+
+(defn- hours-c
+  "The theta-free hourly term of an on block."
+  ^double [hours ^double kappa]
+  (reduce + 0.0 (for [[a y] hours :when (> a 1e-9) :let [r (* kappa a)]]
+                  (- (num/log-gamma (+ y r)) (num/log-gamma r) (num/log-gamma (+ y 1.0))))))
+
+(defn- block-log-terms
+  "Per grid point: log P(block | theta) for one block summarized as
+  [mass total C], mixing on (prob pi) and off."
+  [c-on kappa pi [mass total cterm]]
+  (let [lpi (Math/log pi) l1pi (Math/log (- 1.0 pi))]
+    (mapv (fn [u]
+            (let [ct (* c-on (Math/exp u))
+                  lp (- (Math/log ct) (Math/log (+ kappa ct)))
+                  l1p (- (Math/log kappa) (Math/log (+ kappa ct)))
+                  on (+ lpi cterm (* kappa mass l1p) (* total lp))]
+              (if (pos? total)
+                on
+                (let [mx (max on l1pi)]
+                  (+ mx (Math/log (+ (Math/exp (- on mx)) (Math/exp (- l1pi mx)))))))))
+          log-theta-grid)))
+
+(defn- theta-prior-terms
+  "log[Gamma(theta; alpha, alpha) theta] per grid point (the integrand over log theta)."
+  [alpha]
+  (let [lnorm (- (* alpha (Math/log alpha)) (num/log-gamma alpha))]
+    (mapv (fn [u] (+ lnorm (* alpha u) (- (* alpha (Math/exp u))))) log-theta-grid)))
+
+(defn- summarize-block [hours kappa]
+  [(reduce + 0.0 (map first hours)) (reduce + 0.0 (map second hours)) (hours-c hours kappa)])
+
+(defn- rung7-loglik [windows c kappa alpha pi]
+  (let [c-on (/ c pi)
+        prior (theta-prior-terms alpha)]
+    (reduce + (for [{:keys [blocks]} windows]
+                (+ (log-sum-exp (reduce (fn [acc b] (mapv + acc (block-log-terms c-on kappa pi (summarize-block b kappa))))
+                                        prior blocks))
+                   (Math/log 0.02))))))
+
+(defn fit-onoff
+  "Maximum-likelihood rung-7 parameters {:c :kappa :alpha :pi} from `block-training` data."
+  [windows]
+  (let [tot (reduce + 0.0 (for [{:keys [blocks]} windows b blocks [_ y] b] y))
+        mass (reduce + 0.0 (for [{:keys [blocks]} windows b blocks [a _] b] a))
+        c0 (/ tot (max 1e-9 mass))
+        sig (fn [x] (/ 1.0 (+ 1.0 (Math/exp (- x)))))
+        {[lc lk la lpi] :x} (num/nelder-mead
+                              (fn [[lc lk la lpi]]
+                                (let [v (rung7-loglik windows (Math/exp lc) (Math/exp lk) (Math/exp la) (sig lpi))]
+                                  (if (Double/isFinite v) (- v) 1e300)))
+                              [(Math/log (max 1e-6 c0)) 0.0 0.0 0.0] :tol 1e-7 :max-iter 4000)]
+    {:rung 7 :c (Math/exp lc) :kappa (Math/exp lk) :alpha (Math/exp la) :pi (sig lpi)}))
+
+(defn blocks-so-far
+  "The current window's hours before `now`, grouped into model blocks:
+  [done-blocks current], each block [[mass count] ...]; `current` is the block
+  in progress (empty when `now` falls on a block boundary)."
+  [series start now prof zone spec]
+  (let [hrs (subseq series >= (* 3600 (quot start 3600)) < now)
+        groups (reduce (fn [acc [h [live y]]]
+                         (let [hour [(* live (nth prof (m/hour-of-week zone h))) (Math/rint y)]]
+                           (if (or (empty? acc) (m/block-start? zone spec h))
+                             (conj acc [hour])
+                             (conj (pop acc) (conj (peek acc) hour)))))
+                       [] hrs)
+        boundary? (and (zero? (mod now 3600)) (m/block-start? zone spec now))]
+    (if (or boundary? (empty? groups))
+      [groups []]
+      [(pop groups) (peek groups)])))
+
+(defn forecast-onoff
+  "Rung-7 predictive of the meter at `resets-at`. `done-blocks` are the
+  window's finished blocks and `current` the hours so far of the block in
+  progress (each [[mass count] ...]); the future comes from the profile."
+  [{:keys [c kappa alpha pi]} prof zone spec done-blocks current now resets-at x
+   & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [c-on (/ c pi)
+        pieces (m/future-pieces prof zone spec now resets-at 3600)
+        m-cur (reduce + 0.0 (keep (fn [[_ mass idx]] (when (zero? idx) mass)) pieces))
+        m-later (mapv (fn [[_ g]] (reduce + 0.0 (map second g)))
+                      (group-by #(nth % 2) (remove #(zero? (nth % 2)) pieces)))
+        base (reduce (fn [acc b] (mapv + acc (block-log-terms c-on kappa pi (summarize-block b kappa))))
+                     (theta-prior-terms alpha) done-blocks)
+        cur (summarize-block current kappa)
+        cur-terms (block-log-terms c-on kappa pi cur)
+        lw (mapv + base cur-terms)
+        mx (apply max lw)
+        cum (double-array (reductions + (map #(Math/exp (- % mx)) lw)))
+        total (aget cum (dec (alength cum)))
+        r (num/rng seed)
+        draws (double-array n)]
+    (dotimes [i n]
+      (let [u (* total (.nextDouble r))
+            j (min (dec (count log-theta-grid))
+                   (let [k (java.util.Arrays/binarySearch cum u)] (if (neg? k) (- (inc k)) k)))
+            theta (Math/exp (+ (nth log-theta-grid j) (* 0.02 (- (.nextDouble r) 0.5))))
+            ;; P(current block on | theta, its usage so far)
+            [cm ct cc] cur
+            ctheta (* c-on theta)
+            lon (+ (Math/log pi) cc (* kappa cm (- (Math/log kappa) (Math/log (+ kappa ctheta))))
+                   (* ct (- (Math/log ctheta) (Math/log (+ kappa ctheta)))))
+            p-on (if (pos? ct) 1.0 (/ 1.0 (+ 1.0 (Math/exp (- (Math/log (- 1.0 pi)) lon)))))
+            m-on (+ (if (< (.nextDouble r) p-on) m-cur 0.0)
+                    (reduce + 0.0 (filter (fn [_] (< (.nextDouble r) pi)) m-later)))]
+        (aset draws i (+ (double x)
+                         (if (pos? m-on)
+                           (double (num/poisson-sample r (num/gamma-sample r (* kappa m-on) (/ kappa ctheta))))
                            0.0)))))
     (java.util.Arrays/sort draws)
     {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)

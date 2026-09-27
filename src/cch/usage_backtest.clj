@@ -605,7 +605,7 @@
 
 (def ^:private ladder-arms
   ["R0 linear" "R1 Poisson" "R2 +profile" "R3 +bursts (NB)" "R4 +recency (NB, 28d)"
-   "R5 +weekly pace" "R6 +bursts +weekly pace" "A production"])
+   "R5 +weekly pace" "R6 +bursts +weekly pace" "R7 +on/off blocks" "A production"])
 
 (defn run-ladder
   "Print the count-process ladder: nested baselines from linear extrapolation
@@ -661,8 +661,14 @@
                             (base/fit-bursts-weekly
                               (base/window-training (m/windows (rows-before t) spec) t (profile-at t) zone
                                                     (:fit-lookback-secs spec))))))
-        _ (dorun (pmap (fn [[cell t rung]] (case rung :A (fit-a cell t) :W (fit-weekly cell t) :BW (fit-bw cell t) (fit-rung cell t rung)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) rung [:A :W :BW 1 2 3 4]] [cell t rung])))
+        fit-oo (memoize (fn [cell t]
+                          (let [{:keys [spec rows-before]} (data cell)]
+                            (base/fit-onoff
+                              (base/block-training (m/windows (rows-before t) spec) t (profile-at t) zone spec
+                                                   (:fit-lookback-secs spec))))))
+        _ (dorun (pmap (fn [[cell t rung]] (case rung :A (fit-a cell t) :W (fit-weekly cell t) :BW (fit-bw cell t)
+                                             :OO (fit-oo cell t) (fit-rung cell t rung)))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) rung [:A :W :BW :OO 1 2 3 4]] [cell t rung])))
         rows (vec
                (apply concat
                       (pmap
@@ -693,6 +699,9 @@
                                  "R4 +recency (NB, 28d)" (rung 4)
                                  "R5 +weekly pace" (score (base/forecast-weekly (fit-weekly cell refit) prof zone spec (:start w) t (:eff-end w) x))
                                  "R6 +bursts +weekly pace" (score (base/forecast-bursts-weekly (fit-bw cell refit) prof zone spec (:start w) t (:eff-end w) x))
+                                 "R7 +on/off blocks" (let [series (m/hour-series (m/windows (rows-before t) spec) t)
+                                                           [done cur] (base/blocks-so-far series (:start w) t prof zone spec)]
+                                                       (score (base/forecast-onoff (fit-oo cell refit) prof zone spec done cur t (:eff-end w) x)))
                                  "A production" (score (m/forecast (fit-a cell refit) (rows-before t) spec zone t (:eff-end w) x :path? false))}))))
                         targets)))
         by-cell (into {} (for [[cell cr] (group-by :cell rows)]
@@ -708,4 +717,5 @@
                      :contrasts [["R1 Poisson" "R0 linear"] ["R2 +profile" "R1 Poisson"]
                                  ["R3 +bursts (NB)" "R2 +profile"] ["R4 +recency (NB, 28d)" "R3 +bursts (NB)"]
                                  ["R5 +weekly pace" "R2 +profile"] ["R6 +bursts +weekly pace" "R5 +weekly pace"]
-                                 ["R6 +bursts +weekly pace" "R3 +bursts (NB)"] ["A production" "R6 +bursts +weekly pace"]])))
+                                 ["R6 +bursts +weekly pace" "R3 +bursts (NB)"] ["R7 +on/off blocks" "R6 +bursts +weekly pace"]
+                                 ["A production" "R7 +on/off blocks"]])))

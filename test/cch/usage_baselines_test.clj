@@ -86,3 +86,33 @@
             r5 (b/forecast-weekly {:c c :alpha alpha} prof zone spec start now end (* c 72.0))]
         (is (< (:median slow) (:median usual)))
         (is (> (- (:hi usual) (:lo usual)) (- (:hi r5) (:lo r5))))))))
+
+(defn- simulate-onoff
+  "Weeks of 7 daily blocks x 24 unit-mass hours: each day on with prob pi,
+  theta ~ Gamma(alpha, alpha), on-day hours rung-6 with rate c / pi."
+  [n c kappa alpha pi seed]
+  (let [r (num/rng seed)]
+    (vec (for [_ (range n)]
+           (let [theta (num/gamma-sample r alpha alpha)]
+             {:blocks (vec (for [_ (range 7)]
+                             (let [on? (< (.nextDouble r) pi)]
+                               (vec (for [_ (range 24)]
+                                      [1.0 (if on?
+                                             (double (num/poisson-sample r (num/gamma-sample r kappa (/ kappa (* (/ c pi) theta)))))
+                                             0.0)])))))})))))
+
+(deftest onoff-fit-and-idle-days
+  (let [windows (simulate-onoff 200 0.5 0.5 4.0 0.7 31)
+        {:keys [c kappa pi alpha] :as fit} (b/fit-onoff windows)]
+    (testing "recovers rate, burstiness, and the on-day probability"
+      (is (< (Math/abs (- 1.0 (/ c 0.5))) 0.1))
+      (is (< (Math/abs (- 1.0 (/ kappa 0.5))) 0.15))
+      (is (< (Math/abs (- pi 0.7)) 0.05))
+      (is (< 2.0 alpha 8.0)))
+    (testing "idle days make the week's total more uncertain than rung 6 at the same mean"
+      (let [spec (m/specs :seven-day)
+            start 1780272000 now (+ start (* 3 86400)) end (+ start (* 7 86400))
+            on-day (vec (repeat 24 [1.0 1.0]))
+            f7 (b/forecast-onoff fit prof zone spec [on-day on-day on-day] [] now end 72.0)
+            f6 (b/forecast-bursts-weekly {:c c :kappa kappa :alpha alpha} prof zone spec start now end 72.0)]
+        (is (> (- (:hi f7) (:lo f7)) (- (:hi f6) (:lo f6))))))))
