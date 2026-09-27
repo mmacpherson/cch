@@ -25,9 +25,11 @@
     P2  mixed Poisson process: lambda(t) = c * theta_w * profile(t), a gamma
         pace theta_w ~ Gamma(alpha, alpha) per calendar week (Monday 04:00
         local), the user's week rather than the provider's quota window
-    P3  Cox process with a drifting pace: lambda(t) = c * exp(u(t)) * profile(t),
-        u an Ornstein-Uhlenbeck process (spread s, half-life h hours),
-        approximated as constant within each clock hour
+    --  Cox process with a drifting pace alone (negative result: without
+        sessions the pace is forced to explain bursts)
+    P3  on/off sessions: a Markov-modulated Poisson process; a hidden chain
+        switches off->on at rate a and on->off at rate b (per hour); ticks
+        arrive at c * profile(t) while on and not at all while off
 
   Pure functions."
   (:require [cch.numeric :as num]
@@ -308,7 +310,7 @@
             (aset out i (- (* y (+ lc u)) (* c mass (Math/exp u)) lf))))))
     out))
 
-(defn p3-filter
+(defn drift-filter
   "Forward filter over hourly observations: {:p posterior :loglik L}."
   [hours {:keys [c s h]}]
   (let [phi (Math/pow 2.0 (/ -1.0 h))
@@ -330,7 +332,7 @@
               (dotimes [i (alength post)] (aset post i (/ (aget post i) z)))
               (recur more post (+ ll mx (Math/log z)) false))))))))
 
-(defn fit-p3
+(defn fit-drift
   "Penalized ML {:c :s :h} (weak priors on the unconstrained scale, sd 1 for
   the spread and half-life, as rung 8: beyond the grid the likelihood is flat
   in them)."
@@ -341,18 +343,18 @@
         sd [3.0 1.0 1.0]
         unpack (fn [[lc ls lh]] {:c (Math/exp lc) :s (Math/exp ls) :h (Math/exp lh)})
         penalty (fn [x] (* 0.5 (reduce + (map (fn [xi mi d] (Math/pow (/ (- xi mi) d) 2)) x x0 sd))))
-        {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (p3-filter hours (unpack x)))]
+        {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (drift-filter hours (unpack x)))]
                                           (if (Double/isFinite v) (+ (- v) (penalty x)) 1e300)))
                                 x0 :tol 1e-6 :max-iter 2000)]
-    (assoc (unpack x) :rung :P3)))
+    (assoc (unpack x) :rung :drift)))
 
-(defn forecast-p3
+(defn forecast-drift
   "Meter at `end` from reading `x` at `now`: filter the hourly observations
   up to now, then simulate the pace hour by hour over the future profile."
   [{:keys [c s h] :as params} prof zone hours now end x & {:keys [n seed] :or {n 3000 seed 1}}]
   (let [phi (Math/pow 2.0 (/ -1.0 h))
         innov (max 1e-3 (* s (Math/sqrt (- 1.0 (* phi phi)))))
-        ^doubles p (:p (p3-filter hours params))
+        ^doubles p (:p (drift-filter hours params))
         grid ^doubles base/drift-grid
         cum (double-array (reductions + p))
         total (aget cum (dec (alength cum)))
@@ -373,6 +375,135 @@
                            (if (or (nil? mh) (>= (+ x acc) 100.0)) acc
                                (let [u (+ (* phi u) (* innov (.nextGaussian r)))]
                                  (recur more u (+ acc (if (pos? mh) (double (num/poisson-sample r (* c (Math/exp u) mh))) 0.0))))))))))
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
+     :hi (num/quantile draws 0.95)
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))
+
+;; --- P3: on/off sessions (Markov-modulated Poisson process) ---
+;;
+;; State 0 off, 1 on. Generator Q = [[-a a] [b -b]]; intensity Lambda =
+;; diag(0, lam). Over an interval of length dt with k ticks, the matrix of
+;; P(k ticks, end state | start state) is the z^k coefficient of
+;; exp((Q - Lambda + z Lambda) dt), computed by uniformization: with
+;; nu >= max exit rate, exp(G dt) = sum_n Pois(n; nu dt) (I + G / nu)^n,
+;; tracking polynomial coefficients in z up to degree k. lam within an
+;; interval is c times its mean profile (exact for short intervals).
+;; Consecutive zero-tick intervals within an hour are merged (exact).
+
+(defn mmpp-units
+  "Observation units for the session model: [{:dt hours :mass m :k ticks}],
+  zero-tick intervals split at clock hours and merged within each hour,
+  ticked intervals kept whole."
+  [ivs prof zone]
+  (let [units (transient [])
+        flush (fn [units acc] (if acc (conj! units acc) units))]
+    (loop [[{:keys [t0 t1 k] :as iv} & more] ivs acc nil units units]
+      (if (nil? iv)
+        (persistent! (flush units acc))
+        (if (pos? k)
+          (recur more nil (conj! (flush units acc)
+                                 {:dt (/ (- t1 t0) 3600.0) :mass (m/mass prof zone t0 t1) :k k :hour nil}))
+          ;; zero-tick: split at hours, merge pieces into the running hour unit
+          (let [[acc units] (loop [t t0 acc acc units units]
+                              (if (>= t t1) [acc units]
+                                  (let [h (* 3600 (quot t 3600)) nxt (min t1 (+ h 3600))
+                                        piece {:dt (/ (- nxt t) 3600.0) :mass (m/mass prof zone t nxt) :k 0.0 :hour h}]
+                                    (if (and acc (= (:hour acc) h))
+                                      (recur nxt (-> acc (update :dt + (:dt piece)) (update :mass + (:mass piece))) units)
+                                      (recur nxt piece (flush units acc))))))]
+            (recur more acc units)))))))
+
+(defn- poly-mul
+  "Product of 2x2 matrix polynomials (vectors of [m00 m01 m10 m11] by degree), truncated at degree kmax."
+  [p q kmax]
+  (let [out (vec (repeat (inc kmax) [0.0 0.0 0.0 0.0]))]
+    (reduce (fn [out [i [a00 a01 a10 a11]]]
+              (reduce (fn [out [j [b00 b01 b10 b11]]]
+                        (let [d (+ i j)]
+                          (if (> d kmax) out
+                              (update out d (fn [[c00 c01 c10 c11]]
+                                              [(+ c00 (* a00 b00) (* a01 b10)) (+ c01 (* a00 b01) (* a01 b11))
+                                               (+ c10 (* a10 b00) (* a11 b10)) (+ c11 (* a10 b01) (* a11 b11))])))))
+                      out (map-indexed vector q)))
+            out (map-indexed vector p))))
+
+(defn interval-matrix
+  "[m00 m01 m10 m11] = P(k ticks over dt hours, end state | start state)
+  for rates a, b and on-intensity lam (per hour)."
+  [a b lam dt k]
+  (let [k (long k)
+        nu (max 1e-9 (* 1.05 (max a (+ b lam))))
+        ;; P = I + (Q - Lambda)/nu (degree 0) and Lambda/nu (degree 1)
+        p0 [(- 1.0 (/ a nu)) (/ a nu) (/ b nu) (- 1.0 (/ (+ b lam) nu))]
+        step (cond-> [p0] (pos? k) (conj [0.0 0.0 0.0 (/ lam nu)]))
+        x (* nu dt)
+        nmax (long (+ x (* 8 (Math/sqrt (max x 1.0))) 20))]
+    (loop [n 0 pw [[1.0 0.0 0.0 1.0]]            ; (P + z B)^n as a polynomial
+           w (Math/exp (- x))                     ; Pois(n; x)
+           acc [0.0 0.0 0.0 0.0]]
+      (if (> n nmax)
+        acc
+        (let [coef (get pw k [0.0 0.0 0.0 0.0])
+              acc (mapv + acc (mapv #(* w %) coef))]
+          (recur (inc n) (poly-mul pw step k) (* w (/ x (inc n))) acc))))))
+
+(defn p3-filter
+  "Forward filter over session units: {:p [P(off) P(on)] :loglik L}."
+  [units {:keys [c a b]}]
+  (loop [[{:keys [dt mass k]} & more :as us] units p0 (/ b (+ a b)) p1 (/ a (+ a b)) ll 0.0]
+    (if (empty? us)
+      {:p [p0 p1] :loglik ll}
+      (let [lam (if (pos? dt) (/ (* c mass) dt) 0.0)
+            [m00 m01 m10 m11] (interval-matrix a b lam dt k)
+            q0 (+ (* p0 m00) (* p1 m10)) q1 (+ (* p0 m01) (* p1 m11))
+            z (+ q0 q1)]
+        (if (and (pos? z) (Double/isFinite z))
+          (recur more (/ q0 z) (/ q1 z) (+ ll (Math/log z)))
+          {:p [p0 p1] :loglik Double/NEGATIVE_INFINITY})))))
+
+(defn fit-p3
+  "Penalized ML session parameters {:c :a :b} (per hour; weak normal priors
+  on the log scale, sd 3)."
+  [units]
+  (let [ticks (reduce + 0.0 (map :k units)) mass (reduce + 0.0 (map :mass units))
+        x0 [(Math/log (max 1e-6 (* 3 (/ ticks (max 1e-9 mass))))) (Math/log 0.3) (Math/log 1.0)]
+        unpack (fn [[lc la lb]] {:c (Math/exp lc) :a (Math/exp la) :b (Math/exp lb)})
+        penalty (fn [x] (* 0.5 (reduce + (map (fn [xi mi] (Math/pow (/ (- xi mi) 3.0) 2)) x x0))))
+        {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (p3-filter units (unpack x)))]
+                                          (if (Double/isFinite v) (+ (- v) (penalty x)) 1e300)))
+                                x0 :tol 1e-6 :max-iter 1500)]
+    (assoc (unpack x) :rung :P3)))
+
+(defn forecast-p3
+  "Meter at `end` from reading `x` at `now`: the session state filtered up
+  to now, then on/off switching and ticks simulated over the future profile."
+  [{:keys [c a b] :as params} prof zone units now end x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [[_ p-on] (:p (p3-filter units params))
+        ;; future (duration h, mass) per clock hour
+        fut (loop [t now out []]
+              (if (>= t end) out
+                  (let [nxt (min end (* 3600 (inc (quot t 3600))))]
+                    (recur nxt (conj out [(/ (- nxt t) 3600.0) (m/mass prof zone t nxt)])))))
+        r (num/rng seed)
+        draws (double-array n)]
+    (dotimes [i n]
+      (aset draws i
+            (+ (double x)
+               (loop [[[dt mass] & more] fut on? (Boolean/valueOf (< (.nextDouble r) p-on)) acc 0.0]
+                 (if (or (nil? dt) (>= (+ x acc) 100.0))
+                   acc
+                   ;; time on within this hour, switching as a continuous-time chain
+                   (let [[t-on on?] (loop [t 0.0 on? on? t-on 0.0]
+                                      (let [rate (if on? b a)
+                                            hold (/ (- (Math/log (- 1.0 (.nextDouble r)))) rate)]
+                                        (if (>= (+ t hold) dt)
+                                          [(+ t-on (if on? (- dt t) 0.0)) on?]
+                                          (recur (+ t hold) (not on?) (+ t-on (if on? hold 0.0))))))
+                         lam (if (pos? dt) (/ (* c mass) dt) 0.0)]
+                     (recur more on? (+ acc (double (num/poisson-sample r (* lam t-on)))))))))))
     (java.util.Arrays/sort draws)
     {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
      :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)

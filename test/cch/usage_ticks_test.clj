@@ -104,7 +104,7 @@
         (is (> (:median (tk/forecast-p2 fit prof zone busy now end 0.0))
                (* 2 (:median (tk/forecast-p2 fit prof zone quiet now end 0.0)))))))))
 
-(deftest p3-drifting-pace
+(deftest drift-only-pace
   (let [zone (java.time.ZoneId/of "UTC")
         prof (vec (repeat 168 1.0))
         r (num/rng 12)
@@ -124,15 +124,15 @@
                               (conj out [t pct reset])))))
         ivs (tk/intervals readings 300 604800)
         hours (tk/hourly-obs ivs prof zone (* 3600 (inc (* 60 24))))
-        fit (tk/fit-p3 hours)]
+        fit (tk/fit-drift hours)]
     (testing "recovers a drifting pace of the right size and persistence"
       (is (< 0.4 (:s fit) 1.4))
       (is (< 12.0 (:h fit) 120.0)))
     (testing "a drifting pace explains the ticks better than a constant one"
-      (is (> (:loglik (tk/p3-filter hours fit))
-             (:loglik (tk/p3-filter hours (assoc fit :s 1e-3))))))
+      (is (> (:loglik (tk/drift-filter hours fit))
+             (:loglik (tk/drift-filter hours (assoc fit :s 1e-3))))))
     (testing "forecasts are finite and never below the current reading"
-      (let [now (* 3600 (* 60 24)) f (tk/forecast-p3 fit prof zone hours now (+ now (* 48 3600)) 30.0)]
+      (let [now (* 3600 (* 60 24)) f (tk/forecast-drift fit prof zone hours now (+ now (* 48 3600)) 30.0)]
         (is (every? #(and (Double/isFinite %) (>= % 30.0)) (:draws f)))))))
 
 (deftest hours-before-matches-a-rebuild
@@ -150,3 +150,50 @@
               fast (tk/hours-before base ivs prof zone t 0)
               near (fn [a b] (every? true? (map (fn [[x1 y1] [x2 y2]] (and (< (Math/abs (- x1 x2)) 1e-9) (< (Math/abs (- y1 y2)) 1e-9))) a b)))]
           (is (near (take (count fast) rebuilt) fast) (str "t=" t)))))))
+
+(deftest session-interval-matrix
+  (testing "summed over tick counts, rows are transition probabilities"
+    (let [ms (map #(tk/interval-matrix 0.4 1.2 3.0 2.5 %) (range 60))
+          [m00 m01 m10 m11] (apply mapv + ms)]
+      (is (< (Math/abs (- 1.0 (+ m00 m01))) 1e-6))
+      (is (< (Math/abs (- 1.0 (+ m10 m11))) 1e-6))))
+  (testing "with no switching, ticks while on are Poisson(lam dt)"
+    (doseq [k [0 1 4]]
+      (let [[_ _ _ m11] (tk/interval-matrix 1e-12 1e-12 2.0 1.5 k)
+            pois (Math/exp (- (* k (Math/log 3.0)) 3.0 (num/log-gamma (+ k 1.0))))]
+        (is (< (Math/abs (- m11 pois)) 1e-6) (str "k=" k))))))
+
+(deftest sessions-fit
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (repeat 168 1.0))
+        r (num/rng 21)
+        a 0.25 b 1.0 c 3.0                        ; sessions ~1 h, gaps ~4 h, 3 ticks/h in session
+        ;; simulate the chain in continuous time over 40 days; readings every 5 minutes
+        horizon (* 40 86400)
+        switches (loop [t 0.0 on? false out []]
+                   (if (> t horizon) out
+                       (let [hold (* 3600 (/ (- (Math/log (- 1.0 (.nextDouble r)))) (if on? b a)))]
+                         (recur (+ t hold) (not on?) (conj out [t (+ t hold) on?])))))
+        tick-times (sort (for [[t0 t1 on?] switches :when on?
+                               :let [nk (num/poisson-sample r (* c (/ (- t1 t0) 3600.0)))]
+                               _ (range nk)]
+                           (+ t0 (* (.nextDouble r) (- t1 t0)))))
+        readings (loop [t 300 ticks tick-times pct 0.0 out []]
+                   (if (> t horizon) out
+                       (let [[before after] (split-with #(< % t) ticks)
+                             reset (* 604800 (inc (quot t 604800)))
+                             pct (if (and (seq out) (not= reset (nth (peek out) 2))) (double (count before)) (+ pct (count before)))]
+                         (recur (+ t 300) after pct (conj out [t pct reset])))))
+        ivs (tk/intervals readings 300 604800)
+        units (tk/mmpp-units ivs prof zone)
+        fit (tk/fit-p3 units)]
+    (testing "recovers the session rates and the in-session tick rate"
+      (is (< 0.12 (:a fit) 0.5))
+      (is (< 0.5 (:b fit) 2.0))
+      (is (< 2.0 (:c fit) 4.5)))
+    (testing "sessions explain the ticks better than a constant rate"
+      (is (> (:loglik (tk/p3-filter units fit))
+             (tk/loglik-p1 ivs (:c (tk/fit-p1 ivs prof zone)) prof zone))))
+    (testing "forecasts are finite and never below the current reading"
+      (let [f (tk/forecast-p3 fit prof zone units horizon (+ horizon (* 24 3600)) 20.0)]
+        (is (every? #(and (Double/isFinite %) (>= % 20.0)) (:draws f)))))))
