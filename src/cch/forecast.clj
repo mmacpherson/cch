@@ -514,11 +514,12 @@
       r5h           r5h
       r7d           r7d)))
 
-(defonce ^:private nb-weekly-cache (atom {}))
+(defonce ^:private challenger-cache (atom {}))
 
-(defn- record-nb-weekly!
-  "Record the rung-6 challenger (cch.usage-baselines) for one agent/window.
-  Runs off the request thread: its first fit takes seconds."
+(defn- record-challengers!
+  "Record the count-process challengers (cch.usage-baselines rungs 6 and 7:
+  nb-weekly-v1, onoff-v1) for one agent/window. Runs off the request
+  thread: their first fits take seconds."
   [base agent window-key now resets-at last-pct]
   (future
     (try
@@ -528,18 +529,23 @@
             wins (model/windows rows spec)]
         (when (>= (count (filter #(< (:eff-end %) now) wins)) min-model-windows)
           (let [prof (fleet-profile now)
-                fit (cached-fit nb-weekly-cache [(db/db-path) agent window-key] now
-                                (fn [_] (assoc (baselines/fit-bursts-weekly
-                                                 (baselines/window-training wins now prof zone (:fit-lookback-secs spec)))
-                                               :fitted-at now)))
+                lookback (:fit-lookback-secs spec)
+                fit (fn [model fit-fn]
+                      (cached-fit challenger-cache [(db/db-path) agent window-key model] now
+                                  (fn [_] (assoc (fit-fn) :fitted-at now))))
                 start (or (some #(when (<= (Math/abs (- (:end %) resets-at)) (:cluster-secs spec)) (:start %)) wins)
                           (- resets-at (span-secs window-key)))
-                {:keys [draws p-cap]} (baselines/forecast-bursts-weekly fit prof zone spec start now resets-at last-pct)]
-            (ledger/record! (assoc base :model "nb-weekly-v1" :p-cap p-cap
-                                   :quantiles (mapv #(num/quantile draws %) ledger/levels))))))
+                record (fn [model {:keys [draws p-cap]}]
+                         (ledger/record! (assoc base :model model :p-cap p-cap
+                                                :quantiles (mapv #(num/quantile draws %) ledger/levels))))
+                r6 (fit "nb-weekly-v1" #(baselines/fit-bursts-weekly (baselines/window-training wins now prof zone lookback)))
+                r7 (fit "onoff-v1" #(baselines/fit-onoff (baselines/block-training wins now prof zone spec lookback)))
+                [done cur] (baselines/blocks-so-far (model/hour-series wins now) start now prof zone spec)]
+            (record "nb-weekly-v1" (baselines/forecast-bursts-weekly r6 prof zone spec start now resets-at last-pct))
+            (record "onoff-v1" (baselines/forecast-onoff r7 prof zone spec done cur now resets-at last-pct)))))
       (catch Throwable t
         (binding [*out* *err*]
-          (println "cch.forecast: nb-weekly ledger record failed:" (.getMessage t)))))))
+          (println "cch.forecast: challenger ledger record failed:" (.getMessage t)))))))
 
 (defn- record-ledger!
   "Record the ledger models' forecasts for one agent/window (hourly, see
@@ -557,7 +563,7 @@
               qs (ledger/gaussian-quantiles proj lo hi last-pct)]
           (ledger/record! (assoc base :model "rate-bayes-v1" :quantiles qs
                                  :p-cap (/ (count (filter #(>= % 100.0) qs)) 19.0)))))
-      (record-nb-weekly! base agent window-key now resets-at last-pct))
+      (record-challengers! base agent window-key now resets-at last-pct))
     (catch Throwable t
       (binding [*out* *err*]
         (println "cch.forecast: ledger record failed:" (.getMessage t))))))
