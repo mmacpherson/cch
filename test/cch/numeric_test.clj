@@ -87,3 +87,9 @@
           v (/ (reduce + (map #(Math/pow (- % m) 2) xs)) 20000.0)]
       (is (< (Math/abs (- m mu)) (* 4 (Math/sqrt (/ mu 20000.0)))) (str "mean " mu))
       (is (< (Math/abs (- 1.0 (/ v mu))) 0.05) (str "variance " mu)))))
+
+(deftest poisson-sample-large-means-are-fast-and-right
+  (let [r (s/rng 9)
+        xs (vec (repeatedly 20000 #(s/poisson-sample r 1e6)))
+        m (/ (reduce + xs) 20000.0)]
+    (is (< (Math/abs (- 1.0 (/ m 1e6))) 1e-3))))

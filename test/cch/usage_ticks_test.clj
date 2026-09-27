@@ -17,13 +17,16 @@
         ivs (tk/intervals readings 300 (- r2 950))]
     (is (= [{:t0 100 :t1 160 :k 1.0} {:t0 160 :t1 400 :k 3.0} {:t0 400 :t1 500 :k 91.0}
             {:t0 950 :t1 950 :k 0.0} {:t0 950 :t1 1000 :k 1.0} {:t0 1000 :t1 1100 :k 1.0}]
-           ivs))
+           (mapv #(dissoc % :known) ivs)))
+    (testing "what is known before t is a prefix, and never uses a later reading"
+      (is (= (mapv #(dissoc % :known) (tk/intervals (filter #(< (first %) 1000) readings) 300 (- r2 950)))
+             (mapv #(dissoc % :known) (tk/known-before ivs 1000)))))
     (testing "the capped span until the old reset is not exposure"
       (is (= 550.0 (:secs (tk/exposure ivs)))))))
 
 (deftest idle-gap-between-windows-is-exposure
   (let [ivs (tk/intervals [[100 5.0 10000] [200 7.0 10000] [9000 1.0 20000]] 300 15000)]
-    (is (= [{:t0 100 :t1 200 :k 2.0} {:t0 200 :t1 5000 :k 0.0} {:t0 5000 :t1 9000 :k 1.0}] ivs)
+    (is (= [{:t0 100 :t1 200 :k 2.0} {:t0 200 :t1 5000 :k 0.0} {:t0 5000 :t1 9000 :k 1.0}] (mapv #(dissoc % :known) ivs))
         "zero-tick gap until the new start (20000-15000), then the new window's tick"))
   (testing "a window start after its first reading (drifting reset times) never makes overlapping intervals"
     (let [ivs (tk/intervals [[100 5.0 10000] [200 7.0 10000] [9000 1.0 20000] [9500 2.0 20000]] 300 5000)]
@@ -100,3 +103,50 @@
             quiet [{:t0 ws :t1 now :k (* 0.3 fc 48)}]]
         (is (> (:median (tk/forecast-p2 fit prof zone busy now end 0.0))
                (* 2 (:median (tk/forecast-p2 fit prof zone quiet now end 0.0)))))))))
+
+(deftest p3-drifting-pace
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (repeat 168 1.0))
+        r (num/rng 12)
+        c 0.25 s 0.8 h 36.0
+        phi (Math/pow 2.0 (/ -1.0 h))
+        innov (* s (Math/sqrt (- 1.0 (* phi phi))))
+        ;; 60 days of hourly readings, pace an hourly AR(1); the meter restarts
+        ;; when its window (reset time) changes
+        readings (loop [k 0 u 0.0 pct 0.0 prev-reset nil out []]
+                   (if (= k (* 60 24))
+                     out
+                     (let [t (* 3600 (inc k))
+                           reset (* 604800 (inc (quot t 604800)))
+                           pct (if (= reset prev-reset) pct 0.0)
+                           pct (+ pct (num/poisson-sample r (* c (Math/exp u))))]
+                       (recur (inc k) (+ (* phi u) (* innov (.nextGaussian r))) pct reset
+                              (conj out [t pct reset])))))
+        ivs (tk/intervals readings 300 604800)
+        hours (tk/hourly-obs ivs prof zone (* 3600 (inc (* 60 24))))
+        fit (tk/fit-p3 hours)]
+    (testing "recovers a drifting pace of the right size and persistence"
+      (is (< 0.4 (:s fit) 1.4))
+      (is (< 12.0 (:h fit) 120.0)))
+    (testing "a drifting pace explains the ticks better than a constant one"
+      (is (> (:loglik (tk/p3-filter hours fit))
+             (:loglik (tk/p3-filter hours (assoc fit :s 1e-3))))))
+    (testing "forecasts are finite and never below the current reading"
+      (let [now (* 3600 (* 60 24)) f (tk/forecast-p3 fit prof zone hours now (+ now (* 48 3600)) 30.0)]
+        (is (every? #(and (Double/isFinite %) (>= % 30.0)) (:draws f)))))))
+
+(deftest hours-before-matches-a-rebuild
+  (testing "the incremental hourly view equals rebuilding from the readings before t"
+    (let [zone (java.time.ZoneId/of "UTC")
+          prof (vec (for [h (range 168)] (+ 0.5 (mod h 3))))
+          r (num/rng 4)
+          ;; two windows with an idle gap between them (the second starts at first use)
+          readings (concat (for [k (range 1 60)] [(* 1000 k) (double (quot k 7)) 200000])
+                           (for [k (range 1 40)] [(+ 150000 (* 900 k)) (double (quot k 5)) 400000]))
+          ivs (tk/intervals readings 300 250000)
+          base (tk/hourly-base ivs)]
+      (doseq [t [30000 100000 149000 152000 170000 190000]]
+        (let [rebuilt (tk/hourly-obs (tk/intervals (filter #(< (first %) t) readings) 300 250000) prof zone (* 3600 (quot t 3600)))
+              fast (tk/hours-before base ivs prof zone t 0)
+              near (fn [a b] (every? true? (map (fn [[x1 y1] [x2 y2]] (and (< (Math/abs (- x1 x2)) 1e-9) (< (Math/abs (- y1 y2)) 1e-9))) a b)))]
+          (is (near (take (count fast) rebuilt) fast) (str "t=" t)))))))

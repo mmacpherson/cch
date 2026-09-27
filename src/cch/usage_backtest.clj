@@ -879,12 +879,13 @@
 (def ^:private ct-series-arms
   "Continuous-time rungs, each beside its hourly counterpart and production."
   ["P0 Poisson process" "R1 Poisson (hourly)" "P1 +profile" "R2 +profile (hourly)"
-   "P2 +weekly pace" "R5 +weekly pace (hourly)" "A production"])
+   "P2 +weekly pace" "R5 +weekly pace (hourly)" "P3 +drifting pace" "A production"])
 
 (def ^:private ct-series-contrasts
   [["P0 Poisson process" "R1 Poisson (hourly)"] ["P1 +profile" "R2 +profile (hourly)"]
    ["P2 +weekly pace" "R5 +weekly pace (hourly)"]
-   ["P1 +profile" "P0 Poisson process"] ["P2 +weekly pace" "P1 +profile"]])
+   ["P1 +profile" "P0 Poisson process"] ["P2 +weekly pace" "P1 +profile"] ["P3 +drifting pace" "P1 +profile"]
+   ["P3 +drifting pace" "P2 +weekly pace"] ["A production" "P3 +drifting pace"]])
 
 (defn run-ct-series
   "Print the continuous-time tick-process series against its hourly
@@ -910,15 +911,24 @@
                   {:cell cell :w w :i i :refit (refit-of w)})
         keep (when max-refits (set (take-last max-refits (sort (distinct (map :refit targets))))))
         targets (if keep (filter #(keep (:refit %)) targets) targets)
-        ;; tick intervals from readings before t, within the spec's lookback
-        ivs-at (memoize (fn [cell t]
-                          (let [{:keys [spec obs]} (data cell)
-                                lookback (:fit-lookback-secs spec)
-                                readings (filter #(and (< (first %) t) (or (nil? lookback) (>= (first %) (- t lookback)))) obs)]
-                            (ticks/intervals readings (:cluster-secs spec) (span (second cell))))))
+        ;; every cell's tick intervals once; what is known before t (within the
+        ;; spec's lookback) is a prefix by the time each interval is revealed
+        all-ivs (into {} (for [[cell {:keys [spec obs]}] data]
+                           [cell (ticks/intervals obs (:cluster-secs spec) (span (second cell)))]))
+        ivs-at (fn [cell t]
+                 (let [lookback (:fit-lookback-secs (:spec (data cell)))]
+                   (ticks/known-before (all-ivs cell) t (when lookback (- t lookback)))))
         fit-p0 (memoize (fn [cell t] (ticks/fit-p0 (ivs-at cell t))))
         fit-p1 (memoize (fn [cell t] (ticks/fit-p1 (ivs-at cell t) (profile-at t) zone)))
         fit-p2 (memoize (fn [cell t] (ticks/fit-p2 (ivs-at cell t) (profile-at t) zone)))
+        ;; P3's hourly observations from readings strictly before t (no leak of
+        ;; a later window's start), with the refit's profile
+        bases (into {} (for [[cell ivs] all-ivs] [cell (ticks/hourly-base ivs)]))
+        hours-at (fn [cell t prof]
+                   (let [lookback (:fit-lookback-secs (:spec (data cell)))]
+                     (ticks/hours-before (bases cell) (all-ivs cell) prof zone t
+                                         (if lookback (- t lookback) 0))))
+        fit-p3 (memoize (fn [cell t] (ticks/fit-p3 (hours-at cell t (profile-at t)))))
         ;; R5's counterpart: finished quota windows as replicates
         fit-r5 (memoize (fn [cell t]
                           (let [{:keys [spec rows-before]} (data cell)
@@ -940,9 +950,9 @@
                            (base/fit rung (base/training-steps series (profile-at t) zone)))))
         fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
                                       (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
-        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t)
+        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t)
                                            :r1 (fit-r cell t 1) :r2 (fit-r cell t 2) :r5 (fit-r5 cell t) :a (fit-a cell t)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :p2 :r1 :r2 :r5 :a]] [cell t k])))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :p2 :p3 :r1 :r2 :r5 :a]] [cell t k])))
         rows (vec
                (apply concat
                       (pmap
@@ -959,14 +969,14 @@
                                           ;; this calendar week's tick intervals so far (P2's pace update)
                                           ws (ticks/week-start zone t)
                                           week-ivs (filter #(>= (quot (+ (:t0 %) (:t1 %)) 2) ws)
-                                                           (ticks/intervals (filter #(<= (- ws 86400) (first %) (dec t)) obs)
-                                                                            (:cluster-secs spec) (span wk)))
+                                                           (ticks/known-before (all-ivs cell) t (- ws 86400)))
                                           forecasters {"P0 Poisson process" #(ticks/forecast-p0 (fit-p0 cell refit) t % x)
                                                        "R1 Poisson (hourly)" #(base/forecast (fit-r cell refit 1) prof zone spec t % x)
                                                        "P1 +profile" #(ticks/forecast-p1 (fit-p1 cell refit) prof zone t % x)
                                                        "R2 +profile (hourly)" #(base/forecast (fit-r cell refit 2) prof zone spec t % x)
                                                        "P2 +weekly pace" #(ticks/forecast-p2 (fit-p2 cell refit) prof zone week-ivs t % x)
                                                        "R5 +weekly pace (hourly)" #(base/forecast-weekly (fit-r5 cell refit) prof zone spec (:start w) t % x)
+                                                       "P3 +drifting pace" #(ticks/forecast-p3 (fit-p3 cell refit) prof zone (hours-at cell t prof) t % x)
                                                        "A production" #(m/forecast (fit-a cell refit) (rows-before t) spec zone t % x :path? false)}
                                           horizons (for [h (conj (ladder-horizons wk) :reset)
                                                          :let [end (if (= h :reset) (:eff-end w) (+ t (* 3600 h)))]

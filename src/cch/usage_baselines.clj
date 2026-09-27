@@ -379,7 +379,7 @@
 ;; likelihood is an exact forward filter on a grid in u: a banded Gaussian
 ;; transition per block, then rung 7's on/off block likelihood.
 
-(def ^:private drift-grid (double-array (range -6.0 4.0 0.05)))
+(def drift-grid (double-array (range -6.0 4.0 0.05)))
 
 (defn training-blocks
   "All hours of the series before `t` (within `lookback`), grouped into model
@@ -409,7 +409,7 @@
                         (+ mx (Math/log (+ (Math/exp (- on mx)) (Math/exp (- l1pi mx))))))))))
     out))
 
-(defn- kernel
+(defn kernel
   "The AR(1) transition on the drift grid as, per source point j, the first
   target index and normalized weights: computed once per parameter set."
   [^double phi ^double innov]
@@ -425,7 +425,7 @@
              (when (pos? tot) (dotimes [k (alength ws)] (aset ws k (/ (aget ws k) tot))))
              [lo ws])))))
 
-(defn- transition
+(defn transition
   "Probability vector p (on the drift grid) after one step of kernel `kern`."
   ^doubles [^doubles p kern]
   (let [n (alength p) out (double-array n)]
@@ -438,7 +438,7 @@
                 (aset out i (+ (aget out i) (* pj (aget ws k))))))))))
     out))
 
-(defn- stationary [^double s]
+(defn stationary [^double s]
   (let [n (alength ^doubles drift-grid)
         w (double-array (map #(Math/exp (* -0.5 (Math/pow (/ % s) 2))) drift-grid))
         tot (reduce + w)]

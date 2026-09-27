@@ -101,9 +101,18 @@
         s (+ x y)]
     (if (pos? s) (/ x s) 0.5)))
 
+(declare poisson-knuth)
+
 (defn poisson-sample
   "One draw from Poisson(mean): Knuth's multiplication method on pieces of
-  mean at most 25 (exact, O(mean) per draw)."
+  mean at most 25 (exact, O(mean) per draw); above a mean of 500, the
+  rounded normal approximation (relative error of order 1/sqrt(mean))."
+  ^long [^java.util.SplittableRandom r ^double mean]
+  (if (> mean 500.0)
+    (max 0 (Math/round (+ mean (* (Math/sqrt mean) (.nextGaussian r)))))
+    (poisson-knuth r mean)))
+
+(defn- poisson-knuth
   ^long [^java.util.SplittableRandom r ^double mean]
   (let [k (max 1 (long (Math/ceil (/ mean 25.0))))
         l (Math/exp (- (/ mean k)))]
