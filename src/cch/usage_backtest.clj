@@ -292,7 +292,7 @@
   Windows weigh equally within an agent, and agents combine with the fixed
   weights in cch.usage-eval/agent-weights; the calendar-week bootstrap
   resamples weeks jointly across agents, whose weekly habits are shared."
-  [by-cell labels base & {:keys [contrasts]}]
+  [by-cell labels base & {:keys [contrasts title] :or {title "primary endpoint"}}]
   (let [cells7 (sort (filter #(= :seven-day (second %)) (keys by-cell)))
         pooled (fn [label] (vec (for [cell cells7
                                       r (get-in by-cell [cell label])]
@@ -300,10 +300,11 @@
         base-rows (pooled base)
         estimator (ev/agent-weighted ev/agent-weights)]
     (when (seq base-rows)
-      (println (format "\nseven-day pooled across agents  (%d checkpoints; windows %s; weights %s; primary endpoint)"
+      (println (format "\nseven-day pooled across agents  (%d checkpoints; windows %s; weights %s; %s)"
                        (count base-rows)
                        (str/join " " (for [[a rs] (sort (group-by :agent base-rows))] (str a " " (count (distinct (map :win rs))))))
-                       (str/join " " (for [[a w] (sort ev/agent-weights)] (str a " " w)))))
+                       (str/join " " (for [[a w] (sort ev/agent-weights)] (str a " " w)))
+                       title))
       (println summary-header)
       (doseq [label labels]
         (println (summary-line label (pooled label) base-rows :seven-day :estimator estimator)))
@@ -603,6 +604,11 @@
      :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75) :hi (num/quantile draws 0.95)
      :draws draws}))
 
+(def ^:private ladder-horizons
+  "Fixed look-aheads (hours) scored besides the reset: together they score
+  the path, i.e. the first-passage curve (P(meter >= L by t) = P(X_t >= L))."
+  {:seven-day [24 72] :five-hour [1 3]})
+
 (def ^:private ladder-arms
   ["R0 linear" "R1 Poisson" "R2 +profile" "R3 +bursts (NB)" "R4 +recency (NB, 28d)"
    "R5 +weekly pace" "R6 +bursts +weekly pace" "R7 +on/off blocks" "R8 +drifting pace" "A production"])
@@ -690,42 +696,61 @@
                             (vec
                               (for [t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
                                     :let [x (pct-at wobs t)
-                                          in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))
-                                          score (fn [g] {:win i :week (quot (:start w) week) :hours (/ (- t (:start w)) 3600.0)
-                                                         :crps (m/crps (:draws g) final 100.0)
-                                                         :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
-                                                         :cov90 (in? (:lo g) (:hi g)) :cov50 (in? (:q25 g) (:q75 g))})
-                                          rung (fn [k] (score (base/forecast (fit-rung cell refit k) prof zone spec t (:eff-end w) x)))]]
-                                {:cell cell
-                                 "R0 linear" (score (band-forecast (rate-projection wobs wk w prior-finals t) x 3000 (hash [cell t])))
-                                 "R1 Poisson" (rung 1)
-                                 "R2 +profile" (rung 2)
-                                 "R3 +bursts (NB)" (rung 3)
-                                 "R4 +recency (NB, 28d)" (rung 4)
-                                 "R5 +weekly pace" (score (base/forecast-weekly (fit-weekly cell refit) prof zone spec (:start w) t (:eff-end w) x))
-                                 "R6 +bursts +weekly pace" (score (base/forecast-bursts-weekly (fit-bw cell refit) prof zone spec (:start w) t (:eff-end w) x))
-                                 "R7 +on/off blocks" (let [series (m/hour-series (m/windows (rows-before t) spec) t)
-                                                           [done cur] (base/blocks-so-far series (:start w) t prof zone spec)]
-                                                       (score (base/forecast-onoff (fit-oo cell refit) prof zone spec done cur t (:eff-end w) x)))
-                                 ;; rung 8 filters all history's blocks (the pace carries across
-                                 ;; windows) up to the block in progress
-                                 "R8 +drifting pace" (let [series (m/hour-series (m/windows (rows-before t) spec) t)
-                                                           hist (base/training-blocks series t prof zone spec (:fit-lookback-secs spec))
-                                                           [_ cur] (base/blocks-so-far series (:start w) t prof zone spec)
-                                                           done (if (seq cur) (pop hist) hist)]
-                                                       (score (base/forecast-drift (fit-dr cell refit) prof zone spec done cur t (:eff-end w) x)))
-                                 "A production" (score (m/forecast (fit-a cell refit) (rows-before t) spec zone t (:eff-end w) x :path? false))}))))
+                                          series (m/hour-series (m/windows (rows-before t) spec) t)
+                                          [done cur] (base/blocks-so-far series (:start w) t prof zone spec)
+                                          hist (base/training-blocks series t prof zone spec (:fit-lookback-secs spec))
+                                          hist-done (if (seq cur) (pop hist) hist)
+                                          ;; each model as a forecaster of the meter at `end`
+                                          forecasters
+                                          {"R0 linear" #(band-forecast (rate-projection wobs wk (assoc w :eff-end %) prior-finals t) x 3000 (hash [cell t %]))
+                                           "R1 Poisson" #(base/forecast (fit-rung cell refit 1) prof zone spec t % x)
+                                           "R2 +profile" #(base/forecast (fit-rung cell refit 2) prof zone spec t % x)
+                                           "R3 +bursts (NB)" #(base/forecast (fit-rung cell refit 3) prof zone spec t % x)
+                                           "R4 +recency (NB, 28d)" #(base/forecast (fit-rung cell refit 4) prof zone spec t % x)
+                                           "R5 +weekly pace" #(base/forecast-weekly (fit-weekly cell refit) prof zone spec (:start w) t % x)
+                                           "R6 +bursts +weekly pace" #(base/forecast-bursts-weekly (fit-bw cell refit) prof zone spec (:start w) t % x)
+                                           "R7 +on/off blocks" #(base/forecast-onoff (fit-oo cell refit) prof zone spec done cur t % x)
+                                           ;; rung 8 filters all history's blocks (the pace carries
+                                           ;; across windows) up to the block in progress
+                                           "R8 +drifting pace" #(base/forecast-drift (fit-dr cell refit) prof zone spec hist-done cur t % x)
+                                           "A production" #(m/forecast (fit-a cell refit) (rows-before t) spec zone t % x :path? false)}
+                                          ;; horizons: fixed look-aheads, and the reset; a look-ahead past a
+                                          ;; window cut short by a granted reset has no outcome and is skipped
+                                          horizons (for [h (conj (ladder-horizons wk) :reset)
+                                                         :let [end (if (= h :reset) (:eff-end w) (+ t (* 3600 h)))]
+                                                         :when (<= end (:eff-end w))]
+                                                     [h end (if (= h :reset) final (min 100.0 (pct-at wobs end)))])]]
+                                (into {:cell cell}
+                                      (for [[label f] forecasters]
+                                        [label (into {} (for [[h end y] horizons
+                                                              :let [g (f end)
+                                                                    capped-y? (>= y 100.0)
+                                                                    in? (fn [lo hi] (if capped-y? (>= hi 99.0) (<= (- lo 1.0) y (+ hi 1.0))))]]
+                                                          [h {:win i :week (quot (:start w) week) :hours (/ (- t (:start w)) 3600.0)
+                                                              :crps (m/crps (:draws g) y 100.0)
+                                                              :err (if capped-y? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) y)))
+                                                              :cov90 (in? (:lo g) (:hi g)) :cov50 (in? (:q25 g) (:q75 g))}]))]))))))
                         targets)))
+        at (fn [h] (into {} (for [[cell cr] (group-by :cell rows)
+                                  :let [cr (filter #(get-in % ["A production" h]) cr)]
+                                  :when (seq cr)]
+                              [cell (into {} (for [a ladder-arms] [a (mapv #(get-in % [a h]) cr)]))])))
         by-cell (into {} (for [[cell cr] (group-by :cell rows)]
                            [cell (into {} (for [a ladder-arms] [a (mapv #(get % a) cr)]))]))]
-    (doseq [[cell arms] (sort-by key by-cell)
+    (doseq [[cell arms] (sort-by key (at :reset))
             :let [base-rows (arms "A production")]]
       (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs A production)" (first cell) (name (second cell))
                        (count base-rows) (count (distinct (map :win base-rows)))))
       (println summary-header)
       (doseq [a ladder-arms]
         (println (summary-line a (arms a) base-rows (second cell)))))
-    (print-pooled-7d by-cell ladder-arms "A production"
+    (doseq [h (ladder-horizons :seven-day)]
+      (println (format "\n=== secondary: meter at +%dh ===" h))
+      (print-pooled-7d (at h) ladder-arms "A production" :title (format "secondary: meter at +%dh" h)
+                       :contrasts [["R7 +on/off blocks" "R6 +bursts +weekly pace"] ["R8 +drifting pace" "R7 +on/off blocks"]
+                                   ["A production" "R8 +drifting pace"]]))
+    (println "\n=== primary: meter at reset ===")
+    (print-pooled-7d (at :reset) ladder-arms "A production"
                      :contrasts [["R1 Poisson" "R0 linear"] ["R2 +profile" "R1 Poisson"]
                                  ["R3 +bursts (NB)" "R2 +profile"] ["R4 +recency (NB, 28d)" "R3 +bursts (NB)"]
                                  ["R5 +weekly pace" "R2 +profile"] ["R6 +bursts +weekly pace" "R5 +weekly pace"]

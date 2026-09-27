@@ -466,7 +466,13 @@
           (recur more post (+ ll mx (Math/log z)) false))))))
 
 (defn fit-drift
-  "Maximum-likelihood rung-8 parameters {:c :kappa :pi :s :h} from `training-blocks`."
+  "Penalized maximum-likelihood (posterior-mode) rung-8 parameters
+  {:c :kappa :pi :s :h} from `training-blocks`. Weak normal priors on the
+  unconstrained scale (sd 3, as the continuous-time arms use) keep the fit
+  finite; the pace spread and half-life get sd 1 around 0.5 and 7 blocks,
+  because beyond the grid's range (|log theta| <= ~5) the likelihood is
+  flat in them and an unpenalized fit wanders off (spread ~3e4, half-life
+  ~4e8 blocks were seen on a sparse cell)."
   [blocks]
   (let [tot (reduce + 0.0 (for [b blocks [_ y] b] y))
         mass (reduce + 0.0 (for [b blocks [a _] b] a))
@@ -474,10 +480,12 @@
         sig (fn [x] (/ 1.0 (+ 1.0 (Math/exp (- x)))))
         unpack (fn [[lc lk lpi ls lh]] {:c (Math/exp lc) :kappa (Math/exp lk) :pi (sig lpi)
                                         :s (Math/exp ls) :h (Math/exp lh)})
+        x0 [(Math/log (max 1e-6 c0)) 0.0 0.0 (Math/log 0.5) (Math/log 7.0)]
+        prior-sd [3.0 3.0 3.0 1.0 1.0]
+        penalty (fn [x] (* 0.5 (reduce + (map (fn [xi mi sd] (Math/pow (/ (- xi mi) sd) 2)) x x0 prior-sd))))
         {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (drift-filter blocks (unpack x)))]
-                                          (if (Double/isFinite v) (- v) 1e300)))
-                                [(Math/log (max 1e-6 c0)) 0.0 0.0 (Math/log 0.5) (Math/log 7.0)]
-                                :tol 1e-6 :max-iter 3000)]
+                                          (if (Double/isFinite v) (+ (- v) (penalty x)) 1e300)))
+                                x0 :tol 1e-6 :max-iter 3000)]
     (assoc (unpack x) :rung 8)))
 
 (defn forecast-drift
