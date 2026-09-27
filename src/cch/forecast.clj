@@ -517,8 +517,8 @@
 (defonce ^:private challenger-cache (atom {}))
 
 (defn- record-challengers!
-  "Record the count-process challengers (cch.usage-baselines rungs 6 and 7:
-  nb-weekly-v1, onoff-v1) for one agent/window. Runs off the request
+  "Record the count-process challengers (cch.usage-baselines rungs 6-8:
+  nb-weekly-v1, onoff-v1, drift-v1) for one agent/window. Runs off the request
   thread: their first fits take seconds."
   [base agent window-key now resets-at last-pct]
   (future
@@ -540,9 +540,15 @@
                                                 :quantiles (mapv #(num/quantile draws %) ledger/levels))))
                 r6 (fit "nb-weekly-v1" #(baselines/fit-bursts-weekly (baselines/window-training wins now prof zone lookback)))
                 r7 (fit "onoff-v1" #(baselines/fit-onoff (baselines/block-training wins now prof zone spec lookback)))
-                [done cur] (baselines/blocks-so-far (model/hour-series wins now) start now prof zone spec)]
+                series (model/hour-series wins now)
+                [done cur] (baselines/blocks-so-far series start now prof zone spec)
+                ;; rung 8 filters all history's blocks up to the block in progress
+                hist (baselines/training-blocks series now prof zone spec lookback)
+                hist-done (if (seq cur) (pop hist) hist)
+                r8 (fit "drift-v1" #(baselines/fit-drift hist))]
             (record "nb-weekly-v1" (baselines/forecast-bursts-weekly r6 prof zone spec start now resets-at last-pct))
-            (record "onoff-v1" (baselines/forecast-onoff r7 prof zone spec done cur now resets-at last-pct)))))
+            (record "onoff-v1" (baselines/forecast-onoff r7 prof zone spec done cur now resets-at last-pct))
+            (record "drift-v1" (baselines/forecast-drift r8 prof zone spec hist-done cur now resets-at last-pct)))))
       (catch Throwable t
         (binding [*out* *err*]
           (println "cch.forecast: challenger ledger record failed:" (.getMessage t)))))))
