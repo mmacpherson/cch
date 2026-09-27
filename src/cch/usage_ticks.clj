@@ -1134,20 +1134,24 @@
 
 (defn fit-p7
   "Penalized ML P7 parameters. Weak priors (sd 3) on the log / logit scale,
-  sd 1 for the pace spread and half-life; the slow pair starts at ~day
-  scales and the fast pair at session scales."
+  sd 1 for the pace spread and half-life (the half-life is at least 24 h:
+  the pace is the slow component); the slow pair starts at ~day scales and
+  the fast pair at session scales."
   [units prof presence?]
   (let [logit (fn [p] (Math/log (/ p (- 1.0 p)))) sig (fn [x] (/ 1.0 (+ 1.0 (Math/exp (- x)))))
         ticks (reduce + 0.0 (map :k units))
         mass (reduce + 0.0 (map #(* (:n %) (:mass %)) units))
+        ;; the pace is the slow component by definition: half-life >= 24 h
+        ;; (h = 24 + e^x), so short-scale bursts must be explained by sessions
+        ;; and the away state instead of a fast pace
         x0 (cond-> [(Math/log (max 1e-6 (* 5 (/ ticks (max 1e-9 mass)))))
                     (Math/log 0.05) (Math/log 0.1) (Math/log 1.0) (Math/log 3.0)
-                    (Math/log 0.5) (Math/log 72.0)]
+                    (Math/log 0.5) (Math/log 48.0)]
              presence? (into [(logit 0.8) (logit 0.01)]))
         sd (cond-> [3.0 3.0 3.0 3.0 3.0 1.0 1.0] presence? (into [3.0 3.0]))
         unpack (fn [[lc l1 l2 l3 l4 ls lh r1 r0]]
                  (cond-> {:c (Math/exp lc) :r1 (Math/exp l1) :r2 (Math/exp l2) :r3 (Math/exp l3) :r4 (Math/exp l4)
-                          :s (Math/exp ls) :h (Math/exp lh)}
+                          :s (Math/exp ls) :h (+ 24.0 (Math/exp lh))}
                    presence? (assoc :rho-on (sig r1) :rho-off (sig r0))))
         penalty (fn [x] (* 0.5 (reduce + (map (fn [xi mi d] (Math/pow (/ (- xi mi) d) 2)) x x0 sd))))
         {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (p7-filter units prof (unpack x) presence?))]
@@ -1182,7 +1186,8 @@
                  (loop [[[dt mass] & more] fut state state0 u u0 acc 0.0 first? true]
                    (if (or (nil? dt) (>= (+ x acc) 100.0))
                      acc
-                     (let [u (if first? u (+ (* phi u) (* innov (.nextGaussian r))))
+                     (let [;; the filter's pace lives on the bounded grid; so does the simulation's
+                           u (if first? u (max -3.0 (min 3.0 (+ (* phi u) (* innov (.nextGaussian r))))))
                            [t-sess state] (loop [t 0.0 st state ts 0.0]
                                             (let [outs (rates st)
                                                   tot (reduce + (map second outs))
