@@ -101,6 +101,19 @@
         s (+ x y)]
     (if (pos? s) (/ x s) 0.5)))
 
+(defn poisson-sample
+  "One draw from Poisson(mean): Knuth's multiplication method on pieces of
+  mean at most 25 (exact, O(mean) per draw)."
+  ^long [^java.util.SplittableRandom r ^double mean]
+  (let [k (max 1 (long (Math/ceil (/ mean 25.0))))
+        l (Math/exp (- (/ mean k)))]
+    (loop [i 0 acc 0]
+      (if (= i k)
+        acc
+        (recur (inc i)
+               (+ acc (loop [n 0 p (.nextDouble r)]
+                        (if (<= p l) n (recur (inc n) (* p (.nextDouble r)))))))))))
+
 (defn quantile
   "Sample quantile of a sorted double array (linear interpolation)."
   ^double [^doubles sorted ^double q]

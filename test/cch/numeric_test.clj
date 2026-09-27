@@ -75,3 +75,15 @@
     (is (nil? (s/cholesky [[1.0 2.0] [2.0 1.0]])) "indefinite")
     (is (every? true? (map #(< (Math/abs (- %1 %2)) 1e-12)
                            (flatten (s/inverse a)) [0.375 -0.25 -0.25 0.5])))))
+
+(deftest poisson-sample-moments
+  (let [r (s/rng 1)]
+    (is (every? zero? (repeatedly 100 #(s/poisson-sample r 0.0))) "zero mean")
+    (is (every? #(>= % 0) (repeatedly 1000 #(s/poisson-sample r 1e-20))) "never negative"))
+  (doseq [mu [0.3 4.0 60.0]]
+    (let [r (s/rng 3)
+          xs (vec (repeatedly 20000 #(s/poisson-sample r mu)))
+          m (/ (reduce + xs) 20000.0)
+          v (/ (reduce + (map #(Math/pow (- % m) 2) xs)) 20000.0)]
+      (is (< (Math/abs (- m mu)) (* 4 (Math/sqrt (/ mu 20000.0)))) (str "mean " mu))
+      (is (< (Math/abs (- 1.0 (/ v mu))) 0.05) (str "variance " mu)))))

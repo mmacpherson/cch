@@ -12,7 +12,9 @@
   `just usage-backtest`."
   (:require [cch.db :as db]
             [cch.forecast :as forecast]
+            [cch.numeric :as num]
             [cch.projections :as proj]
+            [cch.usage-baselines :as base]
             [cch.usage-ct :as ct]
             [cch.usage-eval :as ev]
             [cch.usage-model :as m]
@@ -586,3 +588,116 @@
                                 [cell (into {} (for [arm [:A :B :C]]
                                                  [(name arm) (mapv #(merge (select-keys (:A %) [:win :week :hours]) (arm %)) cr)]))]))
                      ["A" "B" "C"] "A" :contrasts [["C" "B"]])))
+
+;; --- count-process ladder (ground floor up) ---
+
+(defn- band-forecast
+  "Draws from the rate-Bayes projection's normal band (median, 90% band),
+  floored at the current reading, so it is scored like the other rungs."
+  [{:keys [median lo hi]} x n seed]
+  (let [sd (max 1e-9 (/ (- hi lo) (* 2 1.6448536269514722)))
+        r (java.util.Random. seed)
+        draws (double-array (repeatedly n #(max x (+ median (* sd (.nextGaussian r))))))]
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75) :hi (num/quantile draws 0.95)
+     :draws draws}))
+
+(def ^:private ladder-arms
+  ["R0 linear" "R1 Poisson" "R2 +profile" "R3 +bursts (NB)" "R4 +recency (NB, 28d)"
+   "R5 +weekly pace" "A production"])
+
+(defn run-ladder
+  "Print the count-process ladder: nested baselines from linear extrapolation
+  up to the production model, each adding one ingredient, on the same
+  refits, checkpoints, and estimands as the other experiments.
+  `max-refits` keeps the latest N refit weeks (smoke tests)."
+  [& {:keys [only max-refits]}]
+  (let [now (quot (System/currentTimeMillis) 1000)
+        zone (ZoneId/systemDefault)
+        week 604800
+        data (into {} (map (fn [c] [c (cell-data now c)]) cells))
+        series-at (memoize (fn [cell t] ((:series (data cell)) t)))
+        profile-at (memoize (fn [t] (m/fleet-harmonic-profile
+                                      (into {} (for [c cells :let [s (series-at c t)] :when (seq s)] [c s]))
+                                      zone)))
+        refit-of (fn [w] (* week (quot (:start w) week)))
+        targets (for [[cell d] data
+                      :when (or (nil? only) (only cell))
+                      :let [[_ wk] cell {:keys [min-train]} (plan wk)]
+                      [i w] (map-indexed vector (:wins d))
+                      :when (and (>= i min-train) (or (:cap w) (< (:eff-end w) (- now 3600))))]
+                  {:cell cell :w w :i i :refit (refit-of w)})
+        keep (when max-refits (set (take-last max-refits (sort (distinct (map :refit targets))))))
+        targets (if keep (filter #(keep (:refit %)) targets) targets)
+        fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
+                                      (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
+        ;; rung 4 is rung 3 on the last 28 days: the crudest handle on drift
+        ;; (and on plan changes, which rescale the meter)
+        fit-rung (memoize (fn [cell t rung]
+                            (let [{:keys [spec rows-before]} (data cell)
+                                  series (m/hour-series (m/windows (rows-before t) spec) t)
+                                  lookback (if (= rung 4) (* 28 86400) (:fit-lookback-secs spec))
+                                  series (if lookback (into (sorted-map) (filter #(>= (key %) (- t lookback)) series)) series)]
+                              (base/fit (min rung 3) (base/training-steps series (profile-at t) zone)))))
+        ;; rung 5 trains on finished windows as replicates: each window's
+        ;; total over its activity mass (a truncated window counts only the
+        ;; hours it covered)
+        fit-weekly (memoize (fn [cell t]
+                              (let [{:keys [spec rows-before]} (data cell)
+                                    wins (m/windows (rows-before t) spec)
+                                    series (m/hour-series wins t)
+                                    prof (profile-at t)
+                                    lookback (:fit-lookback-secs spec)
+                                    mass-of (fn [w] (reduce + 0.0 (for [[h [live _]] (subseq series >= (* 3600 (quot (:start w) 3600)) < (:eff-end w))]
+                                                                    (* live (nth prof (m/hour-of-week zone h))))))]
+                                (base/fit-weekly
+                                  (vec (for [w wins
+                                             :when (and (<= (:eff-end w) t) (or (nil? lookback) (>= (:start w) (- t lookback))))]
+                                         [(mass-of w) (m/cum-at w (inc (:eff-end w)))]))))))
+        _ (dorun (pmap (fn [[cell t rung]] (case rung :A (fit-a cell t) :W (fit-weekly cell t) (fit-rung cell t rung)))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) rung [:A :W 1 2 3 4]] [cell t rung])))
+        rows (vec
+               (apply concat
+                      (pmap
+                        (fn [{:keys [cell w i refit]}]
+                          (let [{:keys [spec obs rows-before wins]} (data cell)
+                                [_ wk] cell
+                                {:keys [checkpoint-secs]} (plan wk)
+                                final (m/cum-at w (inc (:eff-end w)))
+                                capped? (boolean (:cap w))
+                                wobs (window-obs obs spec w)
+                                prior-finals (->> (subvec wins 0 i) (map :final) reverse (take 12)
+                                                  (filter #(>= % 10.0)) vec)
+                                prof (profile-at refit)]
+                            (vec
+                              (for [t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
+                                    :let [x (pct-at wobs t)
+                                          in? (fn [lo hi] (if capped? (>= hi 99.0) (<= (- lo 1.0) final (+ hi 1.0))))
+                                          score (fn [g] {:win i :week (quot (:start w) week) :hours (/ (- t (:start w)) 3600.0)
+                                                         :crps (m/crps (:draws g) final 100.0)
+                                                         :err (if capped? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) final)))
+                                                         :cov90 (in? (:lo g) (:hi g)) :cov50 (in? (:q25 g) (:q75 g))})
+                                          rung (fn [k] (score (base/forecast (fit-rung cell refit k) prof zone spec t (:eff-end w) x)))]]
+                                {:cell cell
+                                 "R0 linear" (score (band-forecast (rate-projection wobs wk w prior-finals t) x 3000 (hash [cell t])))
+                                 "R1 Poisson" (rung 1)
+                                 "R2 +profile" (rung 2)
+                                 "R3 +bursts (NB)" (rung 3)
+                                 "R4 +recency (NB, 28d)" (rung 4)
+                                 "R5 +weekly pace" (score (base/forecast-weekly (fit-weekly cell refit) prof zone spec (:start w) t (:eff-end w) x))
+                                 "A production" (score (m/forecast (fit-a cell refit) (rows-before t) spec zone t (:eff-end w) x :path? false))}))))
+                        targets)))
+        by-cell (into {} (for [[cell cr] (group-by :cell rows)]
+                           [cell (into {} (for [a ladder-arms] [a (mapv #(get % a) cr)]))]))]
+    (doseq [[cell arms] (sort-by key by-cell)
+            :let [base-rows (arms "A production")]]
+      (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs A production)" (first cell) (name (second cell))
+                       (count base-rows) (count (distinct (map :win base-rows)))))
+      (println summary-header)
+      (doseq [a ladder-arms]
+        (println (summary-line a (arms a) base-rows (second cell)))))
+    (print-pooled-7d by-cell ladder-arms "A production"
+                     :contrasts [["R1 Poisson" "R0 linear"] ["R2 +profile" "R1 Poisson"]
+                                 ["R3 +bursts (NB)" "R2 +profile"] ["R4 +recency (NB, 28d)" "R3 +bursts (NB)"]
+                                 ["R5 +weekly pace" "R2 +profile"] ["A production" "R5 +weekly pace"]])))
