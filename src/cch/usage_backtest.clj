@@ -605,7 +605,7 @@
 
 (def ^:private ladder-arms
   ["R0 linear" "R1 Poisson" "R2 +profile" "R3 +bursts (NB)" "R4 +recency (NB, 28d)"
-   "R5 +weekly pace" "A production"])
+   "R5 +weekly pace" "R6 +bursts +weekly pace" "A production"])
 
 (defn run-ladder
   "Print the count-process ladder: nested baselines from linear extrapolation
@@ -655,8 +655,23 @@
                                   (vec (for [w wins
                                              :when (and (<= (:eff-end w) t) (or (nil? lookback) (>= (:start w) (- t lookback))))]
                                          [(mass-of w) (m/cum-at w (inc (:eff-end w)))]))))))
-        _ (dorun (pmap (fn [[cell t rung]] (case rung :A (fit-a cell t) :W (fit-weekly cell t) (fit-rung cell t rung)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) rung [:A :W 1 2 3 4]] [cell t rung])))
+        ;; rung 6 also needs each window's hours, for the burstiness term
+        fit-bw (memoize (fn [cell t]
+                          (let [{:keys [spec rows-before]} (data cell)
+                                wins (m/windows (rows-before t) spec)
+                                series (m/hour-series wins t)
+                                prof (profile-at t)
+                                lookback (:fit-lookback-secs spec)]
+                            (base/fit-bursts-weekly
+                              (vec (for [w wins
+                                         :when (and (<= (:eff-end w) t) (or (nil? lookback) (>= (:start w) (- t lookback))))
+                                         :let [hours (vec (for [[h [live y]] (subseq series >= (* 3600 (quot (:start w) 3600)) < (:eff-end w))]
+                                                            [(* live (nth prof (m/hour-of-week zone h))) (Math/rint y)]))]]
+                                     {:mass (reduce + 0.0 (map first hours))
+                                      :total (reduce + 0.0 (map second hours))
+                                      :hours hours}))))))
+        _ (dorun (pmap (fn [[cell t rung]] (case rung :A (fit-a cell t) :W (fit-weekly cell t) :BW (fit-bw cell t) (fit-rung cell t rung)))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) rung [:A :W :BW 1 2 3 4]] [cell t rung])))
         rows (vec
                (apply concat
                       (pmap
@@ -686,6 +701,7 @@
                                  "R3 +bursts (NB)" (rung 3)
                                  "R4 +recency (NB, 28d)" (rung 4)
                                  "R5 +weekly pace" (score (base/forecast-weekly (fit-weekly cell refit) prof zone spec (:start w) t (:eff-end w) x))
+                                 "R6 +bursts +weekly pace" (score (base/forecast-bursts-weekly (fit-bw cell refit) prof zone spec (:start w) t (:eff-end w) x))
                                  "A production" (score (m/forecast (fit-a cell refit) (rows-before t) spec zone t (:eff-end w) x :path? false))}))))
                         targets)))
         by-cell (into {} (for [[cell cr] (group-by :cell rows)]
@@ -700,4 +716,5 @@
     (print-pooled-7d by-cell ladder-arms "A production"
                      :contrasts [["R1 Poisson" "R0 linear"] ["R2 +profile" "R1 Poisson"]
                                  ["R3 +bursts (NB)" "R2 +profile"] ["R4 +recency (NB, 28d)" "R3 +bursts (NB)"]
-                                 ["R5 +weekly pace" "R2 +profile"] ["A production" "R5 +weekly pace"]])))
+                                 ["R5 +weekly pace" "R2 +profile"] ["R6 +bursts +weekly pace" "R5 +weekly pace"]
+                                 ["R6 +bursts +weekly pace" "R3 +bursts (NB)"] ["A production" "R6 +bursts +weekly pace"]])))

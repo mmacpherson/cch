@@ -62,3 +62,27 @@
             slow (b/forecast-weekly fit prof zone spec start now end 5.0)
             usual (b/forecast-weekly fit prof zone spec start now end (* c 72.0))]
         (is (< (:median slow) (- (:median usual) (* c 72.0 0.4))))))))
+
+(deftest bursts-and-weekly-pace
+  (let [r (num/rng 21)
+        ;; 150 weeks of 168 unit-mass hours: theta ~ Gamma(4, 4), bursts kappa 0.5, c 0.5
+        windows (vec (for [_ (range 150)]
+                       (let [theta (num/gamma-sample r 4.0 4.0)
+                             hours (vec (for [_ (range 168)]
+                                          [1.0 (double (num/poisson-sample r (num/gamma-sample r 0.5 (/ 0.5 (* 0.5 theta)))))]))]
+                         {:mass 168.0 :total (reduce + (map second hours)) :hours hours})))
+        {:keys [c kappa alpha] :as fit} (b/fit-bursts-weekly windows)]
+    (testing "recovers rate, burstiness, and week-to-week spread"
+      (is (< (Math/abs (- 1.0 (/ c 0.5))) 0.1))
+      (is (< (Math/abs (- 1.0 (/ kappa 0.5))) 0.15))
+      ;; week-to-week spread from 150 weeks is noisy: across seeds the
+      ;; estimate spans ~3.3-5.6 around the true 4
+      (is (< (Math/abs (- 1.0 (/ alpha 4.0))) 0.5)))
+    (testing "the week's pace moves the forecast, and bursts widen it vs rung 5"
+      (let [spec (m/specs :seven-day)
+            start 1780272000 now (+ start (* 3 86400)) end (+ start (* 7 86400))
+            slow (b/forecast-bursts-weekly fit prof zone spec start now end 5.0)
+            usual (b/forecast-bursts-weekly fit prof zone spec start now end (* c 72.0))
+            r5 (b/forecast-weekly {:c c :alpha alpha} prof zone spec start now end (* c 72.0))]
+        (is (< (:median slow) (:median usual)))
+        (is (> (- (:hi usual) (:lo usual)) (- (:hi r5) (:lo r5))))))))

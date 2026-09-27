@@ -9,6 +9,7 @@
     rung 2  inhomogeneous Poisson     y_h ~ Poisson(c * A_h)
     rung 3  negative binomial         y_h ~ Poisson(L_h), L_h ~ Gamma(kappa A_h, kappa / c)
     rung 5  weekly pace               y_h ~ Poisson(c theta_w A_h), theta_w ~ Gamma(alpha, alpha)
+    rung 6  bursts + weekly pace      y_h ~ Poisson(L_h), L_h ~ Gamma(kappa A_h, kappa / (c theta_w))
 
   where live_h is the fraction of the hour the collector observed and
   A_h = live_h * profile(hour of week) its activity mass. Rung 3 is rung 2
@@ -123,6 +124,87 @@
                        (if (pos? m-fut)
                          (double (num/poisson-sample r (* c m-fut (num/gamma-sample r shape rate))))
                          0.0))))
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
+     :hi (num/quantile draws 0.95)
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))
+
+;; --- rung 6: bursts and a per-window multiplier ---
+;;
+;; Given theta, every hour of a window has the same negative-binomial success
+;; probability p = c theta / (kappa + c theta), so the window total is exactly
+;; NB(kappa M, p) and the hourly likelihood factors into a theta-free term (which
+;; identifies kappa from hourly dispersion) and (1 - p)^(kappa M) p^Y. The
+;; integral over theta ~ Gamma(alpha, alpha) is done on a grid in log theta.
+
+(def ^:private log-theta-grid
+  "Grid in log theta, fine enough for windows with ~100 ticks (posterior width
+  ~0.1 in log theta)."
+  (vec (range -12.0 5.0 0.02)))
+
+(defn- window-log-terms
+  "Per grid point: log[(1 - p)^(kappa m) p^y Gamma(theta; alpha, alpha) theta],
+  the integrand over log theta."
+  [c kappa alpha m y]
+  (let [lnorm (- (* alpha (Math/log alpha)) (num/log-gamma alpha))]
+    (mapv (fn [u]
+            (let [theta (Math/exp u)
+                  ct (* c theta)
+                  lp (- (Math/log ct) (Math/log (+ kappa ct)))
+                  l1p (- (Math/log kappa) (Math/log (+ kappa ct)))]
+              (+ (* kappa m l1p) (* y lp) lnorm (* alpha u) (- (* alpha theta)))))
+          log-theta-grid)))
+
+(defn- log-sum-exp [xs]
+  (let [mx (apply max xs)]
+    (+ mx (Math/log (reduce + (map #(Math/exp (- % mx)) xs))))))
+
+(defn- rung6-loglik
+  "Log likelihood of finished windows [{:mass :total :hours [[a y] ...]}]."
+  [windows c kappa alpha]
+  (let [du 0.02]
+    (reduce + (for [{:keys [mass total hours]} windows]
+                (+ (reduce + (for [[a y] hours :when (> a 1e-9)
+                                   :let [r (* kappa a)]]
+                               (- (+ (num/log-gamma (+ y r))) (num/log-gamma r) (num/log-gamma (+ y 1.0)))))
+                   (log-sum-exp (window-log-terms c kappa alpha mass total))
+                   (Math/log du))))))
+
+(defn fit-bursts-weekly
+  "Maximum-likelihood rung-6 parameters from finished windows
+  [{:mass :total :hours [[mass count] ...]}]."
+  [windows]
+  (let [c0 (/ (reduce + 0.0 (map :total windows)) (max 1e-9 (reduce + 0.0 (map :mass windows))))
+        {[lc lk la] :x} (num/nelder-mead (fn [[lc lk la]]
+                                           (let [v (rung6-loglik windows (Math/exp lc) (Math/exp lk) (Math/exp la))]
+                                             (if (Double/isFinite v) (- v) 1e300)))
+                                         [(Math/log (max 1e-6 c0)) 0.0 0.0] :tol 1e-7 :max-iter 3000)]
+    {:rung 6 :c (Math/exp lc) :kappa (Math/exp lk) :alpha (Math/exp la)}))
+
+(defn forecast-bursts-weekly
+  "Rung-6 predictive of the meter at `resets-at`: theta's posterior on the
+  grid given the window's usage so far, then bursty usage over the future
+  mass."
+  [{:keys [c kappa alpha]} prof zone spec start now resets-at x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [m-obs (reduce + 0.0 (map second (m/future-pieces prof zone spec start now 3600)))
+        m-fut (reduce + 0.0 (map second (m/future-pieces prof zone spec now resets-at 3600)))
+        lw (window-log-terms c kappa alpha m-obs (Math/rint x))
+        mx (apply max lw)
+        cum (double-array (reductions + (map #(Math/exp (- % mx)) lw)))
+        total (aget cum (dec (alength cum)))
+        r (num/rng seed)
+        draws (double-array n)]
+    (dotimes [i n]
+      (let [u (* total (.nextDouble r))
+            j (let [k (java.util.Arrays/binarySearch cum u)] (if (neg? k) (- (inc k)) k))
+            ;; uniform within the grid cell
+            theta (Math/exp (+ (nth log-theta-grid (min j (dec (count log-theta-grid)))) (* 0.02 (- (.nextDouble r) 0.5))))]
+        (aset draws i (+ (double x)
+                         (if (pos? m-fut)
+                           (double (num/poisson-sample r (num/gamma-sample r (* kappa m-fut) (/ kappa (* c theta)))))
+                           0.0)))))
     (java.util.Arrays/sort draws)
     {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
      :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
