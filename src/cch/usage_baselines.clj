@@ -13,6 +13,8 @@
     rung 7  + on/off blocks           each model block (a day for 7d, an hour for 5h) is on
                                       with probability pi; off blocks emit nothing, on blocks
                                       follow rung 6 with rate c / pi (so the mean is unchanged)
+    rung 8  + drifting pace           rung 7 with log theta drifting block to block across
+                                      windows: AR(1), stationary sd s, half-life h blocks
 
   where live_h is the fraction of the hour the collector observed and
   A_h = live_h * profile(hour of week) its activity mass. Rung 3 is rung 2
@@ -363,6 +365,160 @@
                          (if (pos? m-on)
                            (double (num/poisson-sample r (num/gamma-sample r (* kappa m-on) (/ kappa ctheta))))
                            0.0)))))
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
+     :hi (num/quantile draws 0.95)
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))
+
+;; --- rung 8: rung 7 with a drifting pace ---
+;;
+;; log theta follows a stationary AR(1) over model blocks, across window
+;; boundaries: u' = phi u + e, e ~ N(0, s^2 (1 - phi^2)), phi = 2^(-1/h). The
+;; likelihood is an exact forward filter on a grid in u: a banded Gaussian
+;; transition per block, then rung 7's on/off block likelihood.
+
+(def ^:private drift-grid (double-array (range -6.0 4.0 0.05)))
+
+(defn training-blocks
+  "All hours of the series before `t` (within `lookback`), grouped into model
+  blocks, in time order: [[[mass count] ...] ...]."
+  [series t prof zone spec lookback]
+  (let [hrs (if lookback (subseq series >= (- t lookback) < t) (subseq series < t))]
+    (reduce (fn [acc [h [live y]]]
+              (let [hour [(* live (nth prof (m/hour-of-week zone h))) (Math/rint y)]]
+                (if (or (empty? acc) (m/block-start? zone spec h))
+                  (conj acc [hour])
+                  (conj (pop acc) (conj (peek acc) hour)))))
+            [] hrs)))
+
+(defn- block-obs
+  "log P(block | u) on the drift grid for a block summarized as [mass total C]."
+  ^doubles [c-on kappa pi [mass total cterm]]
+  (let [lpi (Math/log pi) l1pi (Math/log (- 1.0 pi)) n (alength ^doubles drift-grid)
+        out (double-array n)]
+    (dotimes [i n]
+      (let [ct (* c-on (Math/exp (aget ^doubles drift-grid i)))
+            lp (- (Math/log ct) (Math/log (+ kappa ct)))
+            l1p (- (Math/log kappa) (Math/log (+ kappa ct)))
+            on (+ lpi cterm (* kappa mass l1p) (* total lp))]
+        (aset out i (if (pos? total)
+                      on
+                      (let [mx (max on l1pi)]
+                        (+ mx (Math/log (+ (Math/exp (- on mx)) (Math/exp (- l1pi mx))))))))))
+    out))
+
+(defn- kernel
+  "The AR(1) transition on the drift grid as, per source point j, the first
+  target index and normalized weights: computed once per parameter set."
+  [^double phi ^double innov]
+  (let [n (alength ^doubles drift-grid) du 0.05
+        band (long (Math/ceil (/ (* 5.0 innov) du)))]
+    (vec (for [j (range n)]
+           (let [mu (* phi (aget ^doubles drift-grid j))
+                 center (long (Math/round (/ (- mu -6.0) du)))
+                 lo (max 0 (- center band)) hi (min (dec n) (+ center band))
+                 ws (double-array (for [i (range lo (inc hi))]
+                                    (let [z (/ (- (aget ^doubles drift-grid i) mu) innov)] (Math/exp (* -0.5 z z)))))
+                 tot (reduce + ws)]
+             (when (pos? tot) (dotimes [k (alength ws)] (aset ws k (/ (aget ws k) tot))))
+             [lo ws])))))
+
+(defn- transition
+  "Probability vector p (on the drift grid) after one step of kernel `kern`."
+  ^doubles [^doubles p kern]
+  (let [n (alength p) out (double-array n)]
+    (dotimes [j n]
+      (let [pj (aget p j)]
+        (when (> pj 1e-300)
+          (let [[lo ^doubles ws] (nth kern j)]
+            (dotimes [k (alength ws)]
+              (let [i (+ (long lo) k)]
+                (aset out i (+ (aget out i) (* pj (aget ws k))))))))))
+    out))
+
+(defn- stationary [^double s]
+  (let [n (alength ^doubles drift-grid)
+        w (double-array (map #(Math/exp (* -0.5 (Math/pow (/ % s) 2))) drift-grid))
+        tot (reduce + w)]
+    (dotimes [i n] (aset w i (/ (aget w i) tot)))
+    w))
+
+(defn- drift-filter
+  "Forward filter over `blocks`; returns {:p posterior-vector :loglik L}."
+  [blocks {:keys [c kappa pi s h]}]
+  (let [c-on (/ c pi) phi (Math/pow 2.0 (/ -1.0 h))
+        innov (max 1e-3 (* s (Math/sqrt (- 1.0 (* phi phi)))))
+        kern (kernel phi innov)]
+    (loop [[b & more] blocks p (stationary s) ll 0.0 first? true]
+      (if (nil? b)
+        {:p p :loglik ll}
+        (let [^doubles p (if first? p (transition p kern))
+              lo (block-obs c-on kappa pi (summarize-block b kappa))
+              mx (areduce lo i m Double/NEGATIVE_INFINITY (max m (aget lo i)))
+              post (double-array (alength p))
+              z (loop [i 0 z 0.0]
+                  (if (= i (alength p)) z
+                      (let [v (* (aget p i) (Math/exp (- (aget lo i) mx)))]
+                        (aset post i v) (recur (inc i) (+ z v)))))]
+          (dotimes [i (alength post)] (aset post i (/ (aget post i) z)))
+          (recur more post (+ ll mx (Math/log z)) false))))))
+
+(defn fit-drift
+  "Maximum-likelihood rung-8 parameters {:c :kappa :pi :s :h} from `training-blocks`."
+  [blocks]
+  (let [tot (reduce + 0.0 (for [b blocks [_ y] b] y))
+        mass (reduce + 0.0 (for [b blocks [a _] b] a))
+        c0 (/ tot (max 1e-9 mass))
+        sig (fn [x] (/ 1.0 (+ 1.0 (Math/exp (- x)))))
+        unpack (fn [[lc lk lpi ls lh]] {:c (Math/exp lc) :kappa (Math/exp lk) :pi (sig lpi)
+                                        :s (Math/exp ls) :h (Math/exp lh)})
+        {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (drift-filter blocks (unpack x)))]
+                                          (if (Double/isFinite v) (- v) 1e300)))
+                                [(Math/log (max 1e-6 c0)) 0.0 0.0 (Math/log 0.5) (Math/log 7.0)]
+                                :tol 1e-6 :max-iter 3000)]
+    (assoc (unpack x) :rung 8)))
+
+(defn forecast-drift
+  "Rung-8 predictive of the meter at `resets-at`: filter the history's
+  finished blocks, condition on the block in progress, then simulate the
+  pace drifting over the remaining blocks."
+  [{:keys [c kappa pi s h] :as params} prof zone spec done-blocks current now resets-at x
+   & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [c-on (/ c pi) phi (Math/pow 2.0 (/ -1.0 h))
+        innov (max 1e-3 (* s (Math/sqrt (- 1.0 (* phi phi)))))
+        {p :p} (drift-filter done-blocks params)
+        p (if (seq done-blocks) (transition p (kernel phi innov)) (stationary s))
+        cur (summarize-block current kappa)
+        lo (block-obs c-on kappa pi cur)
+        mx (areduce lo i m Double/NEGATIVE_INFINITY (max m (aget lo i)))
+        cum (double-array (reductions + (map (fn [pi_ li] (* pi_ (Math/exp (- li mx)))) p lo)))
+        total (aget cum (dec (alength cum)))
+        pieces (m/future-pieces prof zone spec now resets-at 3600)
+        m-cur (reduce + 0.0 (keep (fn [[_ mass idx]] (when (zero? idx) mass)) pieces))
+        m-later (mapv (fn [[_ g]] (reduce + 0.0 (map second g)))
+                      (sort-by key (group-by #(nth % 2) (remove #(zero? (nth % 2)) pieces))))
+        r (num/rng seed)
+        draws (double-array n)
+        [cm ct cc] cur]
+    (dotimes [i n]
+      (let [u0 (let [v (* total (.nextDouble r))
+                     j (min (dec (alength cum)) (let [k (java.util.Arrays/binarySearch cum v)] (if (neg? k) (- (inc k)) k)))]
+                 (+ (aget ^doubles drift-grid j) (* 0.05 (- (.nextDouble r) 0.5))))
+            burst (fn [mass u] (if (pos? mass)
+                                 (double (num/poisson-sample r (num/gamma-sample r (* kappa mass) (/ kappa (* c-on (Math/exp u))))))
+                                 0.0))
+            ctheta (* c-on (Math/exp u0))
+            lon (+ (Math/log pi) cc (* kappa cm (- (Math/log kappa) (Math/log (+ kappa ctheta))))
+                   (* ct (- (Math/log ctheta) (Math/log (+ kappa ctheta)))))
+            p-on (if (pos? ct) 1.0 (/ 1.0 (+ 1.0 (Math/exp (- (Math/log (- 1.0 pi)) lon)))))
+            now-use (if (< (.nextDouble r) p-on) (burst m-cur u0) 0.0)]
+        (aset draws i (+ (double x) now-use
+                         (loop [[mb & more] m-later u u0 acc 0.0]
+                           (if (nil? mb) acc
+                               (let [u (+ (* phi u) (* innov (.nextGaussian r)))]
+                                 (recur more u (+ acc (if (< (.nextDouble r) pi) (burst mb u) 0.0))))))))))
     (java.util.Arrays/sort draws)
     {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
      :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)

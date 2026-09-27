@@ -605,7 +605,7 @@
 
 (def ^:private ladder-arms
   ["R0 linear" "R1 Poisson" "R2 +profile" "R3 +bursts (NB)" "R4 +recency (NB, 28d)"
-   "R5 +weekly pace" "R6 +bursts +weekly pace" "R7 +on/off blocks" "A production"])
+   "R5 +weekly pace" "R6 +bursts +weekly pace" "R7 +on/off blocks" "R8 +drifting pace" "A production"])
 
 (defn run-ladder
   "Print the count-process ladder: nested baselines from linear extrapolation
@@ -666,9 +666,14 @@
                             (base/fit-onoff
                               (base/block-training (m/windows (rows-before t) spec) t (profile-at t) zone spec
                                                    (:fit-lookback-secs spec))))))
+        fit-dr (memoize (fn [cell t]
+                          (let [{:keys [spec rows-before]} (data cell)]
+                            (base/fit-drift
+                              (base/training-blocks (m/hour-series (m/windows (rows-before t) spec) t) t (profile-at t) zone spec
+                                                    (:fit-lookback-secs spec))))))
         _ (dorun (pmap (fn [[cell t rung]] (case rung :A (fit-a cell t) :W (fit-weekly cell t) :BW (fit-bw cell t)
-                                             :OO (fit-oo cell t) (fit-rung cell t rung)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) rung [:A :W :BW :OO 1 2 3 4]] [cell t rung])))
+                                             :OO (fit-oo cell t) :DR (fit-dr cell t) (fit-rung cell t rung)))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) rung [:A :W :BW :OO :DR 1 2 3 4]] [cell t rung])))
         rows (vec
                (apply concat
                       (pmap
@@ -702,6 +707,13 @@
                                  "R7 +on/off blocks" (let [series (m/hour-series (m/windows (rows-before t) spec) t)
                                                            [done cur] (base/blocks-so-far series (:start w) t prof zone spec)]
                                                        (score (base/forecast-onoff (fit-oo cell refit) prof zone spec done cur t (:eff-end w) x)))
+                                 ;; rung 8 filters all history's blocks (the pace carries across
+                                 ;; windows) up to the block in progress
+                                 "R8 +drifting pace" (let [series (m/hour-series (m/windows (rows-before t) spec) t)
+                                                           hist (base/training-blocks series t prof zone spec (:fit-lookback-secs spec))
+                                                           [_ cur] (base/blocks-so-far series (:start w) t prof zone spec)
+                                                           done (if (seq cur) (pop hist) hist)]
+                                                       (score (base/forecast-drift (fit-dr cell refit) prof zone spec done cur t (:eff-end w) x)))
                                  "A production" (score (m/forecast (fit-a cell refit) (rows-before t) spec zone t (:eff-end w) x :path? false))}))))
                         targets)))
         by-cell (into {} (for [[cell cr] (group-by :cell rows)]
@@ -718,4 +730,5 @@
                                  ["R3 +bursts (NB)" "R2 +profile"] ["R4 +recency (NB, 28d)" "R3 +bursts (NB)"]
                                  ["R5 +weekly pace" "R2 +profile"] ["R6 +bursts +weekly pace" "R5 +weekly pace"]
                                  ["R6 +bursts +weekly pace" "R3 +bursts (NB)"] ["R7 +on/off blocks" "R6 +bursts +weekly pace"]
+                                 ["R8 +drifting pace" "R7 +on/off blocks"] ["A production" "R8 +drifting pace"]
                                  ["A production" "R7 +on/off blocks"]])))

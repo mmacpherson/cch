@@ -116,3 +116,37 @@
             f7 (b/forecast-onoff fit prof zone spec [on-day on-day on-day] [] now end 72.0)
             f6 (b/forecast-bursts-weekly {:c c :kappa kappa :alpha alpha} prof zone spec start now end 72.0)]
         (is (> (- (:hi f7) (:lo f7)) (- (:hi f6) (:lo f6))))))))
+
+(defn- simulate-drift
+  "n daily blocks x 24 unit-mass hours: log theta AR(1) (sd s, half-life h
+  blocks), each block on with prob pi, on-block hours rung-6 at rate c / pi."
+  [n c kappa pi s h seed]
+  (let [r (num/rng seed)
+        phi (Math/pow 2.0 (/ -1.0 h))
+        innov (* s (Math/sqrt (- 1.0 (* phi phi))))]
+    (loop [k 0 u (* s (.nextGaussian r)) out []]
+      (if (= k n)
+        out
+        (let [on? (< (.nextDouble r) pi)
+              theta (Math/exp u)
+              block (vec (for [_ (range 24)]
+                           [1.0 (if on?
+                                  (double (num/poisson-sample r (num/gamma-sample r kappa (/ kappa (* (/ c pi) theta)))))
+                                  0.0)]))]
+          (recur (inc k) (+ (* phi u) (* innov (.nextGaussian r))) (conj out block)))))))
+
+(deftest drift-fit-and-forecast
+  (let [blocks (simulate-drift 300 0.5 0.5 0.7 0.6 10.0 41)
+        {:keys [c pi s h] :as fit} (b/fit-drift blocks)]
+    (testing "recovers the on-day probability, the pace spread, and its persistence"
+      (is (< (Math/abs (- pi 0.7)) 0.06))
+      (is (< 0.35 s 0.9))
+      (is (< 4.0 h 25.0)))
+    (testing "a drifting pace beats a pace that forgets instantly"
+      (is (> (:loglik (#'b/drift-filter blocks fit))
+             (:loglik (#'b/drift-filter blocks (assoc fit :h 0.05))))))
+    (testing "the forecast is finite and never below the current reading"
+      (let [spec (m/specs :seven-day)
+            start 1780272000 now (+ start (* 3 86400)) end (+ start (* 7 86400))
+            f (b/forecast-drift fit prof zone spec (subvec blocks 0 30) [] now end 40.0)]
+        (is (every? #(and (Double/isFinite %) (>= % 40.0)) (:draws f)))))))
