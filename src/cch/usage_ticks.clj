@@ -22,10 +22,16 @@
   Rungs, from the ground floor:
     P0  homogeneous Poisson process: constant tick rate lambda
     P1  inhomogeneous Poisson process: lambda(t) = c * profile(time of week)
+    P2  mixed Poisson process: lambda(t) = c * theta_w * profile(t), a gamma
+        pace theta_w ~ Gamma(alpha, alpha) per calendar week (Monday 04:00
+        local), the user's week rather than the provider's quota window
 
   Pure functions."
   (:require [cch.numeric :as num]
-            [cch.usage-model :as m]))
+            [cch.usage-baselines :as base]
+            [cch.usage-model :as m])
+  (:import (java.time DayOfWeek Instant ZoneId ZonedDateTime)
+           (java.time.temporal TemporalAdjusters)))
 
 (defn intervals
   "Tick-count intervals from raw readings [[ts pct resets-at] ...] (any
@@ -134,3 +140,61 @@
   "Meter at `end` from reading `x` at `now`: x + Poisson(c * profile mass)."
   [{:keys [c]} prof zone now end x & {:keys [n seed] :or {n 3000 seed 1}}]
   (forecast-p0 {:rate (/ (* c (m/mass prof zone now (max now end))) (max 1 (- end now)))} now end x :n n :seed seed))
+
+;; --- P2: a gamma pace per calendar week ---
+
+(defn week-start
+  "Epoch second of the calendar week containing `t`: Monday 04:00 local."
+  ^long [^ZoneId zone t]
+  (let [z (ZonedDateTime/ofInstant (Instant/ofEpochSecond t) zone)
+        monday (-> z (.minusHours 4) (.with (TemporalAdjusters/previousOrSame DayOfWeek/MONDAY))
+                   (.toLocalDate) (.atTime 4 0) (.atZone zone))]
+    (.toEpochSecond monday)))
+
+(defn weekly-totals
+  "Per calendar week, [profile-mass ticks] of the intervals, each interval
+  assigned to the week containing its midpoint: {week-start [mass ticks]}."
+  [ivs prof zone]
+  (reduce (fn [acc {:keys [t0 t1 k]}]
+            (update acc (week-start zone (quot (+ t0 t1) 2))
+                    (fn [[mass ticks]] [(+ (or mass 0.0) (m/mass prof zone t0 t1)) (+ (or ticks 0.0) k)])))
+          {} ivs))
+
+(defn fit-p2
+  "Maximum-likelihood {:c :alpha}: weekly totals are negative binomial given
+  their profile mass (the weekly-pace likelihood of cch.usage-baselines)."
+  [ivs prof zone]
+  (assoc (base/fit-weekly (vec (vals (weekly-totals ivs prof zone)))) :rung :P2))
+
+(defn forecast-p2
+  "Meter at `end` from reading `x` at `now`. `week-ivs` are this calendar
+  week's intervals so far: they update its pace theta ~ Gamma(alpha + ticks,
+  alpha + c * mass); later weeks the horizon reaches draw a fresh pace."
+  [{:keys [c alpha]} prof zone week-ivs now end x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [ticks (reduce + 0.0 (map :k week-ivs))
+        m-obs (reduce + 0.0 (map #(m/mass prof zone (:t0 %) (:t1 %)) week-ivs))
+        ;; future mass split by calendar week: the current week, then each later one
+        weeks (loop [t now out []]
+                (if (>= t end)
+                  out
+                  (let [nxt (min end (+ (week-start zone t) (* 7 86400)))]
+                    (recur nxt (conj out (m/mass prof zone t nxt))))))
+        r (num/rng seed)
+        draws (double-array n)]
+    (dotimes [i n]
+      (aset draws i
+            (+ (double x)
+               (reduce + 0.0
+                       (map-indexed
+                         (fn [j mass]
+                           (let [theta (if (zero? j)
+                                         (num/gamma-sample r (+ alpha ticks) (+ alpha (* c m-obs)))
+                                         (num/gamma-sample r alpha alpha))]
+                             (if (pos? mass) (double (num/poisson-sample r (* c theta mass))) 0.0)))
+                         weeks)))))
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
+     :hi (num/quantile draws 0.95)
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))

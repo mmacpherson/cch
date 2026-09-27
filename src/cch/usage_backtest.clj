@@ -878,11 +878,13 @@
 
 (def ^:private ct-series-arms
   "Continuous-time rungs, each beside its hourly counterpart and production."
-  ["P0 Poisson process" "R1 Poisson (hourly)" "P1 +profile" "R2 +profile (hourly)" "A production"])
+  ["P0 Poisson process" "R1 Poisson (hourly)" "P1 +profile" "R2 +profile (hourly)"
+   "P2 +weekly pace" "R5 +weekly pace (hourly)" "A production"])
 
 (def ^:private ct-series-contrasts
   [["P0 Poisson process" "R1 Poisson (hourly)"] ["P1 +profile" "R2 +profile (hourly)"]
-   ["P1 +profile" "P0 Poisson process"]])
+   ["P2 +weekly pace" "R5 +weekly pace (hourly)"]
+   ["P1 +profile" "P0 Poisson process"] ["P2 +weekly pace" "P1 +profile"]])
 
 (defn run-ct-series
   "Print the continuous-time tick-process series against its hourly
@@ -916,6 +918,20 @@
                             (ticks/intervals readings (:cluster-secs spec) (span (second cell))))))
         fit-p0 (memoize (fn [cell t] (ticks/fit-p0 (ivs-at cell t))))
         fit-p1 (memoize (fn [cell t] (ticks/fit-p1 (ivs-at cell t) (profile-at t) zone)))
+        fit-p2 (memoize (fn [cell t] (ticks/fit-p2 (ivs-at cell t) (profile-at t) zone)))
+        ;; R5's counterpart: finished quota windows as replicates
+        fit-r5 (memoize (fn [cell t]
+                          (let [{:keys [spec rows-before]} (data cell)
+                                wins (m/windows (rows-before t) spec)
+                                series (m/hour-series wins t)
+                                prof (profile-at t)
+                                lookback (:fit-lookback-secs spec)]
+                            (base/fit-weekly
+                              (vec (for [w wins
+                                         :when (and (<= (:eff-end w) t) (or (nil? lookback) (>= (:start w) (- t lookback))))]
+                                     [(reduce + 0.0 (for [[h [live _]] (subseq series >= (* 3600 (quot (:start w) 3600)) < (:eff-end w))]
+                                                      (* live (nth prof (m/hour-of-week zone h)))))
+                                      (m/cum-at w (inc (:eff-end w)))]))))))
         fit-r (memoize (fn [cell t rung]
                          (let [{:keys [spec rows-before]} (data cell)
                                series (m/hour-series (m/windows (rows-before t) spec) t)
@@ -924,8 +940,9 @@
                            (base/fit rung (base/training-steps series (profile-at t) zone)))))
         fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
                                       (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
-        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :r1 (fit-r cell t 1) :r2 (fit-r cell t 2) :a (fit-a cell t)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :r1 :r2 :a]] [cell t k])))
+        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t)
+                                           :r1 (fit-r cell t 1) :r2 (fit-r cell t 2) :r5 (fit-r5 cell t) :a (fit-a cell t)))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :p2 :r1 :r2 :r5 :a]] [cell t k])))
         rows (vec
                (apply concat
                       (pmap
@@ -939,10 +956,17 @@
                             (vec
                               (for [t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
                                     :let [x (pct-at wobs t)
+                                          ;; this calendar week's tick intervals so far (P2's pace update)
+                                          ws (ticks/week-start zone t)
+                                          week-ivs (filter #(>= (quot (+ (:t0 %) (:t1 %)) 2) ws)
+                                                           (ticks/intervals (filter #(<= (- ws 86400) (first %) (dec t)) obs)
+                                                                            (:cluster-secs spec) (span wk)))
                                           forecasters {"P0 Poisson process" #(ticks/forecast-p0 (fit-p0 cell refit) t % x)
                                                        "R1 Poisson (hourly)" #(base/forecast (fit-r cell refit 1) prof zone spec t % x)
                                                        "P1 +profile" #(ticks/forecast-p1 (fit-p1 cell refit) prof zone t % x)
                                                        "R2 +profile (hourly)" #(base/forecast (fit-r cell refit 2) prof zone spec t % x)
+                                                       "P2 +weekly pace" #(ticks/forecast-p2 (fit-p2 cell refit) prof zone week-ivs t % x)
+                                                       "R5 +weekly pace (hourly)" #(base/forecast-weekly (fit-r5 cell refit) prof zone spec (:start w) t % x)
                                                        "A production" #(m/forecast (fit-a cell refit) (rows-before t) spec zone t % x :path? false)}
                                           horizons (for [h (conj (ladder-horizons wk) :reset)
                                                          :let [end (if (= h :reset) (:eff-end w) (+ t (* 3600 h)))]

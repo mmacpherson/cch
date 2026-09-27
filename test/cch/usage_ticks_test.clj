@@ -73,3 +73,30 @@
       (let [busy (tk/forecast-p1 {:c fit} prof zone (* 9 3600) (* 17 3600) 0.0)
             quiet (tk/forecast-p1 {:c fit} prof zone (* 17 3600) (* 25 3600) 0.0)]
         (is (> (:median busy) (* 3 (:median quiet))))))))
+
+(deftest p2-weekly-pace
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (repeat 168 1.0))
+        r (num/rng 8)
+        c 0.3
+        ;; 60 calendar weeks, each with pace theta ~ Gamma(3, 3); readings hourly
+        start (tk/week-start zone 1780272000)
+        readings (vec (for [w (range 60)
+                            :let [theta (num/gamma-sample r 3.0 3.0)
+                                  ws (+ start (* w 604800))
+                                  counts (reductions + (repeatedly 168 #(num/poisson-sample r (* c theta))))]
+                            [h cum] (map-indexed vector counts)]
+                        [(+ ws (* 3600 (inc h))) (min 99.0 (double cum)) (+ ws 604800)]))
+        ivs (tk/intervals readings 300 604800)
+        {:keys [alpha] fc :c :as fit} (tk/fit-p2 ivs prof zone)]
+    (testing "recovers the rate and the week-to-week spread"
+      (is (< (Math/abs (- 1.0 (/ fc c))) 0.15))
+      (is (< 1.5 alpha 6.0)))
+    (testing "a busy start to the week raises the rest-of-week forecast"
+      (let [ws (+ start (* 70 604800))
+            now (+ ws (* 48 3600))
+            end (+ ws (* 120 3600))
+            busy [{:t0 ws :t1 now :k (* 2.0 fc 48)}]
+            quiet [{:t0 ws :t1 now :k (* 0.3 fc 48)}]]
+        (is (> (:median (tk/forecast-p2 fit prof zone busy now end 0.0))
+               (* 2 (:median (tk/forecast-p2 fit prof zone quiet now end 0.0)))))))))
