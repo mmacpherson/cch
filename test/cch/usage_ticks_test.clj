@@ -216,3 +216,48 @@
           ivs (tk/intervals [[100 1.0 604800] [100 2.0 604800] [4000 3.0 604800]] 300 604800)
           units (tk/mmpp-units ivs prof zone)]
       (is (Double/isFinite (:loglik (tk/p3-filter units {:c 2.0 :a 0.3 :b 1.0})))))))
+
+(deftest series-step-matches-the-matrix
+  (doseq [[a b lam dt k] [[0.4 1.2 3.0 2.5 0] [0.4 1.2 3.0 2.5 3] [0.1 2.0 8.0 6.0 7] [0.3 0.3 1.0 0.01 1]]]
+    (let [[m00 m01 m10 m11] (tk/interval-matrix a b lam dt k)
+          out (#'tk/series-step! (double-array 4) 0.3 0.7 a b lam dt k)]
+      (is (< (Math/abs (- (aget out 0) (+ (* 0.3 m00) (* 0.7 m10)))) 1e-10) (str [a b lam dt k]))
+      (is (< (Math/abs (- (aget out 1) (+ (* 0.3 m01) (* 0.7 m11)))) 1e-10) (str [a b lam dt k])))))
+
+(deftest sessions-with-drifting-pace
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (repeat 168 1.0))
+        r (num/rng 33)
+        a 0.25 b 1.0 c 3.0 s 0.7 h 72.0
+        phi (Math/pow 2.0 (/ -1.0 h)) innov (* s (Math/sqrt (- 1.0 (* phi phi))))
+        horizon (* 40 86400)
+        ;; hourly pace path
+        pace (vec (reductions (fn [u _] (+ (* phi u) (* innov (.nextGaussian r)))) 0.0 (range (/ horizon 3600))))
+        switches (loop [t 0.0 on? false out []]
+                   (if (> t horizon) out
+                       (let [hold (* 3600 (/ (- (Math/log (- 1.0 (.nextDouble r)))) (if on? b a)))]
+                         (recur (+ t hold) (not on?) (conj out [t (+ t hold) on?])))))
+        ;; ticks: thinning within each on-spell by the hourly pace
+        tick-times (sort (for [[t0 t1 on?] switches :when on?
+                               h (range (* 3600 (quot (long t0) 3600)) (min t1 horizon) 3600)
+                               :let [lo (max t0 h) hi (min t1 (+ h 3600))
+                                     rate (* c (Math/exp (nth pace (quot h 3600) 0.0)))
+                                     nk (num/poisson-sample r (* rate (/ (- hi lo) 3600.0)))]
+                               _ (range nk)]
+                           (+ lo (* (.nextDouble r) (- hi lo)))))
+        readings (loop [t 300 ticks tick-times pct 0.0 out []]
+                   (if (> t horizon) out
+                       (let [[before after] (split-with #(< % t) ticks)
+                             reset (* 604800 (inc (quot t 604800)))
+                             pct (if (and (seq out) (not= reset (nth (peek out) 2))) (double (count before)) (+ pct (count before)))]
+                         (recur (+ t 300) after pct (conj out [t pct reset])))))
+        units (tk/mmpp-units (tk/intervals readings 300 604800) prof zone)
+        p3 (tk/fit-p3 units)
+        p4 (tk/fit-p4 units)]
+    (testing "finds a drifting pace of the right size"
+      (is (< 0.3 (:s p4) 1.4)))
+    (testing "the drifting pace explains the ticks better than sessions alone"
+      (is (> (:loglik (tk/p4-filter units p4)) (+ 5.0 (:loglik (tk/p3-filter units p3))))))
+    (testing "forecasts are finite and never below the current reading"
+      (let [f (tk/forecast-p4 p4 prof zone units horizon (+ horizon (* 72 3600)) 20.0)]
+        (is (every? #(and (Double/isFinite %) (>= % 20.0)) (:draws f)))))))

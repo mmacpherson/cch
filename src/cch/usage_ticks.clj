@@ -30,6 +30,9 @@
     P3  on/off sessions: a Markov-modulated Poisson process; a hidden chain
         switches off->on at rate a and on->off at rate b (per hour); ticks
         arrive at c * profile(t) while on and not at all while off
+    P4  sessions + a drifting pace: the on-intensity is c * exp(u(t)) * profile(t),
+        u an Ornstein-Uhlenbeck pace (spread s, half-life h hours) held
+        constant within each clock hour
 
   Pure functions."
   (:require [cch.numeric :as num]
@@ -408,7 +411,8 @@
           ;; in the same second happened within that second
           (let [t0 (min t0 (dec t1))]
             (recur more nil (conj! (flush units acc)
-                                   {:dt (/ (- t1 t0) 3600.0) :mass (m/mass prof zone t0 t1) :k k :hour nil})))
+                                   {:dt (/ (- t1 t0) 3600.0) :mass (m/mass prof zone t0 t1) :k k
+                                    :hour (* 3600 (quot (dec t1) 3600))})))
           ;; zero-tick: split at hours, merge pieces into the running hour unit
           (let [[acc units] (loop [t t0 acc acc units units]
                               (if (>= t t1) [acc units]
@@ -470,6 +474,64 @@
       (let [d (- l1 l2)]
         [(/ (- (* e1 (- g00 l2)) (* e2 (- g00 l1))) d) (/ (* (- e1 e2) g01) d)
          (/ (* (- e1 e2) g10) d) (/ (- (* e1 (- g11 l2)) (* e2 (- g11 l1))) d)]))))
+
+(defn- zero-tick-into!
+  "zero-tick-matrix written into `out` (length 4), allocation-free."
+  [^doubles out a b lam dt]
+  (let [a (double a) b (double b) lam (double lam) dt (double dt)
+        g00 (- a) g01 a g10 b g11 (- (+ b lam))
+        tr (+ g00 g11) det (- (* g00 g11) (* g01 g10))
+        disc (Math/sqrt (max 0.0 (- (* 0.25 tr tr) det)))
+        l1 (+ (* 0.5 tr) disc) l2 (- (* 0.5 tr) disc)
+        e1 (Math/exp (* l1 dt)) e2 (Math/exp (* l2 dt))]
+    (if (< disc 1e-12)
+      (do (aset out 0 (* e1 (+ 1.0 (* (- g00 l1) dt)))) (aset out 1 (* e1 g01 dt))
+          (aset out 2 (* e1 g10 dt)) (aset out 3 (* e1 (+ 1.0 (* (- g11 l1) dt)))))
+      (let [d (- l1 l2)]
+        (aset out 0 (/ (- (* e1 (- g00 l2)) (* e2 (- g00 l1))) d)) (aset out 1 (/ (* (- e1 e2) g01) d))
+        (aset out 2 (/ (* (- e1 e2) g10) d)) (aset out 3 (/ (- (* e1 (- g11 l2)) (* e2 (- g11 l1))) d))))
+    out))
+
+(defn- unit-into!
+  "unit-matrix written into `out`: allocation-free for no ticks and for a
+  precisely timed tick; multi-tick gaps fall back to the series."
+  [^doubles out a b lam dt k]
+  (let [a (double a) b (double b) lam (double lam) dt (double dt) k (double k)]
+  (cond
+    (zero? k) (zero-tick-into! out a b lam dt)
+    (and (== k 1.0) (< dt (/ 1.0 60)))
+    (do (zero-tick-into! out a b lam dt)
+        (aset out 1 (* (aget out 1) lam dt)) (aset out 3 (* (aget out 3) lam dt))
+        (aset out 0 0.0) (aset out 2 0.0) out)
+    :else (let [[m00 m01 m10 m11] (interval-matrix a b lam dt k)]
+            (aset out 0 (double m00)) (aset out 1 (double m01)) (aset out 2 (double m10)) (aset out 3 (double m11)) out))))
+
+(defn- series-step!
+  "(q0, q1) = (po, pn) times the z^k coefficient of exp((Q - Lambda + z Lambda) dt),
+  written into out[0], out[1]: uniformization on the row vector (a
+  polynomial in z of 2-vectors, degree <= k) in primitive arrays, never
+  forming the matrix."
+  [^doubles out po pn a b lam dt k]
+  (let [po (double po) pn (double pn) a (double a) b (double b) lam (double lam) dt (double dt)
+        k (long k)
+        nu (max 1e-9 (* 1.05 (max a (+ b lam))))
+        p00 (- 1.0 (/ a nu)) p01 (/ a nu) p10 (/ b nu) p11 (- 1.0 (/ (+ b lam) nu)) bz (/ lam nu)
+        x (* nu dt)
+        nmax (long (+ x (* 8 (Math/sqrt (max x 1.0))) 20))
+        ;; v0[d], v1[d]: coefficient of z^d of the current row vector
+        v0 (double-array (inc k)) v1 (double-array (inc k))
+        w0 (double-array (inc k)) w1 (double-array (inc k))]
+    (aset v0 0 po) (aset v1 0 pn)
+    (loop [n 0 w (Math/exp (- x)) acc0 0.0 acc1 0.0 ^doubles v0 v0 ^doubles v1 v1 ^doubles w0 w0 ^doubles w1 w1]
+      (if (> n nmax)
+        (do (aset out 0 acc0) (aset out 1 acc1) out)
+        (let [acc0 (+ acc0 (* w (aget v0 k))) acc1 (+ acc1 (* w (aget v1 k)))]
+          ;; next = v (P + z B): degree d gets v[d] P plus v[d-1] B (B only feeds state 1)
+          (dotimes [d (inc k)]
+            (let [a0 (aget v0 d) a1 (aget v1 d)]
+              (aset w0 d (+ (* a0 p00) (* a1 p10)))
+              (aset w1 d (+ (* a0 p01) (* a1 p11) (if (pos? d) (* (aget v1 (dec d)) bz) 0.0)))))
+          (recur (inc n) (* w (/ x (inc n))) acc0 acc1 w0 w1 v0 v1))))))
 
 (defn- unit-matrix
   "The unit's transition-with-ticks matrix: closed form for no ticks; for
@@ -540,6 +602,144 @@
                                           (recur (+ t hold) (not on?) (+ t-on (if on? hold 0.0))))))
                          lam (if (pos? dt) (/ (* c mass) dt) 0.0)]
                      (recur more on? (+ acc (double (num/poisson-sample r (* lam t-on)))))))))))
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
+     :hi (num/quantile draws 0.95)
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))
+
+;; --- P4: sessions with a drifting pace ---
+;;
+;; Joint forward filter over (session state, pace u on a grid). Within a
+;; clock hour the pace is constant, so each unit multiplies every grid
+;; point's 2-vector by that point's closed-form session matrix (only the
+;; on-intensity differs). Between hours the pace takes an exact n-hour AR(1)
+;; step (phi^n, variance s^2 (1 - phi^2n)), kernels cached per n.
+
+(def ^:private pace-grid (double-array (range -3.0 3.0001 0.1)))
+
+(defn- pace-kernel
+  "Per source grid point j: [first target index, normalized weights] for an
+  AR(1) step with coefficient `phi` and innovation sd `sd`."
+  [^double phi ^double sd]
+  (let [g ^doubles pace-grid n (alength g) du 0.1
+        sd (max sd 1e-3)
+        band (long (Math/ceil (/ (* 5.0 sd) du)))]
+    (vec (for [j (range n)]
+           (let [mu (* phi (aget g j))
+                 center (long (Math/round (/ (- mu -3.0) du)))
+                 lo (max 0 (- center band)) hi (min (dec n) (+ center band))
+                 ws (double-array (for [i (range lo (inc hi))]
+                                    (let [z (/ (- (aget g i) mu) sd)] (Math/exp (* -0.5 z z)))))
+                 tot (reduce + ws)]
+             (when (pos? tot) (dotimes [q (alength ws)] (aset ws q (/ (aget ws q) tot))))
+             [lo ws])))))
+
+(defn- step-pace
+  "Apply a pace kernel to the joint vectors (off, on) over the grid."
+  [^doubles off ^doubles on kern]
+  (let [n (alength off) o2 (double-array n) n2 (double-array n)]
+    (dotimes [j n]
+      (let [po (aget off j) pn (aget on j)]
+        (when (> (+ po pn) 1e-300)
+          (let [[lo ^doubles ws] (nth kern j)]
+            (dotimes [q (alength ws)]
+              (let [i (+ (long lo) q) w (aget ws q)]
+                (aset o2 i (+ (aget o2 i) (* po w)))
+                (aset n2 i (+ (aget n2 i) (* pn w)))))))))
+    [o2 n2]))
+
+(defn- joint-prior
+  "Stationary joint prior over (state, pace)."
+  [a b s]
+  (let [g ^doubles pace-grid n (alength g)
+        w (double-array (map #(Math/exp (* -0.5 (Math/pow (/ % (max s 1e-3)) 2))) g))
+        tot (reduce + w)
+        p-on (/ a (+ a b))]
+    [(double-array (map #(* (- 1.0 p-on) (/ % tot)) w))
+     (double-array (map #(* p-on (/ % tot)) w))]))
+
+(defn p4-filter
+  "Joint filter over session units: {:off :on (grid vectors) :loglik L}."
+  [units {:keys [c a b s h]}]
+  (let [phi (Math/pow 2.0 (/ -1.0 h))
+        kern (memoize (fn [nh] (pace-kernel (Math/pow phi nh) (* s (Math/sqrt (- 1.0 (Math/pow phi (* 2 nh))))))))
+        g ^doubles pace-grid n (alength g)
+        [off0 on0] (joint-prior a b s)]
+    (loop [[{:keys [dt mass k hour]} & more :as us] units
+           ^doubles off off0 ^doubles on on0 prev-hour nil ll 0.0]
+      (if (empty? us)
+        {:off off :on on :loglik ll}
+        (let [nh (if (and prev-hour hour) (quot (- hour prev-hour) 3600) 0)
+              [^doubles off ^doubles on] (if (pos? nh) (step-pace off on (kern nh)) [off on])
+              o2 (double-array n) n2 (double-array n)
+              buf (double-array 4)
+              dt (double dt) mass (double mass) k (double k)
+              z (loop [i 0 z 0.0]
+                  (if (= i n) z
+                      (let [lam (if (pos? dt) (/ (* c (Math/exp (aget g i)) mass) dt) 0.0)
+                            po (aget off i) pn (aget on i)
+                            fast? (or (zero? k) (and (== k 1.0) (< dt (/ 1.0 60))))
+                            _ (if fast? (unit-into! buf a b lam dt k) (series-step! buf po pn a b lam dt k))
+                            q0 (if fast? (+ (* po (aget buf 0)) (* pn (aget buf 2))) (aget buf 0))
+                            q1 (if fast? (+ (* po (aget buf 1)) (* pn (aget buf 3))) (aget buf 1))]
+                        (aset o2 i q0) (aset n2 i q1)
+                        (recur (inc i) (+ z q0 q1)))))]
+          (if (and (pos? z) (Double/isFinite z))
+            (do (dotimes [i n] (aset o2 i (/ (aget o2 i) z)) (aset n2 i (/ (aget n2 i) z)))
+                (recur more o2 n2 (or hour prev-hour) (+ ll (Math/log z))))
+            {:off off :on on :loglik Double/NEGATIVE_INFINITY}))))))
+
+(defn fit-p4
+  "Penalized ML {:c :a :b :s :h}: weak normal priors on the log scale (sd 3;
+  sd 1 for the pace spread and half-life, around 0.5 and 72 hours)."
+  [units]
+  (let [{:keys [c a b]} (fit-p3 units)
+        x0 [(Math/log c) (Math/log a) (Math/log b) (Math/log 0.5) (Math/log 72.0)]
+        sd [3.0 3.0 3.0 1.0 1.0]
+        unpack (fn [[lc la lb ls lh]] {:c (Math/exp lc) :a (Math/exp la) :b (Math/exp lb)
+                                       :s (Math/exp ls) :h (Math/exp lh)})
+        penalty (fn [x] (* 0.5 (reduce + (map (fn [xi mi d] (Math/pow (/ (- xi mi) d) 2)) x x0 sd))))
+        {x :x} (num/nelder-mead (fn [x] (let [v (:loglik (p4-filter units (unpack x)))]
+                                          (if (Double/isFinite v) (+ (- v) (penalty x)) 1e300)))
+                                x0 :tol 1e-6 :max-iter 1500)]
+    (assoc (unpack x) :rung :P4)))
+
+(defn forecast-p4
+  "Meter at `end` from reading `x` at `now`: (state, pace) from the joint
+  filter, then pace steps per hour and session switching within each hour."
+  [{:keys [c a b s h] :as params} prof zone units now end x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [{:keys [^doubles off ^doubles on]} (p4-filter units params)
+        g ^doubles pace-grid ng (alength g)
+        cum (double-array (reductions + (concat off on)))
+        total (aget cum (dec (alength cum)))
+        phi (Math/pow 2.0 (/ -1.0 h))
+        innov (* s (Math/sqrt (- 1.0 (* phi phi))))
+        fut (loop [t now out []]
+              (if (>= t end) out
+                  (let [nxt (min end (* 3600 (inc (quot t 3600))))]
+                    (recur nxt (conj out [(/ (- nxt t) 3600.0) (m/mass prof zone t nxt)])))))
+        r (num/rng seed)
+        draws (double-array n)]
+    (dotimes [i n]
+      (let [v (* total (.nextDouble r))
+            j (min (dec (alength cum)) (let [q (java.util.Arrays/binarySearch cum v)] (if (neg? q) (- (inc q)) q)))
+            on0 (Boolean/valueOf (>= j ng))
+            u0 (+ (aget g (mod j ng)) (* 0.1 (- (.nextDouble r) 0.5)))]
+        (aset draws i
+              (+ (double x)
+                 (loop [[[dt mass] & more] fut on? on0 u u0 acc 0.0 first? true]
+                   (if (or (nil? dt) (>= (+ x acc) 100.0))
+                     acc
+                     (let [u (if first? u (+ (* phi u) (* innov (.nextGaussian r))))
+                           [t-on on?] (loop [t 0.0 on? on? t-on 0.0]
+                                        (let [hold (/ (- (Math/log (- 1.0 (.nextDouble r)))) (if on? b a))]
+                                          (if (>= (+ t hold) dt)
+                                            [(+ t-on (if on? (- dt t) 0.0)) on?]
+                                            (recur (+ t hold) (not on?) (+ t-on (if on? hold 0.0))))))
+                           lam (if (pos? dt) (/ (* c (Math/exp u) mass) dt) 0.0)]
+                       (recur more on? u (+ acc (double (num/poisson-sample r (* lam t-on)))) false))))))))
     (java.util.Arrays/sort draws)
     {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
      :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
