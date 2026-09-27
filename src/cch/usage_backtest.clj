@@ -19,6 +19,7 @@
             [cch.usage-eval :as ev]
             [cch.usage-model :as m]
             [cch.usage-stan :as stan]
+            [cch.usage-ticks :as ticks]
             [clojure.java.shell :as shell]
             [clojure.string :as str])
   (:import (java.time ZoneId)))
@@ -872,3 +873,98 @@
       (println (format "  %-24s R6 %.3f vs %.3f   R7 %.3f vs %.3f" (str (first cell) " " (name (second cell)))
                        (:kappa (fit cell t 3600 6)) (:kappa (fit cell t 900 6))
                        (:kappa (fit cell t 3600 7)) (:kappa (fit cell t 900 7)))))))
+
+;; --- continuous-time series on the ticks (cch.usage-ticks) ---
+
+(def ^:private ct-series-arms
+  "Continuous-time rungs, each beside its hourly counterpart and production."
+  ["P0 Poisson process" "R1 Poisson (hourly)" "A production"])
+
+(defn run-ct-series
+  "Print the continuous-time tick-process series against its hourly
+  counterparts and production, on the same refits, checkpoints, horizons,
+  and estimands as run-ladder. `only` restricts cells; `max-refits` keeps
+  the latest N refit weeks (small-data runs)."
+  [& {:keys [only max-refits]}]
+  (let [now (quot (System/currentTimeMillis) 1000)
+        zone (ZoneId/systemDefault)
+        week 604800
+        span {:seven-day 604800 :five-hour 18000}
+        data (into {} (map (fn [c] [c (cell-data now c)]) (remove #(= "agy" (first %)) cells)))
+        series-at (memoize (fn [cell t] ((:series (data cell)) t)))
+        profile-at (memoize (fn [t] (m/fleet-harmonic-profile
+                                      (into {} (for [c (keys data) :let [s (series-at c t)] :when (seq s)] [c s]))
+                                      zone)))
+        refit-of (fn [w] (* week (quot (:start w) week)))
+        targets (for [[cell d] data
+                      :when (or (nil? only) (only cell))
+                      :let [[_ wk] cell {:keys [min-train]} (plan wk)]
+                      [i w] (map-indexed vector (:wins d))
+                      :when (and (>= i min-train) (or (:cap w) (< (:eff-end w) (- now 3600))))]
+                  {:cell cell :w w :i i :refit (refit-of w)})
+        keep (when max-refits (set (take-last max-refits (sort (distinct (map :refit targets))))))
+        targets (if keep (filter #(keep (:refit %)) targets) targets)
+        ;; tick intervals from readings before t, within the spec's lookback
+        ivs-at (memoize (fn [cell t]
+                          (let [{:keys [spec obs]} (data cell)
+                                lookback (:fit-lookback-secs spec)
+                                readings (filter #(and (< (first %) t) (or (nil? lookback) (>= (first %) (- t lookback)))) obs)]
+                            (ticks/intervals readings (:cluster-secs spec) (span (second cell))))))
+        fit-p0 (memoize (fn [cell t] (ticks/fit-p0 (ivs-at cell t))))
+        fit-r1 (memoize (fn [cell t]
+                          (let [{:keys [spec rows-before]} (data cell)
+                                series (m/hour-series (m/windows (rows-before t) spec) t)
+                                lookback (:fit-lookback-secs spec)
+                                series (if lookback (into (sorted-map) (filter #(>= (key %) (- t lookback)) series)) series)]
+                            (base/fit 1 (base/training-steps series (profile-at t) zone)))))
+        fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
+                                      (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
+        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :r1 (fit-r1 cell t) :a (fit-a cell t)))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :r1 :a]] [cell t k])))
+        rows (vec
+               (apply concat
+                      (pmap
+                        (fn [{:keys [cell w i refit]}]
+                          (let [{:keys [spec obs rows-before]} (data cell)
+                                [_ wk] cell
+                                {:keys [checkpoint-secs]} (plan wk)
+                                final (m/cum-at w (inc (:eff-end w)))
+                                wobs (window-obs obs spec w)
+                                prof (profile-at refit)]
+                            (vec
+                              (for [t (range (+ (:start w) checkpoint-secs) (- (m/live-end w) 300) checkpoint-secs)
+                                    :let [x (pct-at wobs t)
+                                          forecasters {"P0 Poisson process" #(ticks/forecast-p0 (fit-p0 cell refit) t % x)
+                                                       "R1 Poisson (hourly)" #(base/forecast (fit-r1 cell refit) prof zone spec t % x)
+                                                       "A production" #(m/forecast (fit-a cell refit) (rows-before t) spec zone t % x :path? false)}
+                                          horizons (for [h (conj (ladder-horizons wk) :reset)
+                                                         :let [end (if (= h :reset) (:eff-end w) (+ t (* 3600 h)))]
+                                                         :when (<= end (:eff-end w))]
+                                                     [h end (if (= h :reset) final (min 100.0 (pct-at wobs end)))])]]
+                                (into {:cell cell}
+                                      (for [[label f] forecasters]
+                                        [label (into {} (for [[h end y] horizons
+                                                              :let [g (f end)
+                                                                    capped-y? (>= y 100.0)
+                                                                    in? (fn [lo hi] (if capped-y? (>= hi 99.0) (<= (- lo 1.0) y (+ hi 1.0))))]]
+                                                          [h {:win i :week (quot (:start w) week) :hours (/ (- t (:start w)) 3600.0)
+                                                              :crps (m/crps (:draws g) y 100.0)
+                                                              :err (if capped-y? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) y)))
+                                                              :cov90 (in? (:lo g) (:hi g)) :cov50 (in? (:q25 g) (:q75 g))}]))]))))))
+                        targets)))
+        at (fn [h] (into {} (for [[cell cr] (group-by :cell rows)
+                                  :let [cr (filter #(get-in % ["A production" h]) cr)]
+                                  :when (seq cr)]
+                              [cell (into {} (for [a ct-series-arms] [a (mapv #(get-in % [a h]) cr)]))])))]
+    (doseq [[cell arms] (sort-by key (at :reset))
+            :let [base-rows (arms "A production")]]
+      (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs A production)" (first cell) (name (second cell))
+                       (count base-rows) (count (distinct (map :win base-rows)))))
+      (println summary-header)
+      (doseq [a ct-series-arms]
+        (println (summary-line a (arms a) base-rows (second cell)))))
+    (doseq [h (ladder-horizons :seven-day)]
+      (print-pooled-7d (at h) ct-series-arms "A production" :title (format "secondary: meter at +%dh" h)
+                       :contrasts [["P0 Poisson process" "R1 Poisson (hourly)"]]))
+    (print-pooled-7d (at :reset) ct-series-arms "A production"
+                     :contrasts [["P0 Poisson process" "R1 Poisson (hourly)"]])))
