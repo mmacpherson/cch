@@ -90,6 +90,61 @@
                        (conj! out {:t0 start :t1 ts :k (Math/rint pct) :known ts})
                        out)))))))))
 
+(defn window-intervals
+  "Tick-count intervals from the usage model's windows (cch.usage-model/
+  windows: {:start :end :eff-end :cap}) and raw readings [[ts pct resets-at]]:
+  within each window, between consecutive readings of that window (its reset
+  time within `cluster-secs` of the window's end; stale readings below the
+  running maximum ignored), from the window's start to its first reading,
+  and to its end of exposure (the cap, or the effective end, with no ticks
+  after the last reading); between windows, zero-tick exposure. Unlike
+  `intervals`, readings outside every window never start a window: the
+  provider sometimes reports one-off empty windows (0%, reset exactly one
+  window ahead) in the middle of a real one. :known is the time of the
+  reading that reveals each interval (the next window's first reading for
+  a window's tail and the gap after it), so they come out ordered by it."
+  [wins readings cluster-secs]
+  (let [by-time (vec (sort-by first readings))
+        times (mapv first by-time)
+        rows-of (fn [{:keys [start end]}]
+                  (let [i (java.util.Collections/binarySearch times start compare)
+                        i (if (neg? i) (- (inc i)) i)]
+                    (->> (subvec by-time (min i (count by-time)))
+                         (take-while #(< (first %) end))
+                         (filter #(<= (Math/abs (double (- (nth % 2) end))) cluster-secs)))))]
+    (loop [[w & more] (sort-by :start wins) pending nil out (transient [])]
+      (if (nil? w)
+        (persistent! out)
+        (let [rs (loop [[[ts pct] & rr] (rows-of w) mx -1.0 acc []]
+                   (cond (nil? ts) acc
+                         (< pct mx) (recur rr mx acc)
+                         :else (recur rr pct (conj acc [ts pct]))))
+              first-ts (ffirst rs)
+              ;; the previous window's tail and the gap, revealed by this window's first reading
+              out (if (and pending first-ts)
+                    (reduce conj! out (keep (fn [iv] (when (< (:t0 iv) (:t1 iv)) (assoc iv :known first-ts))) pending))
+                    out)
+              stop (min (:eff-end w) (or (:cap w) Long/MAX_VALUE))
+              out (if first-ts
+                    (conj! out {:t0 (min (:start w) first-ts) :t1 first-ts :k (Math/rint (second (first rs))) :known first-ts})
+                    out)
+              [out last-ts last-pct]
+              (reduce (fn [[out pts ppct] [ts pct]]
+                        [(if (and (< ppct 100.0) (< pts stop))
+                           (conj! out {:t0 pts :t1 (min ts stop) :k (Math/rint (- pct ppct)) :known ts})
+                           out)
+                         ts pct])
+                      [out first-ts (if first-ts (second (first rs)) 0.0)] (rest rs))
+              next-start (:start (first (sort-by :start more)))
+              ;; the effective end can pass the next window's start (it is set by the
+              ;; next window's first activity): clip there so no time counts twice
+              tail-end (if next-start (min stop next-start) stop)
+              pending (when last-ts
+                        (cond-> []
+                          (and (< last-pct 100.0) (< last-ts tail-end)) (conj {:t0 last-ts :t1 tail-end :k 0.0})
+                          next-start (conj {:t0 (max stop (:eff-end w)) :t1 next-start :k 0.0})))]
+          (recur more pending out))))))
+
 (defn known-before
   "The intervals of `ivs` (as returned by `intervals`) revealed before `t`,
   optionally only those starting at or after `since`: a prefix by :known."

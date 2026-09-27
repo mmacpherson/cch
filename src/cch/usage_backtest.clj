@@ -898,7 +898,6 @@
   (let [now (quot (System/currentTimeMillis) 1000)
         zone (ZoneId/systemDefault)
         week 604800
-        span {:seven-day 604800 :five-hour 18000}
         data (into {} (map (fn [c] [c (cell-data now c)]) (remove #(= "agy" (first %)) cells)))
         series-at (memoize (fn [cell t] ((:series (data cell)) t)))
         profile-at (memoize (fn [t] (m/fleet-harmonic-profile
@@ -915,8 +914,10 @@
         targets (if keep (filter #(keep (:refit %)) targets) targets)
         ;; every cell's tick intervals once; what is known before t (within the
         ;; spec's lookback) is a prefix by the time each interval is revealed
-        all-ivs (into {} (for [[cell {:keys [spec obs]}] data]
-                           [cell (ticks/intervals obs (:cluster-secs spec) (span (second cell)))]))
+        ;; built on the usage model's windows (as the hourly rungs are), so
+        ;; one-off empty windows the provider reports cannot split a real one
+        all-ivs (into {} (for [[cell {:keys [spec obs wins]}] data]
+                           [cell (ticks/window-intervals wins obs (:cluster-secs spec))]))
         ivs-at (fn [cell t]
                  (let [lookback (:fit-lookback-secs (:spec (data cell)))]
                    (ticks/known-before (all-ivs cell) t (when lookback (- t lookback)))))

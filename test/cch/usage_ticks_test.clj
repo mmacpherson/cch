@@ -261,3 +261,26 @@
     (testing "forecasts are finite and never below the current reading"
       (let [f (tk/forecast-p4 p4 prof zone units horizon (+ horizon (* 72 3600)) 20.0)]
         (is (every? #(and (Double/isFinite %) (>= % 20.0)) (:draws f)))))))
+
+(deftest window-intervals-ignore-phantom-windows
+  (let [w1 {:start 0 :end 604800 :eff-end 400000 :cap nil}
+        w2 {:start 400000 :end 1004800 :eff-end 1004800 :cap nil}
+        readings [[1000 1.0 604800] [2000 3.0 604800]
+                  [3000 0.0 607800]                  ; phantom: an empty window one window ahead
+                  [4000 5.0 604800]                  ; the real window continues
+                  [400500 2.0 1004800]]
+        ivs (tk/window-intervals [w1 w2] readings 300)]
+    (testing "every tick of the real window is counted despite the phantom reading"
+      (is (= 5.0 (reduce + (map :k (filter #(< (:t1 %) 400000) ivs))))))
+    (testing "the tail of window 1 and the gap are zero-tick exposure revealed by window 2's first reading"
+      (is (some #(= {:t0 4000 :t1 400000 :k 0.0 :known 400500} %) ivs)))
+    (testing "ordered by the time each interval is revealed"
+      (is (apply <= (map :known ivs))))))
+
+(deftest window-intervals-never-overlap
+  (testing "an effective end past the next window's start does not count that time twice"
+    (let [w1 {:start 0 :end 604800 :eff-end 30000 :cap nil}
+          w2 {:start 20000 :end 624800 :eff-end 624800 :cap nil}   ; formal start before w1's effective end
+          ivs (tk/window-intervals [w1 w2] [[1000 1.0 604800] [2000 2.0 604800] [25000 1.0 624800]] 300)
+          spans (sort (map (juxt :t0 :t1) ivs))]
+      (is (every? (fn [[[_ e] [s _]]] (<= e s)) (partition 2 1 spans))))))
