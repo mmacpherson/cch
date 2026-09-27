@@ -881,7 +881,7 @@
   ["P0 Poisson process" "R1 Poisson (hourly)" "P1 +profile" "R2 +profile (hourly)"
    "P2 +weekly pace" "R5 +weekly pace (hourly)" "P3 sessions" "R7 +on/off blocks (hourly)"
    "P4 +drifting pace" "R8 +drifting pace (hourly)" "P5 sessions +reading presence"
-   "P6 +pace +presence" "A production"])
+   "P6 +pace +presence" "P7 away/available/session" "A production"])
 
 (def ^:private ct-series-contrasts
   [["P0 Poisson process" "R1 Poisson (hourly)"] ["P1 +profile" "R2 +profile (hourly)"]
@@ -890,7 +890,9 @@
    ["P3 sessions" "R7 +on/off blocks (hourly)"] ["P4 +drifting pace" "P3 sessions"]
    ["P4 +drifting pace" "R8 +drifting pace (hourly)"] ["A production" "P4 +drifting pace"]
    ["P5 sessions +reading presence" "P3 sessions"] ["P6 +pace +presence" "P4 +drifting pace"]
-   ["P6 +pace +presence" "R8 +drifting pace (hourly)"] ["A production" "P6 +pace +presence"]])
+   ["P6 +pace +presence" "R8 +drifting pace (hourly)"] ["A production" "P6 +pace +presence"]
+   ["P7 away/available/session" "P4 +drifting pace"] ["P7 away/available/session" "R8 +drifting pace (hourly)"]
+   ["A production" "P7 away/available/session"]])
 
 (defn run-ct-series
   "Print the continuous-time tick-process series against its hourly
@@ -941,6 +943,10 @@
                                               prof zone)))
         fit-p5 (memoize (fn [cell t] (ticks/fit-p5 (presence-at cell t (profile-at t)))))
         fit-p6 (memoize (fn [cell t] (ticks/fit-p6 (presence-at cell t (profile-at t)))))
+        ;; the observation layer is per agent: reading presence is informative
+        ;; for Claude (dense readings) and misleading for Codex (sparse)
+        presence? (fn [cell] (= "claude-code" (first cell)))
+        fit-p7 (memoize (fn [cell t] (ticks/fit-p7 (presence-at cell t (profile-at t)) (profile-at t) (presence? cell))))
         fit-r8 (memoize (fn [cell t]
                           (let [{:keys [spec rows-before]} (data cell)]
                             (base/fit-drift
@@ -972,9 +978,9 @@
                            (base/fit rung (base/training-steps series (profile-at t) zone)))))
         fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
                                       (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
-        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t) :p4 (fit-p4 cell t) :p5 (fit-p5 cell t) :p6 (fit-p6 cell t) :r7 (fit-r7 cell t) :r8 (fit-r8 cell t)
+        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t) :p4 (fit-p4 cell t) :p5 (fit-p5 cell t) :p6 (fit-p6 cell t) :p7 (fit-p7 cell t) :r7 (fit-r7 cell t) :r8 (fit-r8 cell t)
                                            :r1 (fit-r cell t 1) :r2 (fit-r cell t 2) :r5 (fit-r5 cell t) :a (fit-a cell t)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :p2 :p3 :p4 :p5 :p6 :r1 :r2 :r5 :r7 :r8 :a]] [cell t k])))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :p2 :p3 :p4 :p5 :p6 :p7 :r1 :r2 :r5 :r7 :r8 :a]] [cell t k])))
         rows (vec
                (apply concat
                       (pmap
@@ -1006,6 +1012,7 @@
                                                        "P4 +drifting pace" #(ticks/forecast-p4 (fit-p4 cell refit) prof zone (units-at cell t prof) t % x)
                                                        "P5 sessions +reading presence" #(ticks/forecast-p5 (fit-p5 cell refit) prof zone presence t % x)
                                                        "P6 +pace +presence" #(ticks/forecast-p6 (fit-p6 cell refit) prof zone presence t % x)
+                                                       "P7 away/available/session" #(ticks/forecast-p7 (fit-p7 cell refit) prof zone presence t % x)
                                                        "R8 +drifting pace (hourly)" #(let [series (m/hour-series (m/windows (rows-before t) spec) t)
                                                                                            [_ cur] (base/blocks-so-far series (:start w) t prof zone spec)
                                                                                            hist (base/training-blocks series t prof zone spec (:fit-lookback-secs spec))

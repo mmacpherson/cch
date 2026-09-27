@@ -333,3 +333,39 @@
     (is (< (Math/abs (- (:loglik (tk/p5-filter units base))
                         (:loglik (tk/p6-filter units (assoc base :s 1e-4 :h 72.0)))))
            1e-3))))
+
+(deftest three-states-separate-the-time-scales
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (repeat 168 1.0))
+        r (num/rng 55)
+        r1 0.05 r2 0.08 r3 1.0 r4 3.0 c 4.0 rho-on 0.8 rho-off 0.01
+        horizon (* 21 86400)
+        rates {0 [[1 r1]] 1 [[0 r2] [2 r3]] 2 [[1 r4]]}
+        path (loop [t 0.0 st 1 out []]
+               (if (> t horizon) out
+                   (let [outs (rates st) tot (reduce + (map second outs))
+                         hold (* 3600 (/ (- (Math/log (- 1.0 (.nextDouble r)))) tot))
+                         pick (* tot (.nextDouble r))
+                         nxt (ffirst (drop-while #(< (second %) pick) (map vector (map first outs) (reductions + (map second outs)))))]
+                     (recur (+ t hold) nxt (conj out [t (+ t hold) st])))))
+        state-at (fn [t] (some (fn [[t0 t1 st]] (when (and (<= t0 t) (< t t1)) st)) path))
+        tick-times (sort (for [[t0 t1 st] path :when (= st 2)
+                               _ (range (num/poisson-sample r (* c (/ (- t1 t0) 3600.0))))]
+                           (+ t0 (* (.nextDouble r) (- t1 t0)))))
+        reading-ts (for [mi (range (/ horizon 60))
+                         :when (< (.nextDouble r) (if (= 2 (state-at (* 60 mi))) rho-on rho-off))]
+                     (+ (* 60 mi) 30))
+        readings (loop [[t & ts] reading-ts ticks tick-times pct 0.0 out []]
+                   (if (nil? t) out
+                       (let [[before after] (split-with #(< % t) ticks)
+                             reset (* 604800 (inc (quot t 604800)))
+                             pct (if (and (seq out) (not= reset (nth (peek out) 2))) (double (count before)) (+ pct (count before)))]
+                         (recur ts after pct (conj out [t pct reset])))))
+        units (tk/presence-units (tk/intervals readings 300 604800) reading-ts prof zone)
+        p7 (tk/fit-p7 units prof true)
+        p6 (tk/fit-p6 units)]
+    (testing "slow away/available switching, fast session switching"
+      (is (< (max (:r1 p7) (:r2 p7)) 0.3))
+      (is (> (min (:r3 p7) (:r4 p7)) 0.4)))
+    (testing "three states explain the data better than one on/off chain"
+      (is (> (:loglik (tk/p7-filter units prof p7 true)) (:loglik (tk/p6-filter units p6)))))))
