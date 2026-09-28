@@ -1,5 +1,6 @@
 (ns cch.control.usage-forecast-test
   (:require [cch.control.usage-forecast :as usage-forecast]
+            [cch.forecast :as forecast]
             [cch.projections :as projections]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]))
@@ -75,10 +76,12 @@
                   :samples [{:observed-at (- now 60000) :used-percentage 10.0}]
                   :historical-finals [21.0 21.0 21.0 21.0 21.0 21.0]
                   :hourly hourly}}}}
+        _ (usage-forecast/from-read-model model)          ; starts the fit in the background
+        _ (forecast/await-drift-fits!)
         projected (get-in (usage-forecast/from-read-model model)
                           [:agents "claude-code" "five_hour"])
         projection (get-in projected [:page-data :projection])]
-    (is (= :gamma-process (:method projection)))
+    (is (= :drift (:method projection)))
     (is (seq (:path projection)) "the fan chart gets a path")
     (is (<= 10.0 (:projected-pct projected)))
     (is (number? (:p-cap projected)))))

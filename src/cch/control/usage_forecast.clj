@@ -1,11 +1,11 @@
 (ns cch.control.usage-forecast
   "Hosted projections over the broker's bounded normalized usage read model.
 
-  Uses the gamma-process usage model (cch.usage-model) once an agent/window
-  has enough completed windows in the read model's hourly history, and the
-  rate-Bayes projection before that. Fits are lazy: the first projection
-  that needs one fits it; after 24 hours it is refit in the background
-  while the old fit keeps serving (cch.forecast/cached-fit).
+  Uses the production forecast (count-process rung 8, drift-v1; see
+  cch.forecast/drift-projection) once an agent/window has enough completed
+  windows in the read model's hourly history, and the rate-Bayes projection
+  before that and while a fit runs: fits run in the background (seconds
+  each), refit daily while the old fit keeps serving.
   Hour-of-week profiles use the JVM's default zone, the same zone the Usage
   page labels its axes in; set TZ on the broker service to the operator's
   local zone."
@@ -26,30 +26,16 @@
   "Completed windows needed before the model replaces the rate projection."
   5)
 
-(def ^:private model-cache (atom {}))
-
 (defn- model-projection
-  "Gamma-process forecast from the read model's hourly history, shaped like
-  the rate projection ({:proj :band}), or nil with too little history."
-  [agent window-key hourly fleet-series now resets-at last-pct]
+  "The production forecast (count-process rung 8; cch.forecast/drift-
+  projection) from the read model's hourly history, or nil with too little
+  history or while its first fit runs in the background."
+  [agent window-key hourly fleet-series now resets-at span last-pct]
   (let [spec (model/specs window-key)
         completed (count (filter #(< (:eff-end %) now) (model/windows hourly spec)))]
     (when (>= completed min-model-windows)
-      (let [zone (ZoneId/systemDefault)
-            fitted (forecast/cached-fit
-                     model-cache [agent window-key] now
-                     (fn [previous]
-                       (model/fit-model hourly spec zone now :x0 (:x previous)
-                                        :profile-override (model/fleet-harmonic-profile
-                                                            @fleet-series zone))))
-            {:keys [median lo hi p-cap path]}
-            (model/forecast fitted hourly spec zone now resets-at last-pct)]
-        {:method :gamma-process
-         :name "Gamma process"
-         :proj median
-         :band {:lo lo :hi hi}
-         :p-cap p-cap
-         :path path}))))
+      (forecast/drift-projection [::broker agent window-key] window-key hourly now resets-at span last-pct
+                                 (model/fleet-harmonic-profile @fleet-series (ZoneId/systemDefault))))))
 
 (defn- fleet-series
   "Hour series of every agent/window in the read model, keyed like the
@@ -92,7 +78,7 @@
                          :historical-finals finals}
             projection (or (when (seq (:hourly input))
                              (model-projection agent window-key (:hourly input)
-                                               (or fleet (delay {})) now resets-at last-pct))
+                                               (or fleet (delay {})) now resets-at span-seconds last-pct))
                            (projections/rate-bayes-projection observed window-info))
             projected (or (:proj projection) last-pct)
             band (:band projection)
@@ -129,7 +115,7 @@
 (defn from-read-model
   "Project every agent/window in the internal broker read model."
   [{:keys [generated-at agents]}]
-  ;; Only a refit needs the fleet series; delay so ordinary projections skip it.
+  ;; The fleet profile is needed only once some agent/window has a model.
   (let [fleet (delay (fleet-series agents (quot generated-at 1000)))]
     {:generated-at generated-at
      :agents

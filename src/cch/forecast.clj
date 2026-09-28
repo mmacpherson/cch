@@ -366,74 +366,86 @@
                                  :x0 (:x previous) :profile-override (fleet-profile now)))))
 
 (defonce ^:private drift-cache (atom {}))
-(def ^:private drift-fits-in-flight (atom #{}))
+(def ^:private drift-fits-in-flight (atom {}))
 
 (defn- drift-inputs
-  "R8's inputs at `now`: the training blocks (history before the block in
-  progress, within the spec's lookback), the block in progress, the
-  profile, and the current window's start."
-  [agent window-key rows now resets-at]
+  "R8's inputs at `now` from hourly `rows`: the training blocks (history
+  before the block in progress, within the spec's lookback) and the block
+  in progress."
+  [window-key rows now resets-at span prof]
   (let [spec (model/specs window-key)
         zone (ZoneId/systemDefault)
         wins (model/windows rows spec)
-        prof (fleet-profile now)
         series (model/hour-series wins now)
         start (or (some #(when (<= (Math/abs (double (- (:end %) resets-at))) (:cluster-secs spec)) (:start %)) wins)
-                  (- resets-at (span-secs window-key)))
+                  (- resets-at span))
         [_ cur] (baselines/blocks-so-far series start now prof zone spec)
         hist (baselines/training-blocks series now prof zone spec (:fit-lookback-secs spec))]
-    {:spec spec :zone zone :prof prof :cur cur :hist hist
+    {:spec spec :zone zone :cur cur :hist hist
      :done (if (seq cur) (pop hist) hist)}))
 
 (defn- drift-fit
-  "The production fit for [agent window-key], or nil while its first fit
-  runs in the background (a fit takes seconds; the statusline must not
-  wait). Refit daily in the background, as cached-fit does."
-  [agent window-key hist now]
-  (let [k [(db/db-path) agent window-key]
-        cached (get @drift-cache k)
+  "The drift-v1 fit cached under `k`, or nil while its first fit runs in
+  the background (a fit takes seconds; requests must not wait). Refit daily
+  in the background, as cached-fit does."
+  [k hist now]
+  (let [cached (get @drift-cache k)
         start! (fn []
-                 (let [[before _] (swap-vals! drift-fits-in-flight conj k)]
+                 (let [[before _] (swap-vals! drift-fits-in-flight
+                                              (fn [m] (if (contains? m k) m (assoc m k ::starting))))]
                    (when-not (contains? before k)
-                     (future
-                       (try (swap! drift-cache assoc k (assoc (baselines/fit-drift hist) :fitted-at now))
-                            (catch Throwable t
-                              (binding [*out* *err*] (println "cch.forecast: drift fit failed:" (.getMessage t))))
-                            (finally (swap! drift-fits-in-flight disj k)))))))]
+                     (swap! drift-fits-in-flight assoc k
+                            (future
+                              (try (swap! drift-cache assoc k (assoc (baselines/fit-drift hist) :fitted-at now))
+                                   (catch Throwable t
+                                     (binding [*out* *err*] (println "cch.forecast: drift fit failed:" (.getMessage t))))
+                                   (finally (swap! drift-fits-in-flight dissoc k))))))))]
     (when (or (nil? cached) (>= (- now (:fitted-at cached)) refit-secs)) (start!))
     cached))
 
+(defn await-drift-fits!
+  "Wait for the drift fits running in the background (tests, warm-up)."
+  []
+  (doseq [f (vals @drift-fits-in-flight) :when (future? f)] (deref f 60000 nil)))
+
+(defn drift-projection
+  "The production forecast (count-process rung 8, cch.usage-baselines) of
+  demand at `resets-at` from hourly aggregate `rows`, shaped like the rate
+  projections ({:proj :band :p-cap :quantiles :path}), or nil while its
+  first fit runs. `cache-key` names the fit; `prof` is the fleet profile.
+  The displayed band stops at the cap: the backtests score the capped
+  meter, so the demand tail beyond 100% is unvalidated (the median and
+  P(cap) are shown as they are)."
+  [cache-key window-key rows now resets-at span last-pct prof]
+  (let [{:keys [spec zone cur hist done]} (drift-inputs window-key rows now resets-at span prof)]
+    (when-let [fitted (drift-fit cache-key hist now)]
+      (let [cap (fn [pt] (-> pt
+                             (update :lo min 100.0) (update :q25 min 100.0)
+                             (update :q75 min 100.0) (update :hi min 100.0)
+                             (update :quantiles (fn [qs] (mapv #(min 100.0 %) qs)))))
+            path (mapv cap (baselines/forecast-drift-path fitted prof zone spec done cur now resets-at last-pct))
+            {:keys [median lo hi p-cap quantiles]} (peek path)]
+        (when (seq path)
+          {:method    :drift
+           :name      "Drifting pace"
+           :proj      median
+           :band      {:lo lo :hi hi}
+           :p-cap     p-cap
+           :quantiles quantiles
+           :path      path
+           :profile   prof})))))
+
 (defn- model-projection
-  "Production forecast of demand at `resets-at` (count-process rung 8: bursts,
-  on/off model blocks, and a drifting pace; cch.usage-baselines), shaped
-  like the rate projections ({:proj :band}), or nil when there is too
-  little history or its first fit is still running."
+  "Production forecast for the local agents; see drift-projection. Nil with
+  too little history or while the first fit runs."
   [agent window-key now resets-at last-pct]
   (when (normalized-source?)
     (let [rows (hourly-rows agent window-key)
           spec (model/specs window-key)
           completed (count (filter #(< (:eff-end %) now) (model/windows rows spec)))]
       (when (>= completed min-model-windows)
-        (let [{:keys [zone prof cur hist done]} (drift-inputs agent window-key rows now resets-at)]
-          (when-let [fitted (drift-fit agent window-key hist now)]
-            (let [;; the displayed band stops at the cap: the backtests score the
-                  ;; capped meter, so the demand tail beyond 100% is unvalidated
-                  ;; (the median and P(cap) are shown as they are)
-                  cap (fn [pt] (-> pt
-                                   (update :lo min 100.0) (update :q25 min 100.0)
-                                   (update :q75 min 100.0) (update :hi min 100.0)
-                                   (update :quantiles (fn [qs] (mapv #(min 100.0 %) qs)))))
-                  path (mapv cap (baselines/forecast-drift-path fitted prof zone spec done cur now resets-at last-pct))
-                  {:keys [median lo hi p-cap quantiles]} (peek path)]
-              (when (seq path)
-                {:method    :drift
-                 :name      "Drifting pace"
-                 :proj      median
-                 :band      {:lo lo :hi hi}
-                 :p-cap     p-cap
-                 :quantiles quantiles
-                 :path      path
-                 :profile   prof}))))))))
+        (drift-projection [(db/db-path) agent window-key] window-key rows now resets-at
+                          (span-secs window-key) last-pct (fleet-profile now))))))
 
 (defn- build-current-window
   "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
