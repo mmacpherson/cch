@@ -55,3 +55,16 @@
     (testing "explains the starts better than a drifting rate alone (P9's arrivals)"
       (is (> (:loglik (us/filter-arrivals hours fit))
              (+ 10.0 (:loglik (us/filter-p9 hours (us/fit-p9 hours :fix-c true)))))))))
+
+(deftest session-step-matches-per-session-simulation
+  (testing "counts and expected session-hours agree with simulating each session"
+    (let [r (num/rng 3) mu 2.0 dt 1.0 active 20 arrivals 30 n 4000
+          by-count (repeatedly n #(#'us/session-step r active arrivals mu dt))
+          per-session (repeatedly n (fn []
+                                      (let [olds (repeatedly active #(/ (- (Math/log (- 1.0 (.nextDouble r)))) mu))
+                                            news (repeatedly arrivals (fn [] [(* dt (.nextDouble r)) (/ (- (Math/log (- 1.0 (.nextDouble r)))) mu)]))]
+                                        [(+ (reduce + (map #(min dt %) olds)) (reduce + (map (fn [[st l]] (min (- dt st) l)) news)))
+                                         (+ (count (filter #(> % dt) olds)) (count (filter (fn [[st l]] (> (+ st l) dt)) news)))])))
+          mean (fn [xs] (double (/ (reduce + xs) (count xs))))]
+      (is (< (Math/abs (- (mean (map first by-count)) (mean (map first per-session)))) 0.1))
+      (is (< (Math/abs (- (mean (map second by-count)) (mean (map second per-session)))) 0.3)))))

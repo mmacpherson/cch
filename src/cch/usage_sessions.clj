@@ -157,6 +157,32 @@
     {:a b :s-a s :h-a h :kappa-a kappa
      :mu (/ (max 1 (count in)) (max 1e-3 dur))}))
 
+
+(defn- binomial-sample
+  "Binomial(n, p): exact below n = 50, normal approximation above."
+  ^long [^java.util.SplittableRandom r ^long n ^double p]
+  (cond
+    (<= n 0) 0
+    (< n 50) (loop [i 0 k 0] (if (= i n) k (recur (inc i) (if (< (.nextDouble r) p) (inc k) k))))
+    :else (max 0 (min n (Math/round (+ (* n p) (* (Math/sqrt (* n p (- 1.0 p))) (.nextGaussian r))))))))
+
+(defn- session-step
+  "One piece of `dt` hours for the M/M/inf sessions, by counts (exponential
+  lives are memoryless): [session-hours survivors] from `active` sessions
+  running at the start and `arrivals` starting uniformly within the piece.
+  Survivor counts are sampled; in-piece session-hours use their expectation."
+  [r active arrivals mu dt]
+  (let [mu (double mu) dt (double dt)
+        e (Math/exp (- (* mu dt)))
+        ;; existing: survive w.p. e; expected time in piece (1 - e) / mu each
+        stay (binomial-sample r active e)
+        h-old (* active (/ (- 1.0 e) mu))
+        ;; arrivals at uniform times: survive w.p. (1 - e) / (mu dt)
+        p-new (if (pos? dt) (/ (- 1.0 e) (* mu dt)) 0.0)
+        stay-new (binomial-sample r arrivals p-new)
+        h-new (* arrivals (/ (- 1.0 p-new) mu))]
+    [(+ h-old h-new) (+ stay stay-new)]))
+
 (defn forecast-p9
   "Meter at `end` from reading `x` at `now`: the pace filtered through the
   hourly observations, `n-active` sessions running now, and future
@@ -186,8 +212,7 @@
             ua0 (aget grid (min (dec (alength cum-a))
                                 (let [v (* total-a (.nextDouble r)) q (java.util.Arrays/binarySearch cum-a v)]
                                   (if (neg? q) (- (inc q)) q))))
-            ;; remaining lives of the sessions running now (memoryless)
-            active0 (vec (repeatedly n-active #(/ (- (Math/log (- 1.0 (.nextDouble r)))) mu)))]
+            active0 (long n-active)]
         (aset draws i
               (+ (double x)
                  (loop [[[dt mass] & more] fut u u0 ua ua0 active active0 acc 0.0 first? true]
@@ -196,15 +221,10 @@
                      (let [u (if first? u (max lo-g (min hi-g (+ (* phi u) (* innov (.nextGaussian r))))))
                            ua (if first? ua (max lo-g (min hi-g (+ (* phi-a ua) (* innov-a (.nextGaussian r))))))
                            prof-rate (if (pos? dt) (/ mass dt) 0.0)
-                           ;; new sessions this piece: NegBin(a * e^ua * mass), uniform start, exponential life
+                           ;; new sessions this piece: NegBin(a * e^ua * mass)
                            arr-mean (* a (Math/exp ua) mass)
-                           arrivals (vec (for [_ (range (if (pos? arr-mean) (num/poisson-sample r (num/gamma-sample r kappa-a (/ kappa-a arr-mean))) 0))]
-                                           (let [st (* dt (.nextDouble r))]
-                                             [st (/ (- (Math/log (- 1.0 (.nextDouble r)))) mu)])))
-                           sess-hours (+ (reduce + 0.0 (map #(min dt %) active))
-                                         (reduce + 0.0 (map (fn [[st life]] (min (- dt st) life)) arrivals)))
-                           active' (vec (concat (keep #(when (> % dt) (- % dt)) active)
-                                                (keep (fn [[st life]] (when (> (+ st life) dt) (- (+ st life) dt))) arrivals)))
+                           n-arr (if (pos? arr-mean) (num/poisson-sample r (num/gamma-sample r kappa-a (/ kappa-a arr-mean))) 0)
+                           [sess-hours active'] (session-step r active n-arr mu dt)
                            mean (* (Math/exp u) (+ (* b mass) (* c sess-hours prof-rate)))]
                        ;; bursts: the hour's rate is gamma-distributed around its mean
                        (recur more u ua active'
@@ -313,7 +333,7 @@
       (let [u0 (aget grid (pick cum total r))
             ja (pick cum-a total-a r)
             avail0 (>= ja ng) ua0 (aget grid (mod ja ng))
-            active0 (vec (repeatedly n-active #(/ (- (Math/log (- 1.0 (.nextDouble r)))) mu)))]
+            active0 (long n-active)]
         (aset draws i
               (+ (double x)
                  (loop [[[dt mass] & more] fut u u0 ua ua0 avail? avail0 active active0 acc 0.0 first? true]
@@ -324,13 +344,8 @@
                            avail? (if first? avail? (< (.nextDouble r) (if avail? p11 p01)))
                            prof-rate (if (pos? dt) (/ mass dt) 0.0)
                            arr-mean (* a mass (if avail? (Math/exp ua) f))
-                           arrivals (vec (for [_ (range (if (pos? arr-mean) (num/poisson-sample r (num/gamma-sample r ka (/ ka arr-mean))) 0))]
-                                           (let [st (* dt (.nextDouble r))]
-                                             [st (/ (- (Math/log (- 1.0 (.nextDouble r)))) mu)])))
-                           sess-hours (+ (reduce + 0.0 (map #(min dt %) active))
-                                         (reduce + 0.0 (map (fn [[st life]] (min (- dt st) life)) arrivals)))
-                           active' (vec (concat (keep #(when (> % dt) (- % dt)) active)
-                                                (keep (fn [[st life]] (when (> (+ st life) dt) (- (+ st life) dt))) arrivals)))
+                           n-arr (if (pos? arr-mean) (num/poisson-sample r (num/gamma-sample r ka (/ ka arr-mean))) 0)
+                           [sess-hours active'] (session-step r active n-arr mu dt)
                            mean (* (Math/exp u) (+ (* b mass) (* c sess-hours prof-rate)))]
                        (recur more u ua avail? active'
                               (+ acc (if (pos? mean) (double (num/poisson-sample r (num/gamma-sample r kappa (/ kappa mean)))) 0.0))
