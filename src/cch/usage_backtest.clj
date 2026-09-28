@@ -882,7 +882,8 @@
   ["P0 Poisson process" "R1 Poisson (hourly)" "P1 +profile" "R2 +profile (hourly)"
    "P2 +weekly pace" "R5 +weekly pace (hourly)" "P3 sessions" "R7 +on/off blocks (hourly)"
    "P4 +drifting pace" "R8 +drifting pace (hourly)" "P5 sessions +reading presence"
-   "P6 +pace +presence" "P7 away/available/session" "P9 concurrent sessions" "A production"])
+   "P6 +pace +presence" "P7 away/available/session" "P9 concurrent sessions"
+   "P10 +away/available on starts" "A production"])
 
 (def ^:private ct-series-contrasts
   [["P0 Poisson process" "R1 Poisson (hourly)"] ["P1 +profile" "R2 +profile (hourly)"]
@@ -895,7 +896,9 @@
    ["P7 away/available/session" "P4 +drifting pace"] ["P7 away/available/session" "R8 +drifting pace (hourly)"]
    ["A production" "P7 away/available/session"]
    ["P9 concurrent sessions" "P4 +drifting pace"] ["P9 concurrent sessions" "R8 +drifting pace (hourly)"]
-   ["A production" "P9 concurrent sessions"]])
+   ["A production" "P9 concurrent sessions"]
+   ["P10 +away/available on starts" "P9 concurrent sessions"] ["P10 +away/available on starts" "R8 +drifting pace (hourly)"]
+   ["A production" "P10 +away/available on starts"]])
 
 (defn run-ct-series
   "Print the continuous-time tick-process series against its hourly
@@ -971,6 +974,10 @@
                                 since (if lookback (- t lookback) (:h0 (tick-bases cell)))]
                             (merge (sessions/fit-p9 (p9-hours cell t prof))
                                    (sessions/fit-sessions (spells-of (first cell)) since t prof zone)))))
+        ;; P10: the arrival layer on the last 42 days of observed session starts
+        fit-p10-arrivals (memoize (fn [cell t]
+                                    (sessions/fit-arrivals
+                                      (sessions/arrival-hours (spells-of (first cell)) (- t (* 42 86400)) t (profile-at t) zone))))
         fit-p7 (memoize (fn [cell t] (ticks/fit-p7 (presence-at cell t (profile-at t)) (profile-at t) (presence? cell))))
         fit-r8 (memoize (fn [cell t]
                           (let [{:keys [spec rows-before]} (data cell)]
@@ -1003,14 +1010,14 @@
                            (base/fit rung (base/training-steps series (profile-at t) zone)))))
         fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
                                       (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
-        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t) :p4 (fit-p4 cell t) :p5 (fit-p5 cell t) :p6 (fit-p6 cell t) :p7 (fit-p7 cell t) :p9 (fit-p9 cell t) :r7 (fit-r7 cell t) :r8 (fit-r8 cell t)
+        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t) :p4 (fit-p4 cell t) :p5 (fit-p5 cell t) :p6 (fit-p6 cell t) :p7 (fit-p7 cell t) :p9 (fit-p9 cell t) :p10 (fit-p10-arrivals cell t) :r7 (fit-r7 cell t) :r8 (fit-r8 cell t)
                                            :r1 (fit-r cell t 1) :r2 (fit-r cell t 2) :r5 (fit-r5 cell t) :a (fit-a cell t)))
                        (for [[cell t] (distinct (map (juxt :cell :refit) targets))
-                             k [:p0 :p1 :p2 :p3 :p4 :p5 :p6 :p7 :p9 :r1 :r2 :r5 :r7 :r8 :a]
+                             k [:p0 :p1 :p2 :p3 :p4 :p5 :p6 :p7 :p9 :p10 :r1 :r2 :r5 :r7 :r8 :a]
                              :when (not (skip ({:p0 "P0 Poisson process" :p1 "P1 +profile" :p2 "P2 +weekly pace"
                                                  :p3 "P3 sessions" :p4 "P4 +drifting pace" :p5 "P5 sessions +reading presence"
                                                  :p6 "P6 +pace +presence" :p7 "P7 away/available/session"
-                                                 :p9 "P9 concurrent sessions"} k)))] [cell t k])))
+                                                 :p9 "P9 concurrent sessions" :p10 "P10 +away/available on starts"} k)))] [cell t k])))
         rows (vec
                (apply concat
                       (pmap
@@ -1047,6 +1054,10 @@
                                                                                                        (sessions/arrival-hours (spells-of (first cell))
                                                                                                                                (- t (* 42 86400)) t prof zone)
                                                                                                        (sessions/active-at (spells-of (first cell)) t 600) t % x)
+                                                       "P10 +away/available on starts" #(sessions/forecast-p10 (fit-p9 cell refit) (fit-p10-arrivals cell refit) prof zone
+                                                                                                                (p9-hours cell t prof)
+                                                                                                                (sessions/arrival-hours (spells-of (first cell)) (- t (* 42 86400)) t prof zone)
+                                                                                                                (sessions/active-at (spells-of (first cell)) t 600) t % x)
                                                        "R8 +drifting pace (hourly)" #(let [series (m/hour-series (m/windows (rows-before t) spec) t)
                                                                                            [_ cur] (base/blocks-so-far series (:start w) t prof zone spec)
                                                                                            hist (base/training-blocks series t prof zone spec (:fit-lookback-secs spec))

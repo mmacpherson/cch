@@ -37,3 +37,21 @@
             busy (us/forecast-p9 p prof zone hours arr 6 (* 3600 480) (* 3600 486) 10.0)
             idle (us/forecast-p9 p prof zone hours arr 0 (* 3600 480) (* 3600 486) 10.0)]
         (is (> (:median busy) (+ 3 (:median idle))))))))
+
+(deftest away-available-arrivals
+  (let [r (num/rng 88)
+        r1 0.04 r2 0.06 a 3.0
+        ;; 30 days hourly: away/available chain (~day-long spells), starts NegBin(a) when available
+        states (loop [k 0 st 1 out []]
+                 (if (= k 720) out
+                     (let [st (if (< (.nextDouble r) (if (= st 1) r2 r1)) (- 1 st) st)]
+                       (recur (inc k) st (conj out st)))))
+        hours (mapv (fn [st] [(double (if (= st 1) (num/poisson-sample r (num/gamma-sample r 2.0 (/ 2.0 a))) 0)) 1.0 0.0]) states)
+        fit (us/fit-arrivals hours)]
+    (testing "recovers day-scale switching and the available rate"
+      (is (< 0.01 (:r1 fit) 0.15))
+      (is (< 0.02 (:r2 fit) 0.2))
+      (is (< 2.0 (:a fit) 4.5)))
+    (testing "explains the starts better than a drifting rate alone (P9's arrivals)"
+      (is (> (:loglik (us/filter-arrivals hours fit))
+             (+ 10.0 (:loglik (us/filter-p9 hours (us/fit-p9 hours :fix-c true)))))))))
