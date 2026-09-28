@@ -42,6 +42,9 @@
     P7  three states: away <-> available (slow: working vs idle days) and
         available <-> in session (fast), ticks in session at c * exp(u) *
         profile, the slow pace u, and an agent-specific presence layer
+    P8  four states: sessions split into light and heavy, each with its own
+        intensity and length (per-session intensity heterogeneity, the
+        continuous-time counterpart of the hourly rungs' gamma bursts)
 
   Pure functions."
   (:require [cch.numeric :as num]
@@ -1200,6 +1203,249 @@
                                                   (recur (+ t hold) nxt (+ ts (if (= st 2) hold 0.0)))))))
                            lam (if (pos? dt) (/ (* c (Math/exp u) mass) dt) 0.0)]
                        (recur more state u (+ acc (double (num/poisson-sample r (* lam t-sess)))) false))))))))
+    (java.util.Arrays/sort draws)
+    {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
+     :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)
+     :hi (num/quantile draws 0.95)
+     :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
+     :draws draws}))
+
+;; --- general n-state engine (P8) ---
+;;
+;; A continuous-time chain with generator q (n x n, row-major doubles) and
+;; per-state tick intensities lam (ticks only where lam > 0), observed at
+;; minute resolution through ticks and reading presence. Minute matrices by
+;; uniformization; runs of like minutes as matrix powers, cached per filter
+;; pass by [hour-of-week grid-point run-length active?].
+
+(defn- mat-mul-n!
+  [^doubles out ^doubles x ^doubles y n]
+  (let [n (long n)]
+    (dotimes [i n]
+      (dotimes [j n]
+        (aset out (+ (* n i) j)
+              (double (loop [k 0 acc 0.0]
+                        (if (= k n) acc
+                            (recur (inc k) (+ acc (* (aget x (+ (* n i) k)) (aget y (+ (* n k) j)))))))))))
+    out))
+
+(defn- minute-matrix-n
+  "exp((Q - Lambda) dm) by uniformization (n x n)."
+  ^doubles [^doubles q ^doubles lam n dm]
+  (let [n (long n) dm (double dm)
+        nu (* 1.05 (max 1e-9 (reduce max (for [i (range n)] (+ (- (aget q (+ (* n i) i))) (aget lam i))))))
+        pm (double-array (* n n))
+        _ (dotimes [i n]
+            (dotimes [j n]
+              (aset pm (+ (* n i) j)
+                    (+ (if (= i j) 1.0 0.0)
+                       (/ (- (aget q (+ (* n i) j)) (if (= i j) (aget lam i) 0.0)) nu)))))
+        x (* nu dm) nmax (long (+ x (* 8 (Math/sqrt (max x 1.0))) 12))
+        acc (double-array (* n n))
+        pw (let [a (double-array (* n n))] (dotimes [i n] (aset a (+ (* n i) i) 1.0)) a)
+        tmp (double-array (* n n))]
+    (loop [k 0 w (Math/exp (- x)) ^doubles pw pw ^doubles tmp tmp]
+      (if (> k nmax)
+        acc
+        (do (dotimes [q (* n n)] (aset acc q (+ (aget acc q) (* w (aget pw q)))))
+            (mat-mul-n! tmp pw pm n)
+            (recur (inc k) (* w (/ x (inc k))) tmp pw))))))
+
+(defn- tick-vector-n!
+  "out = v times the z^k coefficient of exp((Q - Lambda + z Lambda) dm)."
+  [^doubles out ^doubles v ^doubles q ^doubles lam n dm k]
+  (let [n (long n) dm (double dm) k (long k)
+        nu (* 1.05 (max 1e-9 (reduce max (for [i (range n)] (+ (- (aget q (+ (* n i) i))) (aget lam i))))))
+        x (* nu dm) nmax (long (+ x (* 8 (Math/sqrt (max x 1.0))) 20))
+        cur (make-array Double/TYPE n (inc k)) nxt (make-array Double/TYPE n (inc k))]
+    (dotimes [i n] (aset ^doubles (aget ^"[[D" cur i) 0 (aget v i)))
+    (dotimes [i n] (aset out i 0.0))
+    (loop [step 0 w (Math/exp (- x)) cur cur nxt nxt]
+      (if (> step nmax)
+        out
+        (do
+          (dotimes [i n] (aset out i (+ (aget out i) (* w (aget ^doubles (aget ^"[[D" cur i) k)))))
+          (dotimes [j n]
+            (let [^doubles nj (aget ^"[[D" nxt j)]
+              (dotimes [d (inc k)]
+                (aset nj d
+                      (+ (loop [i 0 acc 0.0]
+                           (if (= i n) acc
+                               (recur (inc i)
+                                      (+ acc (* (aget ^doubles (aget ^"[[D" cur i) d)
+                                                (+ (if (= i j) 1.0 0.0)
+                                                   (/ (- (aget q (+ (* n i) j)) (if (= i j) (aget lam i) 0.0)) nu)))))))
+                         (if (pos? d) (* (aget ^doubles (aget ^"[[D" cur j) (dec d)) (/ (aget lam j) nu)) 0.0))))))
+          (recur (inc step) (* w (/ x (inc step))) nxt cur))))))
+
+(defn- mat-pow-n!
+  [^doubles out ^doubles m n p]
+  (let [n (long n) sz (* n n) base (aclone m) tmp (double-array sz)]
+    (dotimes [q sz] (aset out q 0.0))
+    (dotimes [i n] (aset out (+ (* n i) i) 1.0))
+    (loop [p (long p) ^doubles base base]
+      (when (pos? p)
+        (when (odd? p) (mat-mul-n! tmp out base n) (System/arraycopy tmp 0 out 0 sz))
+        (let [b2 (double-array sz)] (mat-mul-n! b2 base base n) (recur (quot p 2) b2))))
+    out))
+
+(defn chain-filter
+  "Joint filter (n states x pace grid) over presence units for generator `q`,
+  base intensities `lam` (scaled by e^u and the profile), presence
+  emissions `rho` per state (nil: no presence layer), and pace (s, h).
+  {:p [grid vector per state] :loglik L}."
+  [units prof {:keys [q lam rho n s h]}]
+  (let [^doubles q q n (long n) phi (Math/pow 2.0 (/ -1.0 h))
+        g ^doubles p7-grid ng (alength g) dm (/ 1.0 60)
+        kern (memoize (fn [nh] (let [sd (max 1e-3 (* s (Math/sqrt (- 1.0 (Math/pow phi (* 2 nh))))))
+                                     ph (Math/pow phi nh)]
+                                 (vec (for [j (range ng)]
+                                        (let [mu (* ph (aget g j))
+                                              ws (double-array (for [i (range ng)] (Math/exp (* -0.5 (Math/pow (/ (- (aget g i) mu) sd) 2)))))
+                                              tot (reduce + ws)]
+                                          (dotimes [z ng] (aset ws z (/ (aget ws z) (max tot 1e-300))))
+                                          ws))))))
+        lam-at (memoize (fn [how i] (let [f (* (Math/exp (aget g i)) (double (nth prof how)))]
+                                      (double-array (map #(* f %) lam)))))
+        minute (memoize (fn [how i] (minute-matrix-n q (lam-at how i) n dm)))
+        cache (java.util.HashMap.)
+        run-mat (fn [how i len active?]
+                  (let [key [how i len active?]]
+                    (or (.get cache key)
+                        (let [^doubles mm (aclone ^doubles (minute how i))]
+                          (when rho
+                            (dotimes [a n] (dotimes [b n]
+                                             (let [e (if active? (nth rho b) (- 1.0 (nth rho b)))]
+                                               (aset mm (+ (* n a) b) (* (aget mm (+ (* n a) b)) e))))))
+                          (let [out (mat-pow-n! (double-array (* n n)) mm n len)]
+                            (.put cache key out) out)))))
+        ;; stationary distribution: solve pi Q = 0, sum 1
+        pi (let [a (vec (for [j (range n)]
+                          (if (= j (dec n)) (vec (repeat n 1.0))
+                              (vec (for [i (range n)] (aget q (+ (* n i) j)))))))
+                 bvec (assoc (vec (repeat n 0.0)) (dec n) 1.0)]
+             (num/solve a bvec))
+        wg (let [w (double-array (map #(Math/exp (* -0.5 (Math/pow (/ % (max s 1e-3)) 2))) g)) t (reduce + w)]
+             (dotimes [z ng] (aset w z (/ (aget w z) t))) w)
+        v (double-array n) outv (double-array n)]
+    (loop [[{:keys [n-min active? k hour how] :as u} & more :as us] (map #(assoc % :n-min (:n %)) units)
+           st (vec (for [i (range n)] (let [a (double-array ng)] (dotimes [z ng] (aset a z (* (max 0.0 (nth pi i)) (aget ^doubles wg z)))) a)))
+           prev-hour nil ll 0.0]
+      (if (empty? us)
+        {:p st :loglik ll}
+        (let [nh (if (and prev-hour hour) (- hour prev-hour) 0)
+              st (if (pos? nh)
+                   (let [kn (kern nh)]
+                     (mapv (fn [^doubles x]
+                             (let [y (double-array ng)]
+                               (dotimes [j ng]
+                                 (let [xj (aget x j)]
+                                   (when (> xj 1e-300)
+                                     (let [^doubles ws (nth kn j)]
+                                       (dotimes [i ng] (aset y i (+ (aget y i) (* xj (aget ws i)))))))))
+                               y))
+                           st))
+                   st)
+              outs (vec (repeatedly n #(double-array ng)))
+              z (loop [i 0 z 0.0]
+                  (if (= i ng) z
+                      (do
+                        (dotimes [a n] (aset v a (aget ^doubles (nth st a) i)))
+                        (if (pos? k)
+                          (do (tick-vector-n! outv v q (lam-at how i) n dm k)
+                              (when rho (dotimes [b n] (aset outv b (* (aget outv b) (if active? (nth rho b) (- 1.0 (nth rho b))))))))
+                          (let [^doubles pw (run-mat how i n-min active?)]
+                            (dotimes [b n]
+                              (aset outv b (double (loop [a 0 acc 0.0] (if (= a n) acc (recur (inc a) (+ acc (* (aget v a) (aget pw (+ (* n a) b))))))))))))
+                        (let [zz (loop [b 0 acc 0.0] (if (= b n) acc (do (aset ^doubles (nth outs b) i (aget outv b)) (recur (inc b) (+ acc (aget outv b))))))]
+                          (recur (inc i) (+ z zz))))))]
+          (if (and (pos? z) (Double/isFinite z))
+            (do (doseq [^doubles o outs] (dotimes [i ng] (aset o i (/ (aget o i) z))))
+                (recur more outs (or hour prev-hour) (+ ll (Math/log z))))
+            {:p st :loglik Double/NEGATIVE_INFINITY}))))))
+
+(defn- p8-chain
+  "P8's generator, intensities, and presence emissions from its parameters."
+  [{:keys [c ratio r1 r2 r3 qh r4l r4h rho-on rho-off presence?]}]
+  (let [c-heavy (* c (+ 1.0 ratio))]
+    {:n 4
+     ;; 0 away, 1 available, 2 light session, 3 heavy session
+     :q (double-array [(- r1) r1 0.0 0.0
+                       r2 (- (+ r2 r3)) (* r3 (- 1.0 qh)) (* r3 qh)
+                       0.0 r4l (- r4l) 0.0
+                       0.0 r4h 0.0 (- r4h)])
+     :lam [0.0 0.0 c c-heavy]
+     :rho (when presence? [rho-off rho-off rho-on rho-on])}))
+
+(defn fit-p8
+  "Penalized ML P8 parameters (weak priors, sd 3; sd 1 for the pace; pace
+  half-life >= 24 h)."
+  [units prof presence?]
+  (let [logit (fn [p] (Math/log (/ p (- 1.0 p)))) sig (fn [x] (/ 1.0 (+ 1.0 (Math/exp (- x)))))
+        ticks (reduce + 0.0 (map :k units))
+        mass (reduce + 0.0 (map #(* (:n %) (:mass %)) units))
+        x0 (cond-> [(Math/log (max 1e-6 (* 3 (/ ticks (max 1e-9 mass))))) (Math/log 3.0)
+                    (Math/log 0.05) (Math/log 0.1) (Math/log 1.0) (logit 0.3) (Math/log 4.0) (Math/log 1.5)
+                    (Math/log 0.5) (Math/log 48.0)]
+             presence? (into [(logit 0.8) (logit 0.01)]))
+        sd (cond-> [3.0 3.0 3.0 3.0 3.0 3.0 3.0 3.0 1.0 1.0] presence? (into [3.0 3.0]))
+        unpack (fn [[lc lr l1 l2 l3 lq l4l l4h ls lh r1 r0]]
+                 (cond-> {:c (Math/exp lc) :ratio (Math/exp lr) :r1 (Math/exp l1) :r2 (Math/exp l2) :r3 (Math/exp l3)
+                          :qh (sig lq) :r4l (Math/exp l4l) :r4h (Math/exp l4h)
+                          :s (Math/exp ls) :h (+ 24.0 (Math/exp lh)) :presence? presence?}
+                   presence? (assoc :rho-on (sig r1) :rho-off (sig r0))))
+        penalty (fn [x] (* 0.5 (reduce + (map (fn [xi mi d] (Math/pow (/ (- xi mi) d) 2)) x x0 sd))))
+        {x :x} (num/nelder-mead (fn [x] (let [p (unpack x)
+                                              v (:loglik (chain-filter units prof (merge (p8-chain p) (select-keys p [:s :h]))))]
+                                          (if (Double/isFinite v) (+ (- v) (penalty x)) 1e300)))
+                                x0 :tol 1e-5 :max-iter 1500)]
+    (assoc (unpack x) :rung :P8)))
+
+(defn forecast-p8
+  "Meter at `end`: (state, pace) from the P8 filter, then the chain and the
+  bounded pace simulated forward."
+  [params prof zone units now end x & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [{:keys [q lam] ns :n :as chain} (p8-chain params)
+        {:keys [s h]} params
+        {st :p} (chain-filter units prof (merge chain {:s s :h h}))
+        g ^doubles p7-grid ng (alength g)
+        cum (double-array (reductions + (mapcat seq st)))
+        total (aget cum (dec (alength cum)))
+        phi (Math/pow 2.0 (/ -1.0 h)) innov (* s (Math/sqrt (- 1.0 (* phi phi))))
+        ^doubles q q
+        outs (vec (for [i (range ns)]
+                    (vec (for [j (range ns) :when (and (not= i j) (pos? (aget q (+ (* ns i) j))))]
+                           [j (aget q (+ (* ns i) j))]))))
+        fut (loop [t now out []]
+              (if (>= t end) out
+                  (let [nxt (min end (* 3600 (inc (quot t 3600))))]
+                    (recur nxt (conj out [(/ (- nxt t) 3600.0) (m/mass prof zone t nxt)])))))
+        r (num/rng seed)
+        draws (double-array n)]
+    (dotimes [i n]
+      (let [v (* total (.nextDouble r))
+            j (min (dec (alength cum)) (let [z (java.util.Arrays/binarySearch cum v)] (if (neg? z) (- (inc z)) z)))
+            state0 (quot j ng)
+            u0 (+ (aget g (mod j ng)) (* 0.2 (- (.nextDouble r) 0.5)))]
+        (aset draws i
+              (+ (double x)
+                 (loop [[[dt mass] & more] fut state state0 u u0 acc 0.0 first? true]
+                   (if (or (nil? dt) (>= (+ x acc) 100.0))
+                     acc
+                     (let [u (if first? u (max -3.0 (min 3.0 (+ (* phi u) (* innov (.nextGaussian r))))))
+                           prof-rate (if (pos? dt) (/ mass dt) 0.0)
+                           [ticks state] (loop [t 0.0 st state tk 0.0]
+                                           (let [os (outs st)
+                                                 tot (reduce + (map second os))
+                                                 hold (if (pos? tot) (/ (- (Math/log (- 1.0 (.nextDouble r)))) tot) Double/POSITIVE_INFINITY)
+                                                 span (min hold (- dt t))
+                                                 tk (+ tk (* (nth lam st) (Math/exp u) prof-rate span))]
+                                             (if (>= (+ t hold) dt)
+                                               [tk st]
+                                               (let [pick (* tot (.nextDouble r))
+                                                     nxt (ffirst (drop-while #(< (second %) pick) (map vector (map first os) (reductions + (map second os)))))]
+                                                 (recur (+ t hold) nxt tk)))))]
+                       (recur more state u (+ acc (double (num/poisson-sample r ticks))) false))))))))
     (java.util.Arrays/sort draws)
     {:median (num/quantile draws 0.5) :lo (num/quantile draws 0.05)
      :q25 (num/quantile draws 0.25) :q75 (num/quantile draws 0.75)

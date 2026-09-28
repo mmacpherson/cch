@@ -369,3 +369,50 @@
       (is (> (min (:r3 p7) (:r4 p7)) 0.4)))
     (testing "three states explain the data better than one on/off chain"
       (is (> (:loglik (tk/p7-filter units prof p7 true)) (:loglik (tk/p6-filter units p6)))))))
+
+(deftest general-engine-matches-p7
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (for [h (range 168)] (+ 0.5 (mod h 2))))
+        readings (vec (for [k (range 1 500)] [(* 83 k) (double (quot k 7)) 604800]))
+        units (tk/presence-units (tk/intervals readings 300 604800) (map first readings) prof zone)
+        p {:c 3.0 :r1 0.05 :r2 0.1 :r3 1.0 :r4 3.0 :s 0.5 :h 72.0 :rho-on 0.8 :rho-off 0.02}
+        {:keys [r1 r2 r3 r4 c rho-on rho-off]} p
+        chain {:n 3 :q (double-array [(- r1) r1 0.0, r2 (- (+ r2 r3)) r3, 0.0 r4 (- r4)])
+               :lam [0.0 0.0 c] :rho [rho-off rho-off rho-on] :s 0.5 :h 72.0}]
+    (is (< (Math/abs (- (:loglik (tk/p7-filter units prof p true))
+                        (:loglik (tk/chain-filter units prof chain))))
+           1e-6))))
+
+(deftest p8-recovers-light-and-heavy-sessions
+  (let [zone (java.time.ZoneId/of "UTC")
+        prof (vec (repeat 168 1.0))
+        r (num/rng 66)
+        horizon (* 10 86400)
+        rates {0 [[1 0.05]] 1 [[0 0.08] [2 0.7] [3 0.3]] 2 [[1 4.0]] 3 [[1 1.0]]}
+        path (loop [t 0.0 st 1 out []]
+               (if (> t horizon) out
+                   (let [outs (rates st) tot (reduce + (map second outs))
+                         hold (* 3600 (/ (- (Math/log (- 1.0 (.nextDouble r)))) tot))
+                         pick (* tot (.nextDouble r))
+                         nxt (ffirst (drop-while #(< (second %) pick) (map vector (map first outs) (reductions + (map second outs)))))]
+                     (recur (+ t hold) nxt (conj out [t (+ t hold) st])))))
+        lam {2 2.0 3 12.0}
+        state-at (fn [t] (some (fn [[t0 t1 st]] (when (and (<= t0 t) (< t t1)) st)) path))
+        tick-times (sort (for [[t0 t1 st] path :when (lam st)
+                               _ (range (num/poisson-sample r (* (lam st) (/ (- t1 t0) 3600.0))))]
+                           (+ t0 (* (.nextDouble r) (- t1 t0)))))
+        reading-ts (for [mi (range (/ horizon 60)) :when (< (.nextDouble r) (if (#{2 3} (state-at (* 60 mi))) 0.8 0.01))] (+ (* 60 mi) 30))
+        readings (loop [[t & ts] reading-ts ticks tick-times pct 0.0 out []]
+                   (if (nil? t) out
+                       (let [[before after] (split-with #(< % t) ticks)
+                             reset (* 604800 (inc (quot t 604800)))
+                             pct (if (and (seq out) (not= reset (nth (peek out) 2))) (double (count before)) (+ pct (count before)))]
+                         (recur ts after pct (conj out [t pct reset])))))
+        units (tk/presence-units (tk/intervals readings 300 604800) reading-ts prof zone)
+        fit (tk/fit-p8 units prof true)]
+    (testing "recovers the session mix, lengths, and intensities (10 simulated days)"
+      (is (< 0.15 (:qh fit) 0.45))
+      (is (< 2.5 (:r4l fit) 6.0))
+      (is (< 0.6 (:r4h fit) 1.6))
+      (is (< 3.0 (:ratio fit) 8.0))
+      (is (< 0.6 (:rho-on fit) 0.95)))))

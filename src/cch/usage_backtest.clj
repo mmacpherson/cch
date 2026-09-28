@@ -18,6 +18,7 @@
             [cch.usage-ct :as ct]
             [cch.usage-eval :as ev]
             [cch.usage-model :as m]
+            [cch.usage-sessions :as sessions]
             [cch.usage-stan :as stan]
             [cch.usage-ticks :as ticks]
             [clojure.java.shell :as shell]
@@ -282,7 +283,7 @@
     ;; NaN that reads like a numerical failure
     (format "  %-24s %6.2f  %+6.2f %-17s  %6.1f %5.0f%% %3.0f%% %-9s %s"
             label (lv :crps) delta
-            (if (Double/isNaN lo) "[n/a: few weeks]" (format "[%+6.2f, %+6.2f]" lo hi))
+            (cond (nil? lo) "[n/a: no rows]" (Double/isNaN lo) "[n/a: few weeks]" :else (format "[%+6.2f, %+6.2f]" lo hi))
             (lv :err) (* 100 (lv (bool :cov50))) (* 100 (:est cov90))
             (if (Double/isNaN (:lo cov90)) "[n/a]" (format "[%2.0f-%3.0f]" (* 100 (:lo cov90)) (* 100 (:hi cov90))))
             (if (:brier (first rows)) (format "%7.4f" (lv :brier)) ""))))
@@ -881,7 +882,7 @@
   ["P0 Poisson process" "R1 Poisson (hourly)" "P1 +profile" "R2 +profile (hourly)"
    "P2 +weekly pace" "R5 +weekly pace (hourly)" "P3 sessions" "R7 +on/off blocks (hourly)"
    "P4 +drifting pace" "R8 +drifting pace (hourly)" "P5 sessions +reading presence"
-   "P6 +pace +presence" "P7 away/available/session" "A production"])
+   "P6 +pace +presence" "P7 away/available/session" "P9 concurrent sessions" "A production"])
 
 (def ^:private ct-series-contrasts
   [["P0 Poisson process" "R1 Poisson (hourly)"] ["P1 +profile" "R2 +profile (hourly)"]
@@ -892,17 +893,20 @@
    ["P5 sessions +reading presence" "P3 sessions"] ["P6 +pace +presence" "P4 +drifting pace"]
    ["P6 +pace +presence" "R8 +drifting pace (hourly)"] ["A production" "P6 +pace +presence"]
    ["P7 away/available/session" "P4 +drifting pace"] ["P7 away/available/session" "R8 +drifting pace (hourly)"]
-   ["A production" "P7 away/available/session"]])
+   ["A production" "P7 away/available/session"]
+   ["P9 concurrent sessions" "P4 +drifting pace"] ["P9 concurrent sessions" "R8 +drifting pace (hourly)"]
+   ["A production" "P9 concurrent sessions"]])
 
 (defn run-ct-series
   "Print the continuous-time tick-process series against its hourly
   counterparts and production, on the same refits, checkpoints, horizons,
   and estimands as run-ladder. `only` restricts cells; `max-refits` keeps
   the latest N refit weeks (small-data runs)."
-  [& {:keys [only max-refits]}]
+  [& {:keys [only max-refits skip]}]
   (let [now (quot (System/currentTimeMillis) 1000)
         zone (ZoneId/systemDefault)
         week 604800
+        skip (set skip)
         data (into {} (map (fn [c] [c (cell-data now c)]) (remove #(= "agy" (first %)) cells)))
         series-at (memoize (fn [cell t] ((:series (data cell)) t)))
         profile-at (memoize (fn [t] (m/fleet-harmonic-profile
@@ -946,6 +950,27 @@
         ;; the observation layer is per agent: reading presence is informative
         ;; for Claude (dense readings) and misleading for Codex (sparse)
         presence? (fn [cell] (= "claude-code" (first cell)))
+        ;; per-cell hourly tick and exposure arrays, built once
+        tick-bases (into {} (for [[cell ivs] all-ivs] [cell (ticks/hourly-base ivs)]))
+        ;; P9: concurrent sessions from the local hook events (session ids only)
+        spells-of (memoize (fn [agent]
+                             (sessions/spells
+                               (mapv (fn [{:keys [ts sid]}] [(long ts) sid])
+                                     (db/query (str "SELECT CAST(strftime('%s', timestamp) AS INTEGER) AS ts, session_id AS sid "
+                                                    "FROM events WHERE hook_name='event-log' AND session_id IS NOT NULL AND agent='"
+                                                    (str/replace agent "'" "''") "'")))
+                               600)))
+        p9-hours (fn [cell t prof]
+                   (let [lookback (:fit-lookback-secs (:spec (data cell)))
+                         since (if lookback (- t lookback) (:h0 (tick-bases cell)))
+                         th (ticks/hours-before (tick-bases cell) (all-ivs cell) prof zone t since)]
+                     (sessions/hourly-obs th (max since (:h0 (tick-bases cell))) t (spells-of (first cell)) prof zone)))
+        fit-p9 (memoize (fn [cell t]
+                          (let [prof (profile-at t)
+                                lookback (:fit-lookback-secs (:spec (data cell)))
+                                since (if lookback (- t lookback) (:h0 (tick-bases cell)))]
+                            (merge (sessions/fit-p9 (p9-hours cell t prof))
+                                   (sessions/fit-sessions (spells-of (first cell)) since t prof zone)))))
         fit-p7 (memoize (fn [cell t] (ticks/fit-p7 (presence-at cell t (profile-at t)) (profile-at t) (presence? cell))))
         fit-r8 (memoize (fn [cell t]
                           (let [{:keys [spec rows-before]} (data cell)]
@@ -978,9 +1003,14 @@
                            (base/fit rung (base/training-steps series (profile-at t) zone)))))
         fit-a (memoize (fn [cell t] (let [{:keys [spec rows-before]} (data cell)]
                                       (m/fit-model (rows-before t) spec zone t :profile-override (profile-at t)))))
-        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t) :p4 (fit-p4 cell t) :p5 (fit-p5 cell t) :p6 (fit-p6 cell t) :p7 (fit-p7 cell t) :r7 (fit-r7 cell t) :r8 (fit-r8 cell t)
+        _ (dorun (pmap (fn [[cell t k]] (case k :p0 (fit-p0 cell t) :p1 (fit-p1 cell t) :p2 (fit-p2 cell t) :p3 (fit-p3 cell t) :p4 (fit-p4 cell t) :p5 (fit-p5 cell t) :p6 (fit-p6 cell t) :p7 (fit-p7 cell t) :p9 (fit-p9 cell t) :r7 (fit-r7 cell t) :r8 (fit-r8 cell t)
                                            :r1 (fit-r cell t 1) :r2 (fit-r cell t 2) :r5 (fit-r5 cell t) :a (fit-a cell t)))
-                       (for [[cell t] (distinct (map (juxt :cell :refit) targets)) k [:p0 :p1 :p2 :p3 :p4 :p5 :p6 :p7 :r1 :r2 :r5 :r7 :r8 :a]] [cell t k])))
+                       (for [[cell t] (distinct (map (juxt :cell :refit) targets))
+                             k [:p0 :p1 :p2 :p3 :p4 :p5 :p6 :p7 :p9 :r1 :r2 :r5 :r7 :r8 :a]
+                             :when (not (skip ({:p0 "P0 Poisson process" :p1 "P1 +profile" :p2 "P2 +weekly pace"
+                                                 :p3 "P3 sessions" :p4 "P4 +drifting pace" :p5 "P5 sessions +reading presence"
+                                                 :p6 "P6 +pace +presence" :p7 "P7 away/available/session"
+                                                 :p9 "P9 concurrent sessions"} k)))] [cell t k])))
         rows (vec
                (apply concat
                       (pmap
@@ -1013,6 +1043,10 @@
                                                        "P5 sessions +reading presence" #(ticks/forecast-p5 (fit-p5 cell refit) prof zone presence t % x)
                                                        "P6 +pace +presence" #(ticks/forecast-p6 (fit-p6 cell refit) prof zone presence t % x)
                                                        "P7 away/available/session" #(ticks/forecast-p7 (fit-p7 cell refit) prof zone presence t % x)
+                                                       "P9 concurrent sessions" #(sessions/forecast-p9 (fit-p9 cell refit) prof zone (p9-hours cell t prof)
+                                                                                                       (sessions/arrival-hours (spells-of (first cell))
+                                                                                                                               (- t (* 42 86400)) t prof zone)
+                                                                                                       (sessions/active-at (spells-of (first cell)) t 600) t % x)
                                                        "R8 +drifting pace (hourly)" #(let [series (m/hour-series (m/windows (rows-before t) spec) t)
                                                                                            [_ cur] (base/blocks-so-far series (:start w) t prof zone spec)
                                                                                            hist (base/training-blocks series t prof zone spec (:fit-lookback-secs spec))
@@ -1024,7 +1058,7 @@
                                                          :when (<= end (:eff-end w))]
                                                      [h end (if (= h :reset) final (min 100.0 (pct-at wobs end)))])]]
                                 (into {:cell cell}
-                                      (for [[label f] forecasters]
+                                      (for [[label f] forecasters :when (not (skip label))]
                                         [label (into {} (for [[h end y] horizons
                                                               :let [g (f end)
                                                                     capped-y? (>= y 100.0)
@@ -1034,18 +1068,20 @@
                                                               :err (if capped-y? (max 0.0 (- 100.0 (:median g))) (Math/abs (- (:median g) y)))
                                                               :cov90 (in? (:lo g) (:hi g)) :cov50 (in? (:q25 g) (:q75 g))}]))]))))))
                         targets)))
+        arm-labels (remove skip ct-series-arms)
         at (fn [h] (into {} (for [[cell cr] (group-by :cell rows)
                                   :let [cr (filter #(get-in % ["A production" h]) cr)]
                                   :when (seq cr)]
-                              [cell (into {} (for [a ct-series-arms] [a (mapv #(get-in % [a h]) cr)]))])))]
+                              [cell (into {} (for [a arm-labels] [a (mapv #(get-in % [a h]) cr)]))])))
+        contrasts (remove (fn [[x y]] (or (skip x) (skip y))) ct-series-contrasts)]
     (doseq [[cell arms] (sort-by key (at :reset))
             :let [base-rows (arms "A production")]]
       (println (format "\n%s %s  (%d checkpoints, %d windows; deltas vs A production)" (first cell) (name (second cell))
                        (count base-rows) (count (distinct (map :win base-rows)))))
       (println summary-header)
-      (doseq [a ct-series-arms]
+      (doseq [a arm-labels]
         (println (summary-line a (arms a) base-rows (second cell)))))
     (doseq [h (ladder-horizons :seven-day)]
-      (print-pooled-7d (at h) ct-series-arms "A production" :title (format "secondary: meter at +%dh" h)
-                       :contrasts ct-series-contrasts))
-    (print-pooled-7d (at :reset) ct-series-arms "A production" :contrasts ct-series-contrasts)))
+      (print-pooled-7d (at h) arm-labels "A production" :title (format "secondary: meter at +%dh" h)
+                       :contrasts contrasts))
+    (print-pooled-7d (at :reset) arm-labels "A production" :contrasts contrasts)))
