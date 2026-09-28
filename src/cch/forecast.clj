@@ -416,7 +416,14 @@
       (when (>= completed min-model-windows)
         (let [{:keys [zone prof cur hist done]} (drift-inputs agent window-key rows now resets-at)]
           (when-let [fitted (drift-fit agent window-key hist now)]
-            (let [path (baselines/forecast-drift-path fitted prof zone spec done cur now resets-at last-pct)
+            (let [;; the displayed band stops at the cap: the backtests score the
+                  ;; capped meter, so the demand tail beyond 100% is unvalidated
+                  ;; (the median and P(cap) are shown as they are)
+                  cap (fn [pt] (-> pt
+                                   (update :lo min 100.0) (update :q25 min 100.0)
+                                   (update :q75 min 100.0) (update :hi min 100.0)
+                                   (update :quantiles (fn [qs] (mapv #(min 100.0 %) qs)))))
+                  path (mapv cap (baselines/forecast-drift-path fitted prof zone spec done cur now resets-at last-pct))
                   {:keys [median lo hi p-cap quantiles]} (peek path)]
               (when (seq path)
                 {:method    :drift
