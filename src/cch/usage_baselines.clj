@@ -533,3 +533,65 @@
      :hi (num/quantile draws 0.95)
      :p-cap (/ (double (count (filter #(>= % 100.0) draws))) n)
      :draws draws}))
+
+(defn forecast-drift-path
+  "Rung-8 demand path from reading `x` at `now` to `end`, in the production
+  model's path format (cch.usage-model/predict-path): one summary per
+  future piece (spec's path step) {:ts :mean :lo :q25 :median :q75 :hi
+  :quantiles :p-cap}. Each draw samples the pace and on/off state once per
+  block (the block in progress conditioned on its usage so far, as in
+  forecast-drift) and each piece's bursty usage; a block's gamma bursts
+  split exactly across its pieces."
+  [{:keys [c kappa pi s h] :as params} prof zone spec done-blocks current now end x
+   & {:keys [n seed] :or {n 3000 seed 1}}]
+  (let [c-on (/ c pi) phi (Math/pow 2.0 (/ -1.0 h))
+        innov (max 1e-3 (* s (Math/sqrt (- 1.0 (* phi phi)))))
+        {p :p} (drift-filter done-blocks params)
+        p (if (seq done-blocks) (transition p (kernel phi innov)) (stationary s))
+        cur (summarize-block current kappa)
+        lo (block-obs c-on kappa pi cur)
+        mx (areduce lo i mm Double/NEGATIVE_INFINITY (max mm (aget lo i)))
+        cum (double-array (reductions + (map (fn [pi_ li] (* pi_ (Math/exp (- li mx)))) p lo)))
+        total (aget cum (dec (alength cum)))
+        pieces (vec (m/future-pieces prof zone spec now end (:path-step-secs spec)))
+        k (count pieces)
+        masses (double-array (map second pieces))
+        blks (long-array (map #(nth % 2) pieces))
+        cols (vec (repeatedly k #(double-array n)))
+        r (num/rng seed)
+        [cm ct cc] cur]
+    (dotimes [i n]
+      (let [u0 (let [v (* total (.nextDouble r))
+                     j (min (dec (alength cum)) (let [q (java.util.Arrays/binarySearch cum v)] (if (neg? q) (- (inc q)) q)))]
+                 (+ (aget ^doubles drift-grid j) (* 0.05 (- (.nextDouble r) 0.5))))
+            ctheta (* c-on (Math/exp u0))
+            lon (+ (Math/log pi) cc (* kappa cm (- (Math/log kappa) (Math/log (+ kappa ctheta))))
+                   (* ct (- (Math/log ctheta) (Math/log (+ kappa ctheta)))))
+            p-on (if (pos? ct) 1.0 (/ 1.0 (+ 1.0 (Math/exp (- (Math/log (- 1.0 pi)) lon)))))]
+        (loop [j 0 acc (double x) blk -1 u u0 on? false]
+          (when (< j k)
+            (let [b (aget blks j)
+                  new-block? (not= b blk)
+                  u (if (and new-block? (pos? b)) (+ (* phi u) (* innov (.nextGaussian r))) u)
+                  on? (if new-block? (< (.nextDouble r) (if (zero? b) p-on pi)) on?)
+                  mass (aget masses j)
+                  ;; demand, not the capped meter: it can pass 100, as the
+                  ;; production path's does (p-cap is P(demand >= 100))
+                  use (if (and on? (pos? mass))
+                        (double (num/poisson-sample r (num/gamma-sample r (* kappa mass) (/ kappa (* c-on (Math/exp u))))))
+                        0.0)
+                  acc (+ acc use)]
+              (aset ^doubles (nth cols j) i acc)
+              (recur (inc j) acc b u on?))))))
+    (mapv (fn [j]
+            (let [^doubles col (nth cols j)
+                  _ (java.util.Arrays/sort col)
+                  mean (/ (areduce col q a 0.0 (+ a (aget col q))) n)
+                  capped (areduce col q a 0.0 (if (>= (aget col q) 100.0) (inc a) a))]
+              {:ts (first (nth pieces j))
+               :mean mean
+               :lo (num/quantile col 0.05) :q25 (num/quantile col 0.25) :median (num/quantile col 0.5)
+               :q75 (num/quantile col 0.75) :hi (num/quantile col 0.95)
+               :quantiles (mapv #(num/quantile col %) (mapv #(/ % 20.0) (range 1 20)))
+               :p-cap (/ capped n)}))
+          (range k))))

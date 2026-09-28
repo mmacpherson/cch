@@ -25,11 +25,11 @@
 
 (def models
   "Frozen ledger model ids."
-  {"ml-harmonic-v1" "maximum-likelihood usage model, harmonic fleet profile (production since 85c953c)"
+  {"ml-harmonic-v1" "maximum-likelihood usage model, harmonic fleet profile (production 85c953c until drift-v1 replaced it)"
    "rate-bayes-v1" "rate-Bayes projection with duration-weighted mean (baseline, 010ad44)"
    "nb-weekly-v1" "count-process rung 6: negative binomial bursts with a per-window gamma pace, harmonic fleet profile, ML refit daily (challenger, 5b8be3c)"
    "onoff-v1" "count-process rung 7: rung 6 with on/off model blocks (days for 7d, hours for 5h), harmonic fleet profile, ML refit daily (challenger, e5d9454)"
-   "drift-v1" "count-process rung 8: rung 7 with a drifting pace (AR(1) log pace across blocks), penalized ML refit daily (primary 7d challenger, f195b25)"})
+   "drift-v1" "count-process rung 8: rung 7 with a drifting pace (AR(1) log pace across blocks), penalized ML refit daily (production since 2026-09-28)"})
 
 (def levels
   "Quantile levels stored for every forecast."

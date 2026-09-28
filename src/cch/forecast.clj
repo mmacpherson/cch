@@ -365,26 +365,68 @@
                 (model/fit-model rows (model/specs window-key) (ZoneId/systemDefault) now
                                  :x0 (:x previous) :profile-override (fleet-profile now)))))
 
+(defonce ^:private drift-cache (atom {}))
+(def ^:private drift-fits-in-flight (atom #{}))
+
+(defn- drift-inputs
+  "R8's inputs at `now`: the training blocks (history before the block in
+  progress, within the spec's lookback), the block in progress, the
+  profile, and the current window's start."
+  [agent window-key rows now resets-at]
+  (let [spec (model/specs window-key)
+        zone (ZoneId/systemDefault)
+        wins (model/windows rows spec)
+        prof (fleet-profile now)
+        series (model/hour-series wins now)
+        start (or (some #(when (<= (Math/abs (double (- (:end %) resets-at))) (:cluster-secs spec)) (:start %)) wins)
+                  (- resets-at (span-secs window-key)))
+        [_ cur] (baselines/blocks-so-far series start now prof zone spec)
+        hist (baselines/training-blocks series now prof zone spec (:fit-lookback-secs spec))]
+    {:spec spec :zone zone :prof prof :cur cur :hist hist
+     :done (if (seq cur) (pop hist) hist)}))
+
+(defn- drift-fit
+  "The production fit for [agent window-key], or nil while its first fit
+  runs in the background (a fit takes seconds; the statusline must not
+  wait). Refit daily in the background, as cached-fit does."
+  [agent window-key hist now]
+  (let [k [(db/db-path) agent window-key]
+        cached (get @drift-cache k)
+        start! (fn []
+                 (let [[before _] (swap-vals! drift-fits-in-flight conj k)]
+                   (when-not (contains? before k)
+                     (future
+                       (try (swap! drift-cache assoc k (assoc (baselines/fit-drift hist) :fitted-at now))
+                            (catch Throwable t
+                              (binding [*out* *err*] (println "cch.forecast: drift fit failed:" (.getMessage t))))
+                            (finally (swap! drift-fits-in-flight disj k)))))))]
+    (when (or (nil? cached) (>= (- now (:fitted-at cached)) refit-secs)) (start!))
+    cached))
+
 (defn- model-projection
-  "Gamma-process forecast of demand at `resets-at`, shaped like the rate
-  projections ({:proj :band}), or nil when there is too little history."
+  "Production forecast of demand at `resets-at` (count-process rung 8: bursts,
+  on/off model blocks, and a drifting pace; cch.usage-baselines), shaped
+  like the rate projections ({:proj :band}), or nil when there is too
+  little history or its first fit is still running."
   [agent window-key now resets-at last-pct]
   (when (normalized-source?)
     (let [rows (hourly-rows agent window-key)
           spec (model/specs window-key)
           completed (count (filter #(< (:eff-end %) now) (model/windows rows spec)))]
       (when (>= completed min-model-windows)
-        (let [fitted (fitted-model agent window-key rows now)
-              {:keys [median lo hi p-cap path]}
-              (model/forecast fitted rows spec (ZoneId/systemDefault) now resets-at last-pct)]
-          {:method    :gamma-process
-           :name      "Gamma process"
-           :proj      median
-           :band      {:lo lo :hi hi}
-           :p-cap     p-cap
-           :quantiles (:quantiles (peek path))
-           :path      path
-           :profile   (:profile fitted)})))))
+        (let [{:keys [zone prof cur hist done]} (drift-inputs agent window-key rows now resets-at)]
+          (when-let [fitted (drift-fit agent window-key hist now)]
+            (let [path (baselines/forecast-drift-path fitted prof zone spec done cur now resets-at last-pct)
+                  {:keys [median lo hi p-cap quantiles]} (peek path)]
+              (when (seq path)
+                {:method    :drift
+                 :name      "Drifting pace"
+                 :proj      median
+                 :band      {:lo lo :hi hi}
+                 :p-cap     p-cap
+                 :quantiles quantiles
+                 :path      path
+                 :profile   prof}))))))))
 
 (defn- build-current-window
   "Rich data bundle for the /usage page, for either :seven-day or :five-hour,
@@ -548,7 +590,13 @@
                 r8 (fit "drift-v1" #(baselines/fit-drift hist))]
             (record "nb-weekly-v1" (baselines/forecast-bursts-weekly r6 prof zone spec start now resets-at last-pct))
             (record "onoff-v1" (baselines/forecast-onoff r7 prof zone spec done cur now resets-at last-pct))
-            (record "drift-v1" (baselines/forecast-drift r8 prof zone spec hist-done cur now resets-at last-pct)))))
+            (record "drift-v1" (baselines/forecast-drift r8 prof zone spec hist-done cur now resets-at last-pct))
+            ;; the former production model keeps its frozen id
+            (let [fitted (fitted-model agent window-key rows now)
+                  {:keys [p-cap path]} (model/forecast fitted rows spec zone now resets-at last-pct)]
+              (when (seq path)
+                (ledger/record! (assoc base :model "ml-harmonic-v1"
+                                       :quantiles (:quantiles (peek path)) :p-cap p-cap)))))))
       (catch Throwable t
         (binding [*out* *err*]
           (println "cch.forecast: challenger ledger record failed:" (.getMessage t)))))))
@@ -561,9 +609,6 @@
   (try
     (let [base {:agent agent :window-key window-key :resets-at resets-at
                 :now now :current-pct last-pct}]
-      (when (and (= :gamma-process (:method model-proj)) (seq (:quantiles model-proj)))
-        (ledger/record! (assoc base :model "ml-harmonic-v1"
-                               :quantiles (:quantiles model-proj) :p-cap (:p-cap model-proj))))
       (when-let [{:keys [proj band]} rate-proj]
         (let [lo (or (:lo band) proj) hi (or (:hi band) proj)
               qs (ledger/gaussian-quantiles proj lo hi last-pct)]

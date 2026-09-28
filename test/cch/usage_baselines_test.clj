@@ -150,3 +150,20 @@
             start 1780272000 now (+ start (* 3 86400)) end (+ start (* 7 86400))
             f (b/forecast-drift fit prof zone spec (subvec blocks 0 30) [] now end 40.0)]
         (is (every? #(and (Double/isFinite %) (>= % 40.0)) (:draws f)))))))
+
+(deftest drift-path-matches-the-endpoint-forecast
+  (let [blocks (simulate-drift 200 0.5 0.5 0.7 0.6 10.0 41)
+        fit {:c 0.5 :kappa 0.5 :pi 0.7 :s 0.6 :h 10.0}
+        spec (m/specs :seven-day)
+        now 1780272000 end (+ now (* 3 86400))
+        path (b/forecast-drift-path fit prof zone spec (subvec blocks 0 30) [] now end 20.0 :n 4000)
+        endpoint (b/forecast-drift fit prof zone spec (subvec blocks 0 30) [] now end 20.0 :n 4000)]
+    (testing "the production path format"
+      (is (every? #(every? % [:ts :mean :lo :q25 :median :q75 :hi :quantiles :p-cap]) path))
+      (is (= 19 (count (:quantiles (peek path)))))
+      (is (= end (:ts (peek path)))))
+    (testing "the meter never falls along the path"
+      (is (apply <= (map :median path))))
+    (testing "its end agrees with the endpoint forecast"
+      (is (< (Math/abs (- (:median (peek path)) (:median endpoint))) 3.0))
+      (is (< (Math/abs (- (:hi (peek path)) (:hi endpoint))) 6.0)))))
