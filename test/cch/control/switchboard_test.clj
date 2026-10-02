@@ -161,10 +161,47 @@
           (is (str/includes? page ">Claude<"))
           (is (str/includes? page "14%"))
           (is (str/includes? page "5-hour rate-limit window"))
-          (is (str/includes? page "href=\"/usage?window=5h\">↻ refresh<"))
+          (is (str/includes? page "href=\"/usage?window=5h&amp;refresh=1\""))
+          (is (str/includes? page "data-refresh"))
+          (let [script (second (re-find #"(?s)<script>(.*?)</script>" page))
+                digest (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                                (.getBytes ^String script StandardCharsets/UTF_8))]
+            (is (str/includes? (get-in response [:headers "Content-Security-Policy"])
+                               (str "script-src 'sha256-"
+                                    (.encodeToString (java.util.Base64/getEncoder) digest)
+                                    "'"))))
           (is (not (str/includes? page "https://runner.invalid")))
           (is (not (str/includes? page target)))
           (is (= "no-store" (get-in response [:headers "Cache-Control"]))))))))
+
+(deftest usage-refresh-recomputes-past-the-cache-then-redirects
+  (authenticated
+    (fn []
+      (let [b (registered-broker)
+            now (System/currentTimeMillis)
+            reset (quot (+ now 3600000) 1000)
+            publish! (fn [offset pct]
+                       (broker/publish-usage!
+                         b {:runner-id "runner-a" :token "synthetic-runner-token"
+                            :observations
+                            [(first (usage/from-snapshot
+                                      {:agent "claude-code"
+                                       :observed-at (+ now offset)
+                                       :payload {:rate_limits
+                                                 {:five_hour {:used_percentage pct
+                                                              :resets_at reset}}}}))]}))
+            handler (switchboard/handler b config)
+            page #(:body (handler (access-request :get "/usage"
+                                                  {:query-string "window=5h"})))]
+        (publish! -60000 12)
+        (is (str/includes? (page) "12%"))
+        (publish! 0 37)
+        (is (not (str/includes? (page) "37%")) "plain loads serve the cache")
+        (let [response (handler (access-request :get "/usage"
+                                                {:query-string "window=5h&refresh=1"}))]
+          (is (= 303 (:status response)))
+          (is (= "/usage?window=5h" (get-in response [:headers "Location"]))))
+        (is (str/includes? (page) "37%"))))))
 
 (deftest overview-and-events-render-normalized-global-activity
   (authenticated

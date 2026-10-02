@@ -11,14 +11,34 @@
             [clojure.string :as str]
             [hiccup2.core :as hic])
   (:import [java.net URI URLDecoder URLEncoder]
+           [java.security MessageDigest]
+           [java.util Base64]
            [java.nio.charset StandardCharsets]
            [java.time Instant ZoneId]
            [java.time.format DateTimeFormatter]))
+
+(def ^:private refresh-script
+  "Marks a refresh link busy while its recompute (seconds) is in flight.
+  Allowed by hash, so the policy still admits no other script."
+  (str "document.addEventListener('click',e=>{const a=e.target.closest('a[data-refresh]');"
+       "if(a){a.dataset.label=a.textContent;a.setAttribute('aria-busy','true');"
+       "a.textContent='refreshing…'}});"
+       ;; Back navigation can restore the page mid-refresh from the bfcache.
+       "addEventListener('pageshow',()=>document.querySelectorAll('a[aria-busy]')"
+       ".forEach(a=>{a.removeAttribute('aria-busy');a.textContent=a.dataset.label}));"))
+
+(defn- script-hash [script]
+  (str "'sha256-"
+       (.encodeToString (Base64/getEncoder)
+                        (.digest (MessageDigest/getInstance "SHA-256")
+                                 (.getBytes ^String script StandardCharsets/UTF_8)))
+       "'"))
 
 (def ^:private security-headers
   {"Cache-Control" "no-store"
    "Content-Security-Policy"
    (str "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
+        "script-src " (script-hash refresh-script) "; "
         "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
    "Referrer-Policy" "no-referrer"
    "X-Content-Type-Options" "nosniff"
@@ -114,6 +134,9 @@
 .hosted-page .page-header{align-items:center;margin-bottom:1.2em}
 .hosted-page .page-header h1{margin:0}
 .hosted-subtitle{color:var(--fg-muted);font-size:var(--font-sm);margin-top:.2em}
+.btn[aria-busy=true]{pointer-events:none;opacity:.7}
+.btn[aria-busy=true]::before{content:"";display:inline-block;width:.8em;height:.8em;margin-right:.4em;vertical-align:-.1em;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .hosted-signout{margin:0}.hosted-signout .btn{padding:3px 9px;font-size:var(--font-xs)}
 .panel{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:1em;margin:0 0 1em}
 .panel h2{font-size:1.05em;margin:0 0 .8em}.panel>.muted{margin-bottom:1em}
@@ -147,7 +170,8 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
            [:title (str "cch · " title)]
            [:link {:rel "icon" :type "image/svg+xml" :href "/favicon.svg"}]
            [:style (hic/raw (web/base-css))]
-           [:style (hic/raw hosted-css)]]
+           [:style (hic/raw hosted-css)]
+           [:script (hic/raw refresh-script)]]
           [:body
            [:div.page-wrap.hosted-page
             (web/nav-bar
@@ -417,10 +441,10 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
     "agy" "AGY"
     (str/capitalize agent)))
 
-(defn- cached-usage-forecast [b cache]
+(defn- cached-usage-forecast [b cache & {:keys [force?]}]
   (let [now (System/currentTimeMillis)
         cached @cache]
-    (if (< (- now (:cached-at cached 0)) 30000)
+    (if (and (not force?) (< (- now (:cached-at cached 0)) 30000))
       (:forecast cached)
       (let [forecast (-> (broker/usage-forecast-inputs b)
                          usage-forecast/from-read-model)]
@@ -437,6 +461,16 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
             ("claude" "claude-code" "cc") "claude-code"
             "claude-code")})
 
+(defn- usage-href [query]
+  (usage/usage-href "/usage" (parse-usage-selection query)))
+
+(defn- refresh-usage!
+  "Recompute the forecast now, then land on the plain page so a reload or
+  bookmark does not recompute again."
+  [b cache query]
+  (cached-usage-forecast b cache :force? true)
+  (redirect (usage-href query)))
+
 (defn- usage-page [b identity cache query]
   (let [forecast (cached-usage-forecast b cache)
         {:keys [window agent]} (parse-usage-selection query)
@@ -447,9 +481,11 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
                    "5-hour rate-limit window · fleet-wide forecast to reset, with 50% and 90% ranges"
                    "7-day rate-limit window · fleet-wide forecast to reset, with 50% and 90% ranges")]
     (page-with
-      {:header-actions [:a.btn {:href (usage/usage-href "/usage" {:window window
-                                                                   :agent agent})}
-                        "↻ refresh"]}
+      {:header-actions (let [href (usage-href query)]
+                         [:a.btn {:href (str href (if (str/includes? href "?") "&" "?")
+                                             "refresh=1")
+                                  :data-refresh true}
+                          "↻ refresh"])}
       "usage" :usage identity
       [:p.page-subtitle subtitle]
       (usage/page-view data {:base "/usage" :window window :agent agent}))))
@@ -481,8 +517,10 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
                                                      (request-query request))}))
 
             (and (= :get request-method) (= "/usage" uri))
-            (response 200 (usage-page b identity usage-cache
-                                      (request-query request)))
+            (let [query (request-query request)]
+              (if (= "1" (:refresh query))
+                (refresh-usage! b usage-cache query)
+                (response 200 (usage-page b identity usage-cache query))))
 
             (and (= :get request-method) (= "/events" uri))
             (response 200 (events-page b identity (request-query request)))
