@@ -161,6 +161,7 @@
           (is (str/includes? page ">Claude<"))
           (is (str/includes? page "14%"))
           (is (str/includes? page "5-hour rate-limit window"))
+          (is (str/includes? page "href=\"/usage?window=5h\">↻ refresh<"))
           (is (not (str/includes? page "https://runner.invalid")))
           (is (not (str/includes? page target)))
           (is (= "no-store" (get-in response [:headers "Cache-Control"]))))))))

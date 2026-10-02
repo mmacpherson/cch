@@ -137,7 +137,7 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
    [:events "events" "/events"]
    [:usage "usage" "/usage"]])
 
-(defn- page [title active identity & content]
+(defn- page-with [{:keys [header-actions]} title active identity & content]
   (str "<!doctype html>"
        (hic/html
          [:html {:lang "en"}
@@ -163,8 +163,13 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
             [:div.page-header
              [:div
               [:h1 title]
-              [:p.hosted-subtitle "Local execution · global coordination"]]]
+              [:p.hosted-subtitle "Local execution · global coordination"]]
+             (when header-actions
+               [:div.header-actions header-actions])]
             content]]])))
+
+(defn- page [title active identity & content]
+  (apply page-with nil title active identity content))
 
 (defn- primary-name [session]
   (or (:alias session) (:name session) (:mnemonic session)))
@@ -441,7 +446,10 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
         subtitle (if (= window :five-hour)
                    "5-hour rate-limit window · fleet-wide forecast to reset, with 50% and 90% ranges"
                    "7-day rate-limit window · fleet-wide forecast to reset, with 50% and 90% ranges")]
-    (page
+    (page-with
+      {:header-actions [:a.btn {:href (usage/usage-href "/usage" {:window window
+                                                                   :agent agent})}
+                        "↻ refresh"]}
       "usage" :usage identity
       [:p.page-subtitle subtitle]
       (usage/page-view data {:base "/usage" :window window :agent agent}))))
