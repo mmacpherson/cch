@@ -102,11 +102,16 @@
                             :auth-token auth-token
                             :pid (socket-pid socket-path)}))))
 
+(def ^:const discovery-timeout-ms
+  "The runner calls discovery on every tick, so a wedged CLI must not hold it."
+  15000)
+
 (defn native-sessions
   "Ask Claude's supported session registry for current presence."
   []
   (try
-    (let [{:keys [exit out err]} (subprocess/run ["claude" "agents" "--json"])]
+    (let [{:keys [exit out err]} (subprocess/run ["claude" "agents" "--json"]
+                                                 {:timeout-ms discovery-timeout-ms})]
       (if (zero? exit)
         (json/parse-string out true)
         (throw (ex-info (str "claude agents failed: " (str/trim err))

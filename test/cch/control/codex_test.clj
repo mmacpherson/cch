@@ -96,3 +96,23 @@
     (binding [codex/*connect!* (constantly (refresh-transport servers))]
       (is (thrown-with-msg? clojure.lang.ExceptionInfo expected
                             (codex/refresh-mcp!))))))
+
+(defrecord SilentTransport [closed]
+  websocket/TextTransport
+  (send-text! [_ _] nil)
+  (read-text! [_]
+    ;; A daemon that accepted the socket but never answers: block until the
+    ;; transport is closed, as a real channel read would.
+    (while (not (realized? closed)) (Thread/sleep 5))
+    (throw (java.nio.channels.AsynchronousCloseException.)))
+  (close! [_] (deliver closed true)))
+
+(deftest a-silent-daemon-times-out-instead-of-blocking-the-caller
+  (let [closed (promise)]
+    (binding [codex/*connect!* (constantly (->SilentTransport closed))
+              codex/*call-timeout-ms* 100]
+      (let [error (try (codex/sessions) nil
+                       (catch clojure.lang.ExceptionInfo error error))]
+        (is (= :codex-daemon-timeout (:type (ex-data error))))
+        (is (deref closed 1000 false)
+            "the socket is closed so the abandoned worker unblocks")))))

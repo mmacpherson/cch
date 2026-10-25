@@ -45,7 +45,8 @@
    ;; this holds however the tests are started.
    :jvm-opts    ["-Dcch.db.path=target/test-events.db"
                  "-Dcch.config.path=target/test-config.yaml"
-                 "-Dcch.control.pairing.path=target/test-control-runner.json"]
+                 "-Dcch.control.pairing.path=target/test-control-runner.json"
+                 "-Dcch.control.runner.status.path=target/test-control-runner-status.json"]
    :exec-fn     cognitect.test-runner.api/test
    :exec-args   {:dirs ["test"]}}
 

@@ -4,6 +4,7 @@
             [cch.control.codex :as codex]
             [cch.control.naming :as naming]
             [cch.control.remote :as remote]
+            [cch.control.runner-health :as runner-health]
             [cch.control.store :as store]
             [clojure.string :as str])
   (:import [java.nio.charset StandardCharsets]
@@ -194,6 +195,41 @@
           (remote/sessions config))
     (catch Exception _ nil)))
 
+(defn unleased-source-explanation
+  "Say why the broker does not know the sending route, from this machine's
+  side: either the local runner is not completing exchanges, or the runner is
+  fine and the source session itself is not live presence."
+  [source source-session {:keys [status since consecutive-failures error-type]}]
+  (str "Source route " source " is not leased by this runner at the broker. "
+       (case status
+         :failing
+         (str "The local runner has failed " consecutive-failures
+              " consecutive broker exchanges since " since
+              (when error-type (str " (" error-type ")"))
+              ", so it cannot register this machine's sessions.")
+         :stalled
+         (str "The local runner's polling tick has been stuck since " since
+              ", so it cannot register this machine's sessions.")
+         :stopped
+         "The local runner is not running, so nothing registers this machine's sessions."
+         :unknown
+         "The local runner has no recorded status; it may never have started."
+         :starting
+         "The local runner has started but has not completed a broker exchange yet; retry shortly."
+         (cond
+           (nil? source-session)
+           "The local runner is healthy, but this session is not in its local presence."
+
+           (not (:available source-session))
+           (str "The local runner is healthy, but this session is not available"
+                (if-let [reason (:unavailable-reason source-session)]
+                  (str ": " reason ".")
+                  " as live presence."))
+
+           :else
+           "The local runner is healthy and the session is live; the broker should list it within a few seconds."))
+       " Run `cch control doctor` for details."))
+
 (defn send-message!
   "Route plain text locally when the target is native to this machine, or
   through the optional paired broker when another runner owns it. There is
@@ -201,7 +237,8 @@
   [request]
   (let [{:keys [target message source message-id] :as envelope}
         (validate-envelope request)
-        local-ids (set (map :id (:sessions (list-local-sessions))))
+        local-sessions (:sessions (list-local-sessions))
+        local-ids (set (map :id local-sessions))
         config (remote/config)]
     (if (or (contains? local-ids target)
             (nil? config)
@@ -210,6 +247,19 @@
                                         [:target :message :source :message-id]))
       (with-remote-delivery-dedupe!
         envelope
-        #(remote/enqueue! config
-                          {:target target :message message
-                           :source source :message-id message-id})))))
+        #(try
+           (remote/enqueue! config
+                            {:target target :message message
+                             :source source :message-id message-id})
+           (catch clojure.lang.ExceptionInfo error
+             (if (= :invalid-source (:type (ex-data error)))
+               (throw (ex-info (unleased-source-explanation
+                                 source
+                                 (some (fn [session] (when (= source (:id session)) session))
+                                       local-sessions)
+                                 (runner-health/classify
+                                   (runner-health/read-status)
+                                   (java.time.Instant/now)))
+                               (ex-data error)
+                               error))
+               (throw error))))))))

@@ -6,8 +6,11 @@
   terminal outcomes. It owns no listener and does not launch agent processes."
   (:require [cch.control.activity-sync :as activity-sync]
             [cch.control.remote :as remote]
+            [cch.control.runner-health :as health]
             [cch.control.usage-sync :as usage-sync]
-            [cch.db :as db]))
+            [cch.db :as db]
+            [clojure.string :as str])
+  (:import [java.time Instant]))
 
 (def ^:const default-poll-ms 500)
 (def ^:const default-usage-poll-ms 5000)
@@ -17,14 +20,25 @@
   #{:invalid-message :invalid-route :message-too-large :stale-session
     :unknown-session :unsupported-agent})
 
-(defn- report-loop-error! [error]
+(def ^:const still-failing-report-ms
+  "While failing continuously, repeat a summary line this often so a log that
+  stops changing never looks like a healthy runner."
+  60000)
+
+(def ^:const default-watchdog-ms 5000)
+
+(defn log!
+  "Timestamped operator log line on stderr."
+  [& parts]
   (binding [*out* *err*]
-    (let [data (ex-data error)
-          status (:status data)]
-      (println (str "cch control runner: "
-                    (or (some-> data :type name) "unexpected-error")
-                    (when status (str " (HTTP " status ")"))
-                    ": " (.getMessage error))))))
+    (println (str (Instant/now) " cch control runner: " (apply str parts)))))
+
+(defn- report-loop-error! [error]
+  (let [{:keys [type status message]} (health/error-summary error)]
+    (log! type (when status (str " (HTTP " status ")")) ": " message)))
+
+(defn- thread-stack [^Thread thread]
+  (str/join "\n" (map #(str "    at " %) (.getStackTrace thread))))
 
 (defn tick!
   "Run one reconnect-safe exchange. Dependencies are explicit so the transport
@@ -60,44 +74,103 @@
       {:delivered 0 :failed 0 :retry-later 0}
       (remote/poll! config))))
 
+(defn default-dependencies
+  "The real local control adapters and observation syncs."
+  [config]
+  {:list-local-sessions
+   (requiring-resolve 'cch.control.core/list-local-sessions)
+   :deliver-local!
+   (requiring-resolve 'cch.control.core/send-local-message!)
+   :sync-usage!
+   #(usage-sync/tick! config (db/db-path))
+   :sync-activity!
+   #(activity-sync/tick! config (db/db-path))})
+
 (defn start!
-  "Start a daemon polling thread. The optional dependency map defaults to the
-  real local control adapters but remains injectable for integration tests."
+  "Start a daemon polling thread plus a watchdog that persists runner health.
+  The optional dependency map defaults to the real local control adapters but
+  remains injectable for integration tests. When the watchdog finds a stalled
+  tick or a sustained failure it logs why and calls :on-unhealthy! with the
+  verdict, if given; the CLI uses that to exit for a supervisor restart."
   ([config]
-   (start! config
-           {:list-local-sessions
-            (requiring-resolve 'cch.control.core/list-local-sessions)
-            :deliver-local!
-            (requiring-resolve 'cch.control.core/send-local-message!)
-            :sync-usage!
-            #(usage-sync/tick! config (db/db-path))
-            :sync-activity!
-            #(activity-sync/tick! config (db/db-path))}))
-  ([config {:keys [sync-usage! sync-activity!] :as dependencies}]
+   (start! config (default-dependencies config)))
+  ([config {:keys [sync-usage! sync-activity! on-unhealthy!] :as dependencies}]
    (let [stopping? (atom false)
          poll-ms (or (:poll-ms config) default-poll-ms)
+         now #(Instant/now)
+         health (atom (health/initial (:runner-id config) (now)))
          last-error (atom nil)
+         last-summary-at (atom nil)
+         run-tick! (fn []
+                     (swap! health health/tick-started (now))
+                     (try
+                       (tick! config dependencies)
+                       (let [[prior _] (swap-vals! health health/record-success (now))]
+                         (when (pos? (:consecutive-failures prior))
+                           (log! "recovered after " (:consecutive-failures prior)
+                                 " consecutive failures since " (:failing-since prior)))
+                         (reset! last-error nil)
+                         (reset! last-summary-at nil))
+                       (catch Exception error
+                         (let [summary (health/error-summary error)
+                               signature [(:type summary) (:message summary)]
+                               current (swap! health health/record-failure summary (now))]
+                           (cond
+                             (not= signature @last-error)
+                             (do (report-loop-error! error)
+                                 (reset! last-error signature)
+                                 (reset! last-summary-at (now)))
+
+                             (> (- (System/currentTimeMillis)
+                                   (.toEpochMilli ^Instant @last-summary-at))
+                                still-failing-report-ms)
+                             (do (log! "still failing: " (:consecutive-failures current)
+                                       " consecutive failures since "
+                                       (:failing-since current)
+                                       "; last " (:type summary) ": " (:message summary))
+                                 (reset! last-summary-at (now))))))))
          thread (Thread.
                   ^Runnable
-                  (fn []
+                  (bound-fn []
                     (try
                       (while (not @stopping?)
-                        (try
-                          (tick! config dependencies)
-                          (reset! last-error nil)
-                          (catch Exception error
-                            (let [signature [(some-> error ex-data :type)
-                                             (.getMessage error)]]
-                              (when (not= signature @last-error)
-                                (report-loop-error! error)
-                                (reset! last-error signature)))))
+                        (run-tick!)
                         (Thread/sleep poll-ms))
                       (catch InterruptedException _ nil))))
+         status-path (or (:status-path config) (health/status-path))
+         watchdog-thread
+         (Thread.
+           ^Runnable
+           (bound-fn []
+             (try
+               (loop [reported nil]
+                 (when-not @stopping?
+                   (let [snapshot @health
+                         verdict (health/assess snapshot (now) config)]
+                     (try
+                       (health/write! status-path snapshot (now))
+                       (catch Exception error
+                         (when-not reported
+                           (log! "could not write runner status: " (.getMessage error)))))
+                     (when (and verdict (not= (:reason verdict) (:reason reported)))
+                       (case (:reason verdict)
+                         :stalled
+                         (log! "polling tick stalled since " (:since verdict)
+                               "; runner thread stack:\n" (thread-stack thread))
+                         :sustained-failure
+                         (log! "broker exchange has failed continuously since "
+                               (:since verdict) " (" (:consecutive-failures verdict)
+                               " attempts)"))
+                       (when on-unhealthy!
+                         (on-unhealthy! verdict)))
+                     (Thread/sleep (long (or (:watchdog-ms config) default-watchdog-ms)))
+                     (recur verdict))))
+               (catch InterruptedException _ nil))))
          usage-thread
          (when (or sync-usage! sync-activity!)
            (Thread.
              ^Runnable
-             (fn []
+             (bound-fn []
                (try
                  (loop [delay-ms (or (:usage-poll-ms config)
                                      default-usage-poll-ms)
@@ -139,14 +212,20 @@
      (.setName thread "cch-control-runner")
      (.setDaemon thread true)
      (.start thread)
+     (.setName watchdog-thread "cch-control-runner-watchdog")
+     (.setDaemon watchdog-thread true)
+     (.start watchdog-thread)
      (when usage-thread
        (.setName usage-thread "cch-control-usage-sync")
        (.setDaemon usage-thread true)
        (.start usage-thread))
      {:thread thread
       :usage-thread usage-thread
+      :watchdog-thread watchdog-thread
+      :health health
       :stop (fn []
               (reset! stopping? true)
               (.interrupt thread)
+              (.interrupt watchdog-thread)
               (when usage-thread
                 (.interrupt usage-thread)))})))

@@ -168,3 +168,103 @@
             (stop)
             (.join thread 1000)
             (.join usage-thread 1000)))))))
+
+(defn- status-path []
+  (str (babashka.fs/create-temp-dir {:prefix "cch-runner-test-"}) "/status.json"))
+
+(deftest watchdog-reports-a-stalled-tick-with-its-stack-and-asks-for-restart
+  ;; An unbounded wait inside a tick used to leave the runner silent and
+  ;; unregistered while still looking alive to its supervisor.
+  (let [release (CountDownLatch. 1)
+        verdicts (atom [])
+        unhealthy (CountDownLatch. 1)
+        sink (java.io.StringWriter.)
+        path (status-path)]
+    (with-redefs [runner/tick! (fn [_ _] (.await release) {:delivered 0})]
+      (binding [*err* sink]
+        (let [{:keys [thread stop]}
+              (runner/start! {:poll-ms 1 :stall-ms 50 :watchdog-ms 10
+                              :status-path path}
+                             {:list-local-sessions (constantly {:sessions []})
+                              :deliver-local! identity
+                              :on-unhealthy! #(do (swap! verdicts conj %)
+                                                  (.countDown unhealthy))})]
+          (try
+            (is (.await unhealthy 2 TimeUnit/SECONDS))
+            (Thread/sleep 50)
+            (finally
+              (.countDown release)
+              (stop)
+              (.join thread 1000))))))
+    (is (= [:stalled] (map :reason @verdicts)) "reported once per episode")
+    (is (re-find #"polling tick stalled since .*\n    at " (str sink)))
+    (is (some? (get (cch.control.runner-health/read-status path) :tick-started-at))
+        "the status file shows the tick in progress")))
+
+(deftest sustained-failure-asks-for-restart-and-is-visible-in-status
+  (let [verdicts (atom [])
+        unhealthy (CountDownLatch. 1)
+        path (status-path)]
+    (with-redefs [runner/tick! (fn [_ _]
+                                 (throw (ex-info "Broker request failed"
+                                                 {:type :broker-unavailable})))]
+      (binding [*err* (java.io.StringWriter.)]
+        (let [{:keys [thread stop]}
+              (runner/start! {:poll-ms 1 :max-failure-ms 50 :watchdog-ms 10
+                              :status-path path}
+                             {:list-local-sessions (constantly {:sessions []})
+                              :deliver-local! identity
+                              :on-unhealthy! #(do (swap! verdicts conj %)
+                                                  (.countDown unhealthy))})]
+          (try
+            (is (.await unhealthy 2 TimeUnit/SECONDS))
+            (finally
+              (stop)
+              (.join thread 1000))))))
+    (is (= :sustained-failure (:reason (first @verdicts))))
+    (let [status (cch.control.runner-health/read-status path)]
+      (is (pos? (:consecutive-failures status)))
+      (is (= "broker-unavailable" (get-in status [:last-error :type]))))))
+
+(deftest runner-reregisters-after-the-broker-goes-away-and-returns
+  ;; Reproduces a broker or overlay blip against the real HTTP client: the
+  ;; broker stops, the runner fails, the broker returns on the same port, and
+  ;; the runner's routes reappear without a restart. The log carries a
+  ;; timestamped error and a recovery line.
+  (let [port (free-port)
+        make-broker #(broker/new-broker {"runner-a" "synthetic-token-a"})
+        config {:url (str "http://127.0.0.1:" port)
+                :runner-id "runner-a" :token "synthetic-token-a"
+                :poll-ms 10 :watchdog-ms 10 :status-path (status-path)}
+        codex-a (route "codex" "a")
+        sink (java.io.StringWriter.)
+        routes (fn [b] (set (map :id (broker/sessions b))))
+        eventually (fn [pred]
+                     (loop [n 0]
+                       (cond (pred) true
+                             (> n 300) false
+                             :else (do (Thread/sleep 10) (recur (inc n))))))
+        first-broker (make-broker)
+        server (atom (broker-http/start! first-broker {:port port}))]
+    (binding [*err* sink]
+      (let [{:keys [thread stop health]}
+            (runner/start! config
+                           {:list-local-sessions #(hash-map :sessions [codex-a])
+                            :deliver-local! identity})]
+        (try
+          (is (eventually #(contains? (routes first-broker) (:id codex-a))))
+          ((:stop @server) :timeout 100)
+          (is (eventually #(pos? (:consecutive-failures @health))))
+          ;; A fresh in-memory broker stands in for a restarted one: it has
+          ;; no lease until the runner registers again.
+          (let [second-broker (make-broker)]
+            (reset! server (broker-http/start! second-broker {:port port}))
+            (is (eventually #(contains? (routes second-broker) (:id codex-a))))
+            (is (eventually #(zero? (:consecutive-failures @health)))))
+          (finally
+            (stop)
+            (.join thread 1000)
+            ((:stop @server) :timeout 100)))))
+    (is (re-find #"\d{4}-\d\d-\d\dT[\d:.]+Z cch control runner: broker-unavailable"
+                 (str sink)))
+    (is (re-find #"recovered after \d+ consecutive failures" (str sink)))))

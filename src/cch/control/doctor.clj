@@ -3,6 +3,7 @@
   (:require [babashka.fs :as fs]
             [cch.control.core :as control]
             [cch.control.remote :as remote]
+            [cch.control.runner-health :as runner-health]
             [cch.subprocess :as subprocess]
             [cheshire.core :as json]
             [cli.control-runner-service :as runner-service]
@@ -58,6 +59,41 @@
                              "codex" "Run `cch control install`, then verify the shared Codex app-server socket."
                              "claude" "Update Claude Code and rerun `cch control install` to register native inboxes.")))))
 
+(defn- exchange-report
+  "Classify the runner's own persisted health. Only typed fields leave here;
+  error messages stay in the runner log."
+  [runner-health]
+  (let [{:keys [status] :as health} (runner-health)]
+    (cond-> (select-keys health [:status :since :last-success-at
+                                 :consecutive-failures :error-type :cause-class])
+      (#{:failing :stalled} status)
+      (assoc :action (str "The runner is not completing broker exchanges; see "
+                          "control-runner.log. It restarts itself after a "
+                          "sustained failure, or restart the runner service now."))
+
+      (= :stopped status)
+      (assoc :action "The runner process is not running; start the runner service."))))
+
+(defn- broker-report
+  "Read-only probe of the broker's route directory. It never polls, so it
+  cannot lease messages away from the running runner."
+  [config broker-sessions sessions]
+  (try
+    (let [own (count (filter #(= (:runner-id config) (:runner-id %))
+                             (broker-sessions config)))
+          live (count (filter :available sessions))]
+      (cond-> {:status :ok :routes own}
+        (and (pos? live) (zero? own))
+        (assoc :status :missing-routes
+               :local-available live
+               :action (str "The broker lists none of this runner's live "
+                            "sessions, so cross-runner sends from them fail. "
+                            "Check the runner's exchange status and log."))))
+    (catch Exception error
+      {:status :unreachable
+       :error-type (or (some-> error ex-data :type) :unexpected-error)
+       :action "Check that the broker URL is reachable from this machine."})))
+
 (defn report
   "Return diagnostics without route ids, paths, tokens, transcripts, or message
   bodies. Dependencies are injectable so tests do not inspect operator state."
@@ -68,9 +104,12 @@
             :delete-tree fs/delete-tree
             :list-local-sessions control/list-local-sessions
             :pairing-config remote/config
-            :runner-status runner-service/status}))
+            :runner-status runner-service/status
+            :runner-health #(runner-health/classify (runner-health/read-status)
+                                                    (java.time.Instant/now))
+            :broker-sessions remote/sessions}))
   ([{:keys [run-command create-temp-dir delete-tree list-local-sessions
-            pairing-config runner-status]}]
+            pairing-config runner-status runner-health broker-sessions]}]
    (let [{:keys [sessions errors]} (list-local-sessions)
          pairing (try
                    (if (pairing-config)
@@ -89,8 +128,16 @@
                                   {:run-command run-command
                                    :create-temp-dir create-temp-dir
                                    :delete-tree delete-tree}))
-         supervision (runner-status)
+         config (when (= :configured (:status pairing)) (pairing-config))
+         supervision (cond-> (runner-status)
+                       (and config runner-health)
+                       (assoc :exchange (exchange-report runner-health)))
+         broker (when (and config broker-sessions)
+                  (broker-report config broker-sessions sessions))
          attention? (or (contains? #{:invalid} (:status pairing))
+                        (contains? #{:failing :stalled :stopped}
+                                   (get-in supervision [:exchange :status]))
+                        (and broker (not= :ok (:status broker)))
                         (= :unavailable (:status claude))
                         (= :unavailable (:status codex))
                         (not= :ok (get-in codex [:protocol :status]))
@@ -99,4 +146,5 @@
      {:status (if attention? :attention :ok)
       :pairing pairing
       :runner supervision
+      :broker (or broker {:status :not-checked})
       :providers {:claude claude :codex codex}})))

@@ -169,3 +169,20 @@
                                             :alias "Forged"})
                (catch clojure.lang.ExceptionInfo error
                  (:type (ex-data error)))))))))
+
+(deftest unleased-source-error-says-which-side-is-at-fault
+  (let [source "claude:synthetic-source"]
+    (is (re-find #"failed 37 consecutive broker exchanges since .* \(broker-unavailable\)"
+                 (control/unleased-source-explanation
+                   source {:id source :available true}
+                   {:status :failing :consecutive-failures 37
+                    :since "2026-01-01T00:00:00Z" :error-type "broker-unavailable"})))
+    (is (re-find #"not running"
+                 (control/unleased-source-explanation source nil {:status :stopped})))
+    (is (re-find #"healthy, but this session is not available: socket is gone\."
+                 (control/unleased-source-explanation
+                   source {:id source :available false
+                           :unavailable-reason "socket is gone"}
+                   {:status :ok})))
+    (is (re-find #"cch control doctor"
+                 (control/unleased-source-explanation source nil {:status :ok})))))

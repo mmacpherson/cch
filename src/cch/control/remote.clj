@@ -126,6 +126,11 @@
 (defn configured? []
   (boolean (config)))
 
+(def ^:const response-grace-ms
+  "Slack beyond http-kit's own timeout before the caller stops waiting on a
+  response promise the client never delivers."
+  5000)
+
 (defn- request-json!
   [config method path payload]
   (let [request (cond-> {:url (str (:url config) path)
@@ -140,15 +145,27 @@
                                            "Authorization" (str "Bearer " (:token config))
                                            "X-CCH-Runner-ID" (:runner-id config)}))]
     (try
-      (let [{:keys [status body error]} @(*request!* request)
+      (let [response (deref (*request!* request)
+                            (+ (:timeout request) response-grace-ms)
+                            ::no-response)
+            _ (when (= ::no-response response)
+                (throw (ex-info "Broker request failed: no response from the HTTP client"
+                                {:type :broker-unavailable
+                                 :cause-class "NoResponse"})))
+            {:keys [status body error]} response
             parsed (try
                      (when-not (str/blank? body)
                        (json/parse-string body true))
                      (catch Exception _ nil))]
         (cond
           error
-          (throw (ex-info "Broker request failed"
-                          {:type :broker-unavailable} error))
+          (throw (ex-info (str "Broker request failed: "
+                               (.getSimpleName (class error))
+                               (when-let [detail (.getMessage ^Throwable error)]
+                                 (str " (" detail ")")))
+                          {:type :broker-unavailable
+                           :cause-class (.getName (class error))}
+                          error))
 
           (<= 200 status 299)
           parsed
@@ -160,8 +177,11 @@
       (catch clojure.lang.ExceptionInfo error
         (throw error))
       (catch Exception error
-        (throw (ex-info "Broker is unavailable"
-                        {:type :broker-unavailable} error))))))
+        (throw (ex-info (str "Broker is unavailable: "
+                             (.getSimpleName (class error)))
+                        {:type :broker-unavailable
+                         :cause-class (.getName (class error))}
+                        error))))))
 
 (defn register! [config sessions]
   (request-json! config :post "/v1/runners/register"

@@ -49,8 +49,11 @@
       (read-response! client id))))
 
 (defn start-client!
+  "Connect and initialize. on-transport, when given, receives the transport
+  before initialization so a caller's deadline can close a silent handshake."
   ([] (start-client! (default-socket-path)))
-  ([socket-path]
+  ([socket-path] (start-client! socket-path nil))
+  ([socket-path on-transport]
    (let [transport (try
                      (*connect!* socket-path)
                      (catch Exception error
@@ -64,6 +67,7 @@
                            {:type :codex-daemon-unavailable
                             :socket-path socket-path}
                            error))))
+         _ (when on-transport (on-transport transport))
          client (->Client transport (atom 0))]
      (try
        (rpc! client "initialize"
@@ -86,9 +90,45 @@
     (websocket/close! (:transport client))
     nil))
 
-(defn- call-with-client [f]
-  (let [client (start-client!)]
-    (try (f client) (finally (close-client! client)))))
+(def ^:dynamic *call-timeout-ms*
+  "Upper bound on one connect-and-call exchange. The socket reads themselves
+  block indefinitely, so a daemon that accepts but never answers would
+  otherwise hold the runner's polling thread forever."
+  20000)
+
+(defn- call-with-client
+  "Run f against a fresh client on a worker thread. On timeout the socket is
+  closed, which unblocks the worker's pending read, and the caller gets a
+  typed transient error instead of waiting."
+  [f]
+  (let [outcome (promise)
+        transport (atom nil)
+        abandoned? (atom false)
+        timeout-ms *call-timeout-ms*
+        on-transport (fn [connected]
+                       (reset! transport connected)
+                       (when @abandoned? (websocket/close! connected)))
+        work (bound-fn []
+               (deliver
+                 outcome
+                 (try
+                   (let [client (start-client! (default-socket-path) on-transport)]
+                     (try {:value (f client)}
+                          (finally (close-client! client))))
+                   (catch Throwable error {:error error}))))]
+    (Thread/startVirtualThread ^Runnable work)
+    (let [result (deref outcome timeout-ms ::timeout)]
+      (cond
+        (= ::timeout result)
+        (do (reset! abandoned? true)
+            (some-> @transport websocket/close!)
+            (throw (ex-info (str "Codex app-server did not respond within "
+                                 timeout-ms " ms")
+                            {:type :codex-daemon-timeout
+                             :timeout-ms timeout-ms})))
+
+        (:error result) (throw (:error result))
+        :else (:value result)))))
 
 (defn- status-name [status]
   (cond

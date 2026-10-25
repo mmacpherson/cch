@@ -342,14 +342,28 @@
            ((:stop server) :timeout 100)
            (broker-api/close-broker! state)))))
 
+(defn- exit-for-supervisor-restart!
+  "Both service definitions restart a runner that exits non-zero (launchd
+  KeepAlive, systemd Restart=on-failure). A fresh process discards whatever
+  wedged state a long-lived client accumulated. Halt if shutdown hooks hang."
+  [{:keys [reason]}]
+  (runner/log! "exiting for a supervisor restart (" (name reason) ")")
+  (doto (Thread. ^Runnable #(do (Thread/sleep 10000)
+                                (.halt (Runtime/getRuntime) 1)))
+    (.setDaemon true)
+    (.start))
+  (System/exit 1))
+
 (defn- run-runner! [args]
   (let [{:keys [poll-ms]} (parse-command-options args runner-options)
         config (or (remote/config)
                    (throw (ex-info "Runner pairing environment is not configured"
                                    {:type :missing-runner-config})))
-        process (runner/start! (assoc config :poll-ms poll-ms))]
-    (println (format "Control runner '%s' polling its paired HTTPS broker every %d ms."
-                     (:runner-id config) poll-ms))
+        process (runner/start! (assoc config :poll-ms poll-ms)
+                               (assoc (runner/default-dependencies config)
+                                      :on-unhealthy! exit-for-supervisor-restart!))]
+    (runner/log! (format "runner '%s' polling its paired HTTPS broker every %d ms."
+                         (:runner-id config) poll-ms))
     (println "Local native sessions continue to operate if this process or broker stops.")
     (wait-until-shutdown! (:stop process))))
 
