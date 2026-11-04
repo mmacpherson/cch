@@ -190,12 +190,34 @@
 (def ^:private cch-tool-names
   #{"list_sessions" "get_session" "send_message" "set_session_alias"})
 
+(defn tool-signature
+  "The parts of one MCP tool definition that identify which cch code serves
+  it: its description and parameter names. Pure."
+  [{:keys [description inputSchema]}]
+  {:description description
+   :parameters (set (map name (keys (:properties inputSchema))))})
+
+(defn stale-tools
+  "Names of tools whose served signature differs from the expected one. Pure."
+  [expected served-tools]
+  (sort (keep (fn [[tool-name signature]]
+                (when-not (= signature
+                             (some-> (get served-tools (keyword tool-name))
+                                     tool-signature))
+                  tool-name))
+              expected)))
+
 (defn refresh-mcp!
   "Ask the shared Codex app-server to reload its MCP runtimes, then verify that
   cch came back with its deliberately narrow tool surface. The upstream reload
   request is app-server-wide; it does not restart the daemon or attached agent
-  clients, but may briefly reconnect other MCP servers owned by that daemon."
-  []
+  clients, but may briefly reconnect other MCP servers owned by that daemon.
+
+  expected maps each tool name to this build's tool-signature. A reload can
+  leave a stdio child, or an unrestarted HTTP server, serving older code under
+  the same tool names, so the signatures must match too."
+  ([] (refresh-mcp! nil))
+  ([expected]
   (call-with-client
     (fn [client]
       (rpc! client "config/mcpServer/reload" nil)
@@ -224,10 +246,21 @@
                    {:type :codex-mcp-refresh-failed
                     :server "cch"
                     :unexpected-tools unexpected})))
+        (when-let [stale (seq (when expected (stale-tools expected (:tools cch-server))))]
+          (throw (ex-info
+                   (str "Codex reloaded cch, but it still serves older cch code for: "
+                        (str/join ", " stale) ". "
+                        "If Codex reaches cch over stdio, the app-server kept its "
+                        "previous `cch control mcp` child: stop that child and refresh "
+                        "again, or run `cch control install` to move to the shared HTTP "
+                        "endpoint. Over HTTP, restart the cch server first.")
+                   {:type :codex-mcp-stale
+                    :server "cch"
+                    :stale-tools (vec stale)})))
         {:agent "codex"
          :server "cch"
          :status "refreshed"
-         :tools (sort cch-tool-names)}))))
+         :tools (sort cch-tool-names)})))))
 
 (defn- in-progress-turn-id
   "Return the id of the thread's running turn, or nil when it has none. Turns

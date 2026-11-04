@@ -188,3 +188,31 @@
     (is (= "queued" (:delivery result)))
     (is (= ["thread/turns/list" "thread/queue/add"]
            (mapv :method (drop 4 (requests transport)))))))
+
+(defn- served-tool [description & parameters]
+  {:description description
+   :inputSchema {:type "object"
+                 :properties (into {} (map (fn [p] [(keyword p) {:type "string"}]))
+                                   parameters)}})
+
+(def ^:private current-tools
+  {:list_sessions (served-tool "List")
+   :get_session (served-tool "Get" "session_id")
+   :send_message (served-tool "Send" "target" "message" "in_reply_to")
+   :set_session_alias (served-tool "Alias" "alias")})
+
+(def ^:private expected-signatures
+  (into {} (map (fn [[k v]] [(name k) (codex/tool-signature v)])) current-tools))
+
+(deftest refresh-accepts-a-server-running-this-build
+  (binding [codex/*connect!* (constantly (refresh-transport
+                                            [{:name "cch" :tools current-tools}]))]
+    (is (= "refreshed" (:status (codex/refresh-mcp! expected-signatures))))))
+
+(deftest refresh-reports-a-server-still-running-older-code
+  (let [stale (assoc current-tools :send_message (served-tool "Send" "target" "message"))]
+    (binding [codex/*connect!* (constantly (refresh-transport
+                                              [{:name "cch" :tools stale}]))]
+      (is (= {:type :codex-mcp-stale :server "cch" :stale-tools ["send_message"]}
+             (try (codex/refresh-mcp! expected-signatures)
+                  (catch clojure.lang.ExceptionInfo error (ex-data error))))))))

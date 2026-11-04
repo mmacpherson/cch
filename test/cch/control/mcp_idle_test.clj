@@ -93,3 +93,26 @@
     (testing "every call is delegated to the inner logger"
       (is (= [:in-req :in-note :in-ok :in-err :out-req :out-note :sse]
              (mapv first @calls))))))
+
+(deftest only-codex-children-exit-when-idle
+  (is (= 1800000 (idle/idle-timeout-for "codex" 1800000)))
+  (is (nil? (idle/idle-timeout-for "claude" 1800000))
+      "Claude never relaunches an exited stdio server")
+  (is (= 1800000 (idle/idle-timeout-for nil 1800000))
+      "an unknown caller keeps the leak backstop"))
+
+(deftest orphan-watchdog-exits-only-once-the-parent-is-gone
+  (let [checks (atom [true true false])
+        fired (promise)
+        thread (idle/start-orphan-watchdog!
+                 {:parent-alive? #(let [[alive & more] @checks]
+                                    (reset! checks (vec more))
+                                    alive)
+                  :sleep-fn (fn [_] nil)
+                  :on-orphaned #(deliver fired :orphaned)})]
+    (is (= :orphaned (deref fired 2000 :timeout)))
+    (.join ^Thread thread 2000)
+    (is (empty? @checks) "it polled until the parent was reported gone")))
+
+(deftest the-current-parent-is-reported-alive
+  (is (true? ((idle/parent-alive-fn)))))

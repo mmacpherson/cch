@@ -9,6 +9,7 @@
             [cch.control.codex :as codex]
             [cch.control.core :as control]
             [cch.control.doctor :as control-doctor]
+            [cch.control.mcp :as mcp]
             [cch.control.mcp-http :as mcp-http]
             [cch.control.mcp-tokens :as mcp-tokens]
             [cch.control.remote :as remote]
@@ -281,7 +282,7 @@
 (defn- refresh-mcp! [args]
   (case (first args)
     "codex"
-    (let [{:keys [tools]} (codex/refresh-mcp!)]
+    (let [{:keys [tools]} (codex/refresh-mcp! (mcp/tool-signatures))]
       (println "Codex cch MCP: refreshed and verified through the shared app-server")
       (println "Verified tools:" (str/join ", " tools))
       (println "No Codex agent or app-server process was restarted."))

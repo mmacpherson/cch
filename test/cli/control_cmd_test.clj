@@ -92,8 +92,12 @@
 
 (deftest refresh-mcp-codex-uses-native-app-server-refresh
   (with-redefs [codex/refresh-mcp!
-                (fn [] {:tools ["get_session" "list_sessions"
-                                "send_message" "set_session_alias"]})]
+                (fn [expected]
+                  (is (contains? (get-in expected ["send_message" :parameters])
+                                 "in_reply_to")
+                      "the CLI checks the reload against this build's tools")
+                  {:tools ["get_session" "list_sessions"
+                           "send_message" "set_session_alias"]})]
     (let [output (with-out-str (control-cmd/run "refresh-mcp" "codex"))]
       (is (re-find #"refreshed and verified" output))
       (is (re-find #"No Codex agent or app-server process was restarted" output)))))

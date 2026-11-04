@@ -35,6 +35,47 @@
     (let [n (parse-long (str/trim env-value))]
       (when (and n (pos? n)) n))))
 
+(defn idle-timeout-for
+  "The idle timeout to apply for one caller kind. Only Codex needs it: its
+  shared app-server keeps a dead thread's stdin open but relaunches the
+  required server on the next tool call. Claude Code closes the child's stdin
+  when the session exits, so its child reaps on EOF, and it does not relaunch
+  an exited stdio server, so an idle exit would leave a live session without
+  send_message until a manual /mcp reconnect. Pure."
+  [caller timeout-ms]
+  (when-not (= "claude" caller) timeout-ms))
+
+(defn orphaned?
+  "True when the process that launched this one has exited. Pure over its
+  argument: parent-alive? is the result of checking the parent process."
+  [parent-alive?]
+  (not parent-alive?))
+
+(defn start-orphan-watchdog!
+  "Launch a daemon thread that invokes `on-orphaned` once `parent-alive?`
+  reports the launching process gone, then stops. A backstop for any provider
+  that exits without closing the child's stdin."
+  [{:keys [parent-alive? poll-ms sleep-fn on-orphaned]
+    :or {poll-ms default-poll-ms
+         sleep-fn (fn [ms] (Thread/sleep (long ms)))}}]
+  (let [worker (fn []
+                 (loop []
+                   (if (orphaned? (parent-alive?))
+                     (on-orphaned)
+                     (do (sleep-fn poll-ms) (recur)))))]
+    (doto (Thread. ^Runnable worker "cch-mcp-orphan-watchdog")
+      (.setDaemon true)
+      (.start))))
+
+(defn parent-alive-fn
+  "Return a 0-arg fn reporting whether this JVM's parent process still runs.
+  When the parent cannot be determined it reports alive, so the watchdog
+  never kills a child it cannot reason about."
+  []
+  (if-let [parent (.orElse (.parent (java.lang.ProcessHandle/current)) nil)]
+    #(.isAlive ^java.lang.ProcessHandle parent)
+    (constantly true)))
+
 (defn idle-expired?
   "True when at least timeout-ms has elapsed since last-activity-ms. A nil
   timeout (disabled) never expires. Pure."

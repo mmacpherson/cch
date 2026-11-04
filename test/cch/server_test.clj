@@ -40,6 +40,13 @@
             (try (java.nio.file.Files/delete file)
                  (catch java.nio.file.NoSuchFileException _ nil))
             java.nio.file.FileVisitResult/CONTINUE)
+          ;; The walk reads each entry's attributes before visitFile, so a
+          ;; WAL file unlinked after the directory listing fails here
+          ;; instead; the default visitor rethrows that.
+          (visitFileFailed [_file exc]
+            (if (instance? java.nio.file.NoSuchFileException exc)
+              java.nio.file.FileVisitResult/CONTINUE
+              (throw exc)))
           (postVisitDirectory [d _exc]
             (try (java.nio.file.Files/delete d)
                  (catch java.nio.file.NoSuchFileException _ nil))
@@ -425,7 +432,8 @@
                     str/trim
                     (json/parse-string true)
                     first)]
-          (is (= 19.0 (:used_pct r)))
+          ;; sqlite3 3.54's -json prints a REAL 19.0 as 19; compare numerically.
+          (is (== 19 (:used_pct r)))
           (is (= (+ 1 122 800 191721) (:current_tokens r)))))
       (testing "canonical quota data is also materialized narrowly"
         (let [r (-> (p/sh ["sqlite3" "-json" *tmp-db*
@@ -440,7 +448,7 @@
                   :window_key "seven_day"
                   :used_percentage 29.0
                   :resets_at 1777518000}
-                 r)))))))
+                 (update r :used_percentage double))))))))
 
 (deftest test-context-snapshot-normalizes-agy-quota
   (testing "AGY's documented weekly quota shape becomes canonical 7d data"

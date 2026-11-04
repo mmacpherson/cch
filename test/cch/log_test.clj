@@ -267,7 +267,8 @@
                    legacy)
                 "local context behavior remains intact without machine identity")
             (is (= ["five_hour" "seven_day"] (mapv :window_key normalized)))
-            (is (= [9.25 31.0] (mapv :used_percentage normalized)))
+            ;; sqlite3 3.54's -json prints a REAL 31.0 as 31; compare as doubles.
+            (is (= [9.25 31.0] (mapv (comp double :used_percentage) normalized)))
             (is (every? #(= 1 (:schema_version %)) normalized))
             (is (every? #(= 1 (:publishable %)) normalized))
             (is (empty? (clojure.set/intersection

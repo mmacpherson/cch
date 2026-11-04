@@ -1,6 +1,7 @@
 (ns cch.control.mcp
   "PluMCP stdio facade for cch's native session directory and router."
-  (:require [cch.control.codex-binding :as codex-binding]
+  (:require [cch.control.codex :as codex]
+            [cch.control.codex-binding :as codex-binding]
             [cch.control.core :as control]
             [cch.control.mcp-idle :as idle]
             [cheshire.core :as json]
@@ -237,6 +238,11 @@
    (vs/make-tool-from-var #'send-message)
    (vs/make-tool-from-var #'set-session-alias)])
 
+(defn tool-signatures
+  "This build's tool signatures, for checking what a provider actually loaded."
+  []
+  (into {} (map (juxt :name codex/tool-signature)) tools))
+
 (defn build-server-options
   "Build the plumcp server options, optionally overriding the traffic logger
   (used to attach the idle watchdog's activity tap). The caller-binding methods
@@ -255,9 +261,20 @@
 
 (defn -main [& _]
   ;; A per-thread stdio child that its provider never reaps would leak a whole
-  ;; JVM per dead thread. Exit after a bounded idle window; the provider
-  ;; relaunches on demand. See cch.control.mcp-idle / claude-code-hooks-9qz.
-  (let [timeout-ms (idle/parse-timeout-ms (System/getenv "CCH_MCP_IDLE_TIMEOUT_MS"))
+  ;; JVM per dead thread. Every child exits when its launching process does;
+  ;; Codex children also exit after a bounded idle window, since Codex keeps
+  ;; a dead thread's stdin open but relaunches on demand. Claude does not
+  ;; relaunch, so its children skip the idle exit. See cch.control.mcp-idle /
+  ;; claude-code-hooks-9qz / claude-code-hooks-ei6.
+  (idle/start-orphan-watchdog!
+    {:parent-alive? (idle/parent-alive-fn)
+     :on-orphaned (fn []
+                    (binding [*out* *err*]
+                      (println "cch control mcp: exiting because its launching process exited"))
+                    (System/exit 0))})
+  (let [timeout-ms (idle/idle-timeout-for
+                     (caller-agent)
+                     (idle/parse-timeout-ms (System/getenv "CCH_MCP_IDLE_TIMEOUT_MS")))
         options (if timeout-ms
                   (let [activity (atom (System/currentTimeMillis))]
                     (idle/start-watchdog!
