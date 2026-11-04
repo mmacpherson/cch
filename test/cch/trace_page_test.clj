@@ -99,15 +99,16 @@
     (is (str/includes? html "proj"))))
 
 (deftest display-names-win-over-mnemonics
-  (let [names {"claude:s1" "homelab · quick-fox-0001" "codex:peer" "reviewer · calm-owl-0002"}]
-    (is (= "homelab · quick-fox-0001" (page/session-label "claude-code" "s1" names)))
+  (let [names {"claude:s1" {:name "homelab"} "codex:peer" {:name "reviewer"}}]
+    (is (re-matches #"homelab · [a-z]+-[a-z]+-[0-9a-f]{4}" (page/session-label "claude-code" "s1" names)))
+    (is (= "homelab" (page/session-name "claude-code" "s1" names)))
     (is (re-matches #"[a-z]+-[a-z]+-[0-9a-f]{4}" (page/session-label "codex" "unknown" names)))
     (is (str/includes? (:summary (page/message-step "claude:s1"
                                                     {:message_id "m" :source "claude:s1"
                                                      :target "codex:peer" :status "submitted"
                                                      :created_at 1}
                                                     names))
-                       "reviewer · calm-owl-0002"))))
+                       "reviewer · "))))
 
 (deftest early-messages-start-at-the-earliest
   (let [placed (page/place-messages
@@ -128,3 +129,15 @@
                                    :timestamp "2026-01-01T00:00:00.000"}]})))]
     (is (not (str/includes? html "session=a1")))
     (is (str/includes? html "session=c1"))))
+
+(deftest index-shows-name-and-id-columns
+  (let [html (str (hic/html
+                    (page/index-body
+                      {:zone utc :names {"codex:c1" {:name "Scrub turn digests"}}
+                       :sessions [{:session_id "c1" :agent "codex" :cwd "/y"
+                                   :timestamp "2026-01-01T00:00:00.000"}
+                                  {:session_id "c2" :agent "codex" :cwd "/y"
+                                   :timestamp "2026-01-01T00:00:00.000"}]})))]
+    (is (str/includes? html "<th>name</th><th>id</th>"))
+    (is (str/includes? html ">Scrub turn digests<"))
+    (is (str/includes? html ">—<") "unnamed sessions show a dash in the name column")))

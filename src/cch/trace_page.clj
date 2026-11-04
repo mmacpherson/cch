@@ -42,13 +42,26 @@
   [agent session-id]
   (str (if (= "codex" agent) "codex:" "claude:") session-id))
 
+(defn session-name
+  "The session's alias or provider-advertised name, when known. `names` maps
+  route -> {:name string-or-nil}."
+  [agent session-id names]
+  (get-in names [(route-id agent session-id) :name]))
+
 (defn session-label
-  "The switchboard display name when known (alias or provider name with the
-  mnemonic), else the mnemonic alone."
+  "Name and mnemonic together (\"homelab-a8 · rapid-maple-af69\"), or the
+  mnemonic alone when the session has no name."
   ([agent session-id] (session-label agent session-id {}))
   ([agent session-id names]
-   (let [route (route-id agent session-id)]
-     (or (get names route) (naming/mnemonic route)))))
+   (let [route (route-id agent session-id)
+         mnemonic (naming/mnemonic route)]
+     (if-let [n (get-in names [route :name])] (str n " · " mnemonic) mnemonic))))
+
+(defn- peer-label [peer names]
+  (cond
+    (= "operator" peer) "operator"
+    :else (let [mnemonic (naming/mnemonic peer)]
+            (if-let [n (get-in names [peer :name])] (str n " · " mnemonic) mnemonic))))
 
 ;; --- Messages ---
 
@@ -62,9 +75,7 @@
     {:at-ms created_at
      :kind :message
      :summary (str (if outgoing? "→ " "← ")
-                   (cond (= "operator" peer) "operator"
-                         (get names peer) (get names peer)
-                         :else (naming/mnemonic peer))
+                   (peer-label peer names)
                    " · " message_id
                    (when seq (str " · seq " seq)))
      :outcome (case status
@@ -159,11 +170,13 @@
         turns (place-messages turns (map #(message-step route % names) messages))]
     (list
       [:div.page-header
-       [:h1 (session-label agent session-id names)]
+       [:h1 (or (session-name agent session-id names)
+                (session-label agent session-id))]
        [:div.page-actions
         [:a.btn {:href (str "/trace?session=" session-id)} "↻ refresh"]
         [:a.btn {:href (str "/events?session=" session-id)} "raw events"]]]
       [:p.page-subtitle.mono.sm
+       (session-label agent session-id) " · "
        (if (= "codex" agent) "Codex" "Claude") " · " route
        (when cwd (str " · " cwd))]
       (if (empty? turns)
@@ -179,13 +192,15 @@
     (if (empty? sessions)
       [:p.muted "No sessions recorded yet."]
       [:table.dense-table
-       [:thead [:tr [:th "session"] [:th "agent"] [:th "where"] [:th "last activity"]]]
+       [:thead [:tr [:th "name"] [:th "id"] [:th "agent"] [:th "where"] [:th "last activity"]]]
        [:tbody
         (for [{:keys [session_id agent cwd timestamp]} sessions
               :when (#{"claude-code" "codex"} agent)]
           [:tr
            [:td [:a {:href (str "/trace?session=" session_id)}
-                 (session-label agent session_id names)]]
+                 (or (session-name agent session_id names) "—")]]
+           [:td.mono.xs [:a {:href (str "/trace?session=" session_id)}
+                         (session-label agent session_id)]]
            [:td.sm (if (= "codex" agent) "Codex" "Claude")]
            [:td.mono.xs.muted {:title cwd} (some-> cwd (str/replace #"^.*/" ""))]
            [:td.mono.xs.muted (local-time (event-ts->ms timestamp) zone day-clock)]])]])))

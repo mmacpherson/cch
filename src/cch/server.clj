@@ -659,7 +659,7 @@
        (catch Exception _ [])))
 
 (defonce ^:private session-names
-  ;; {:at ms :names {route display-name} :refreshing? bool}. Listing native
+  ;; {:at ms :names {route {:name n}} :refreshing? bool}. Listing native
   ;; sessions asks each provider and can take seconds, so the trace page
   ;; reads this cache and refreshes it in the background.
   (atom {:at 0 :names {}}))
@@ -669,7 +669,8 @@
 (defn- refresh-session-names! []
   (future
     (try
-      (let [names (into {} (map (juxt :id :display-name))
+      (let [names (into {} (map (fn [{:keys [id alias name]}]
+                                  [id {:name (or alias name)}]))
                         (:sessions (control/list-local-sessions)))]
         (reset! session-names {:at (System/currentTimeMillis) :names names}))
       (catch Exception _
