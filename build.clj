@@ -108,6 +108,9 @@
                "  -Xmx256m \\\n"
                "  -XX:+UseSerialGC \\\n"
                "  -XX:MaxMetaspaceSize=128m \\\n"
+               ;; sqlite-jdbc loads its native library; allow it so every
+               ;; invocation doesn't print restricted-method warnings.
+               "  --enable-native-access=ALL-UNNAMED \\\n"
                "  ${CCH_JAVA_OPTS:-} \\\n"
                "  -jar \"$here/lib/cch.jar\" \"$@\"\n"))
     (.setExecutable launcher true false))
