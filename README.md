@@ -60,7 +60,9 @@ Claude/Codex vertical slice.
 
 ### Prerequisites
 
-- JDK 21+
+- JDK 21+ with `jlink` (on macOS, Apple's `/usr/bin/jlink` is only a stub:
+  put a real JDK first on `PATH` for `just build`, e.g. Homebrew's
+  `$(brew --prefix openjdk)/bin`)
 - [Clojure CLI](https://clojure.org/guides/install_clojure) (`clj`)
 - SQLite
 - At least one supported provider CLI
