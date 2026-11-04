@@ -121,3 +121,18 @@
                  {:tool-use-id "alias-call-1" :alias "Review pair"})))
         (is (nil? (store/claim-codex-alias-binding!
                     {:tool-use-id "alias-call-1" :alias "Review pair"})))))))
+
+(deftest deliveries-for-route-joins-sequence-numbers
+  (with-temp-store
+    (fn [_]
+      (store/record-delivery! {:message-id "m1" :source "claude:a" :target "codex:b"
+                               :content-sha256 "x" :status "submitted"})
+      (store/assign-seq! {:message-id "m1" :source "claude:a" :target "codex:b"})
+      (store/record-delivery! {:message-id "m2" :source "codex:b" :target "claude:a"
+                               :content-sha256 "y" :status "delivered"})
+      (store/record-delivery! {:message-id "m3" :source "codex:b" :target "codex:c"
+                               :content-sha256 "z" :status "delivered"})
+      (let [rows (store/deliveries-for-route "claude:a" 10)]
+        (is (= #{"m1" "m2"} (set (map :message_id rows))))
+        (is (= 1 (:seq (first (filter #(= "m1" (:message_id %)) rows)))))
+        (is (nil? (:seq (first (filter #(= "m2" (:message_id %)) rows)))))))))

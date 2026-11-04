@@ -545,3 +545,40 @@ body {
   --chart-border: var(--border);
   --chart-text: var(--fg-muted);
 }
+
+/* --- Session trace --- */
+.trace-turn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75em 1em;
+  margin-bottom: 0.9em;
+}
+.trace-turn-head { display: flex; gap: 1em; align-items: baseline; margin-bottom: 0.5em; }
+.trace-badge { font-size: var(--font-xs); padding: 0.05em 0.5em; border-radius: 999px; }
+.trace-running { background: var(--c-ask-bg); color: var(--c-ask); }
+.trace-prompt {
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  border-left: 3px solid var(--accent); padding: 0.3em 0.7em; margin: 0.4em 0;
+  background: var(--accent-soft); border-radius: 3px;
+}
+.trace-reply {
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  border-left: 3px solid var(--c-allow); padding: 0.3em 0.7em; margin: 0.5em 0 0.2em;
+  color: var(--fg);
+}
+.trace-prompt summary, .trace-reply summary { cursor: pointer; white-space: pre-wrap; }
+.trace-full { margin-top: 0.4em; }
+.trace-steps { list-style: none; margin: 0.4em 0; padding: 0; }
+.trace-step {
+  display: grid;
+  grid-template-columns: 5.5em 0.9em 6em minmax(0, 1fr) auto;
+  gap: 0.6em; align-items: center;
+  padding: 0.12em 0; font-size: var(--font-sm);
+}
+.trace-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-kind-message .trace-summary { color: var(--accent); }
+@media (max-width: 640px) {
+  .trace-step { grid-template-columns: 0.9em 5em minmax(0, 1fr); }
+  .trace-step .trace-time, .trace-step .trace-duration { display: none; }
+}

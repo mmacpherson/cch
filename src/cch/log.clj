@@ -256,6 +256,43 @@
                         [:like :extra    (str "%" q "%")]]))]
     (db/query (first (sql/format qry {:inline true})))))
 
+(defn session-trace-rows
+  "Rows that make up one session's activity trace, oldest first: every
+  event-log row (the full provider payload) plus any hook row that asked or
+  denied. At most `limit` of the newest rows."
+  [session-id & {:keys [limit] :or {limit 2000}}]
+  (->> (db/query
+         (first (sql/format
+                  {:select   [:id :timestamp :agent :session-id :hook-name :event-type
+                              :tool-name :file-path :cwd :decision :reason :elapsed-ms :extra]
+                   :from     [:events]
+                   :where    [:and
+                              [:= :session-id session-id]
+                              [:or [:= :hook-name "event-log"]
+                                   [:in :decision ["deny" "ask"]]]]
+                   :order-by [[:id :desc]]
+                   :limit    (int limit)}
+                  {:inline true})))
+       reverse
+       vec))
+
+(defn recent-session-summaries
+  "The most recently active sessions with their agent, working directory, and
+  last event time: [{:session_id :agent :cwd :timestamp} ...]."
+  [& {:keys [limit] :or {limit 40}}]
+  (vec
+    (for [{:keys [session_id]} (recent-sessions :limit limit)
+          :let [row (first (db/query
+                             (first (sql/format
+                                      {:select [:session-id :agent :cwd :timestamp]
+                                       :from [:events]
+                                       :where [:= :session-id session_id]
+                                       :order-by [[:id :desc]]
+                                       :limit 1}
+                                      {:inline true}))))]
+          :when row]
+      row)))
+
 ;; --- Context snapshots ---
 
 (defn log-context-snapshot!

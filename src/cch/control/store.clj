@@ -158,6 +158,18 @@
      message-id source target content-sha256 status (System/currentTimeMillis)])
   (delivery message-id))
 
+(defn deliveries-for-route
+  "Messages this runner recorded to or from one route, newest first, with
+  their channel sequence numbers. Bodies are never stored, so there are none."
+  [route-id limit]
+  (execute!
+    [(str "SELECT d.message_id, d.source, d.target, d.status, d.created_at, s.seq "
+          "FROM control_deliveries d "
+          "LEFT JOIN control_message_seqs s ON s.message_id = d.message_id "
+          "WHERE d.source = ? OR d.target = ? "
+          "ORDER BY d.created_at DESC LIMIT ?")
+     route-id route-id limit]))
+
 (defn assign-seq!
   "Return the channel sequence number for one outgoing message: the next
   integer on its (source, target) channel, or the number already assigned when

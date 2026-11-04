@@ -298,3 +298,25 @@
 (deftest test-writer-stop-is-idempotent
   (testing "calling stop-writer! when no writer is running is a no-op"
     (is (nil? (log/stop-writer!)))))
+
+(deftest session-trace-rows-keep-payload-rows-and-decisions
+  (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-trace-rows-"}))
+        db-path (str tmp-dir "/test.db")]
+    (try
+      (with-redefs [db/db-path (constantly db-path)]
+        (log/ensure-db! db-path)
+        (p/sh ["sqlite3" db-path
+               (str "INSERT INTO events (session_id, hook_name, event_type, extra) VALUES ('s1','event-log','UserPromptSubmit','{}');"
+                    "INSERT INTO events (session_id, hook_name, event_type, decision) VALUES ('s1','command-guard','PreToolUse',NULL);"
+                    "INSERT INTO events (session_id, hook_name, event_type, decision) VALUES ('s1','command-guard','PreToolUse','deny');"
+                    "INSERT INTO events (session_id, hook_name, event_type) VALUES ('s1','event-log','Stop');"
+                    "INSERT INTO events (session_id, hook_name, event_type) VALUES ('s2','event-log','Stop');")])
+        (let [rows (log/session-trace-rows "s1")]
+          (is (= ["UserPromptSubmit" "PreToolUse" "Stop"] (mapv :event_type rows))
+              "oldest first; allow rows from other hooks are dropped")
+          (is (= "deny" (:decision (second rows))))
+          (is (= ["PreToolUse" "Stop"] (mapv :event_type (log/session-trace-rows "s1" :limit 2)))
+              "the limit keeps the newest rows"))
+        (is (= ["s2" "s1"] (mapv :session_id (log/recent-session-summaries)))))
+      (finally
+        (fs/delete-tree tmp-dir)))))

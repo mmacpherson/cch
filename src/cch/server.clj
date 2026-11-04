@@ -23,7 +23,10 @@
             [cch.config :as config]
             [cch.agents.agy :as agy]
             [cch.config-db :as cdb]
+            [cch.activity-trace :as activity-trace]
+            [cch.control.core :as control]
             [cch.control.mcp-http :as mcp-http]
+            [cch.control.store :as control-store]
             [cch.control.mcp-tokens :as mcp-tokens]
             [cch.db :as db]
             [cch.events :as events]
@@ -32,6 +35,7 @@
             [cch.overview :as overview]
             [cch.protocol :as proto]
             [cch.stats :as stats]
+            [cch.trace-page :as trace-page]
             [cch.usage :as usage]
             [cch.web :as web]
             [cheshire.core :as json]
@@ -256,6 +260,7 @@
     {:active active
      :tabs [[:overview "overview" "/"]
             [:events "events" "/events"]
+            [:trace "trace" "/trace"]
             [:hooks "hooks" "/hooks"]
             [:usage "usage" "/usage"]]
      :status "dispatcher · :8888"}))
@@ -339,8 +344,10 @@
         [:dl.row-detail
          [:dt "id"]         [:dd id]
          [:dt "timestamp"]  [:dd timestamp]
-         [:dt "session"]    [:dd (dash (when session_id
-                                        (str (subs session_id 0 (min 8 (count session_id))) "…")))]
+         [:dt "session"]    [:dd (if session_id
+                                   [:a {:href (str "/trace?session=" session_id)}
+                                    (str (subs session_id 0 (min 8 (count session_id))) "… trace")]
+                                   "—")]
          [:dt "cwd"]        [:dd (dash cwd)]
          [:dt "file"]       [:dd (dash file-basename)]
          [:dt "decision"]   [:dd (dash decision)]
@@ -636,6 +643,76 @@
     {:status 200
      :headers {"Content-Type" "text/html; charset=utf-8"}
      :body (events-page-html q)}))
+
+(defn- trace-html [body]
+  (str "<!doctype html>\n"
+       (hic/html
+         [:html {:lang "en"}
+          (page-head {:title "trace" :css-regime :custom})
+          [:body [:div.page-wrap (nav-bar :trace :custom) body]]])))
+
+(defn- session-messages
+  "cch messages to or from one session; empty when the control store is
+  unavailable, which must not break the trace."
+  [route]
+  (try (control-store/deliveries-for-route route 200)
+       (catch Exception _ [])))
+
+(defonce ^:private session-names
+  ;; {:at ms :names {route display-name} :refreshing? bool}. Listing native
+  ;; sessions asks each provider and can take seconds, so the trace page
+  ;; reads this cache and refreshes it in the background.
+  (atom {:at 0 :names {}}))
+
+(def ^:private session-names-ttl-ms 60000)
+
+(defn- refresh-session-names! []
+  (future
+    (try
+      (let [names (into {} (map (juxt :id :display-name))
+                        (:sessions (control/list-local-sessions)))]
+        (reset! session-names {:at (System/currentTimeMillis) :names names}))
+      (catch Exception _
+        (swap! session-names assoc :refreshing? false)))))
+
+(defn- cached-session-names
+  "Display names from the last refresh, starting a new refresh when stale.
+  Never blocks; an empty map means mnemonics only."
+  []
+  (let [{:keys [at refreshing? names] :as snapshot} @session-names
+        stale? (> (- (System/currentTimeMillis) at) session-names-ttl-ms)]
+    ;; One snapshot for the check and the swap, so only one request wins.
+    (when (and stale? (not refreshing?)
+               (compare-and-set! session-names snapshot
+                                 (assoc snapshot :refreshing? true)))
+      (refresh-session-names!))
+    names))
+
+(defn- handle-trace-page
+  "GET /trace lists recent sessions; GET /trace?session=ID shows one
+  session's turns, tool calls, replies, and cch messages."
+  [req]
+  (let [session-id (:session (parse-query (:query-string req)))
+        zone (java.time.ZoneId/systemDefault)
+        body (if (str/blank? session-id)
+               (trace-page/index-body {:sessions (log/recent-session-summaries)
+                                       :names (cached-session-names)
+                                       :zone zone})
+               (let [rows (log/session-trace-rows session-id)
+                     {:keys [agent cwd]} (last rows)
+                     agent (or agent "claude-code")]
+                 (trace-page/page-body
+                   {:agent agent
+                    :session-id session-id
+                    :cwd cwd
+                    :turns (activity-trace/turns rows)
+                    :messages (session-messages (trace-page/route-id agent session-id))
+                    :names (cached-session-names)
+                    :zone zone
+                    :now-ms (System/currentTimeMillis)})))]
+    {:status 200
+     :headers {"Content-Type" "text/html; charset=utf-8"}
+     :body (trace-html body)}))
 
 (defn- handle-overview
   "GET / — overview landing page."
@@ -1224,6 +1301,9 @@
 
       (and (= request-method :get) (= uri "/events"))
       (handle-events-page req)
+
+      (and (= request-method :get) (= uri "/trace"))
+      (handle-trace-page req)
 
       (and (= request-method :get) (= uri "/"))
       (handle-overview req)
