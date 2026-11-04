@@ -106,3 +106,20 @@
   (let [output (with-out-str (control-cmd/run "refresh-mcp" "claude"))]
     (is (re-find #"local to each active session" output))
     (is (re-find #"/mcp reconnect cch" output))))
+
+(deftest one-shot-commands-report-typed-errors-on-one-line
+  (let [exit-code (atom nil)
+        err (java.io.StringWriter.)]
+    (with-redefs [codex/refresh-mcp! (fn [_]
+                                       (throw (ex-info "synthetic refresh failure"
+                                                       {:type :codex-mcp-stale})))
+                  control-cmd/exit! (fn [code] (reset! exit-code code))]
+      (binding [*err* err]
+        (control-cmd/run "refresh-mcp" "codex")))
+    (is (= 1 @exit-code))
+    (is (= "Error: synthetic refresh failure\n" (str err)))))
+
+(deftest untyped-errors-keep-their-stack-trace
+  (with-redefs [codex/refresh-mcp! (fn [_] (throw (ex-info "bug" {})))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"bug"
+                          (control-cmd/run "refresh-mcp" "codex")))))

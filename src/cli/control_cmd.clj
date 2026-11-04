@@ -389,7 +389,33 @@
   (println "  register-claude  Internal SessionStart hook")
   (println "  bind-codex-source Internal PreToolUse hook"))
 
+(def ^:private long-running-commands
+  "Services and hooks whose failures belong in supervisor logs with traces."
+  #{"broker" "runner" "mcp" "register-claude" "bind-codex-source"})
+
+(defn- exit! [code] (System/exit code))
+
+(defn- report-cli-error!
+  "Print a typed cch error as one line on stderr and exit non-zero. Anything
+  untyped is a bug and keeps its stack trace."
+  [^clojure.lang.ExceptionInfo error]
+  (if (:type (ex-data error))
+    (do (binding [*out* *err*]
+          (println (str "Error: " (ex-message error))))
+        (exit! 1))
+    (throw error)))
+
+(declare dispatch)
+
 (defn run [& args]
+  (if (contains? long-running-commands (first args))
+    (apply dispatch args)
+    (try
+      (apply dispatch args)
+      (catch clojure.lang.ExceptionInfo error
+        (report-cli-error! error)))))
+
+(defn- dispatch [& args]
   (let [[command & more] args]
     (case command
       "install" (install!)
