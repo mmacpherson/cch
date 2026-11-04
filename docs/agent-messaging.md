@@ -39,6 +39,23 @@ and `seq` for every message.
 cch reports submission to the provider, not reading. A recipient can still be
 busy for a while before it acts, so treat the reply as the receipt.
 
+## Sending by hand
+
+`cch control send` run inside a Claude or Codex session infers that session as
+the source, so the message is attributed to the agent. To send as yourself
+from such a shell, say so explicitly:
+
+```bash
+cch control send --to <route> --source operator --message "..."
+```
+
+cch never swaps an agent source for `operator` on its own. If the broker
+rejects an inferred agent source because it does not know that session, the
+error says the source was inferred, explains how that agent's sessions
+register (Claude's SessionStart hook; Codex attached to the shared app-server
+with `codex --remote unix://`), and names `--source operator` for a genuine
+manual send.
+
 ## Conventions for agents
 
 1. **Highest seq wins.** On each channel, act on the newest message you have.

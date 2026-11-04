@@ -204,47 +204,90 @@
           (remote/sessions config))
     (catch Exception _ nil)))
 
+(defn- registration-guidance
+  "How a session of the source's agent becomes live presence. Agent-specific
+  and free of local paths or ids."
+  [source]
+  (cond
+    (= "claude:unregistered" source)
+    (str " This Claude session's messaging socket has no cch registration. "
+         "Claude sessions register through cch's SessionStart hook: run "
+         "`cch control install` if it is missing, then restart the session "
+         "(`claude --resume`) so the hook runs.")
+
+    (str/starts-with? source "claude:")
+    (str " Claude sessions register through cch's SessionStart hook: run "
+         "`cch control install` if it is missing, then restart the session "
+         "(`claude --resume`) so the hook runs.")
+
+    (str/starts-with? source "codex:")
+    (str " Codex sessions are live presence only while attached to the shared "
+         "app-server: start or resume them with `codex --remote unix://`, after "
+         "`cch control install` has set that server up.")
+
+    :else nil))
+
+(defn- inferred-source-note
+  "Name where an inferred source came from, and the explicit alternative for a
+  person sending by hand. cch never downgrades an agent source on its own."
+  [source]
+  (str "cch inferred the source " source " from this "
+       (cond (str/starts-with? source "codex:") "Codex"
+             :else "Claude")
+       " session's environment. If you are sending by hand rather than as that "
+       "session, pass `--source operator` explicitly."))
+
 (defn unleased-source-explanation
   "Say why the broker does not know the sending route, from this machine's
   side: either the local runner is not completing exchanges, or the runner is
-  fine and the source session itself is not live presence."
-  [source source-session {:keys [status since consecutive-failures error-type]}]
-  (str "Source route " source " is not leased by this runner at the broker. "
-       (case status
-         :failing
-         (str "The local runner has failed " consecutive-failures
-              " consecutive broker exchanges since " since
-              (when error-type (str " (" error-type ")"))
-              ", so it cannot register this machine's sessions.")
-         :stalled
-         (str "The local runner's polling tick has been stuck since " since
-              ", so it cannot register this machine's sessions.")
-         :stopped
-         "The local runner is not running, so nothing registers this machine's sessions."
-         :unknown
-         "The local runner has no recorded status; it may never have started."
-         :starting
-         "The local runner has started but has not completed a broker exchange yet; retry shortly."
-         (cond
-           (nil? source-session)
-           "The local runner is healthy, but this session is not in its local presence."
+  fine and the source session itself is not live presence. When the source
+  was inferred from the environment rather than given, say so and name the
+  explicit operator alternative."
+  ([source source-session health]
+   (unleased-source-explanation source source-session health nil))
+  ([source source-session {:keys [status since consecutive-failures error-type]}
+    {:keys [inferred?]}]
+   (str "Source route " source " is not leased by this runner at the broker. "
+        (case status
+          :failing
+          (str "The local runner has failed " consecutive-failures
+               " consecutive broker exchanges since " since
+               (when error-type (str " (" error-type ")"))
+               ", so it cannot register this machine's sessions.")
+          :stalled
+          (str "The local runner's polling tick has been stuck since " since
+               ", so it cannot register this machine's sessions.")
+          :stopped
+          "The local runner is not running, so nothing registers this machine's sessions."
+          :unknown
+          "The local runner has no recorded status; it may never have started."
+          :starting
+          "The local runner has started but has not completed a broker exchange yet; retry shortly."
+          (cond
+            (nil? source-session)
+            (str "The local runner is healthy, but this session is not in its local presence."
+                 (registration-guidance source))
 
-           (not (:available source-session))
-           (str "The local runner is healthy, but this session is not available"
-                (if-let [reason (:unavailable-reason source-session)]
-                  (str ": " reason ".")
-                  " as live presence."))
+            (not (:available source-session))
+            (str "The local runner is healthy, but this session is not available"
+                 (if-let [reason (:unavailable-reason source-session)]
+                   (str ": " reason ".")
+                   " as live presence.")
+                 (registration-guidance source))
 
-           :else
-           "The local runner is healthy and the session is live; the broker should list it within a few seconds."))
-       " Run `cch control doctor` for details."))
+            :else
+            "The local runner is healthy and the session is live; the broker should list it within a few seconds."))
+        (when (and inferred? (not= "operator" source))
+          (str " " (inferred-source-note source)))
+        " Run `cch control doctor` for details.")))
 
 (defn send-message!
   "Route plain text locally when the target is native to this machine, or
   through the optional paired broker when another runner owns it. There is
   deliberately no raw-frame or approval-response API."
   [request]
-  (let [envelope (validate-envelope (dissoc request :seq))
+  (let [inferred? (str/blank? (:source request))
+        envelope (validate-envelope (dissoc request :seq))
         ;; The sending runner owns its routes' outgoing channels, so it alone
         ;; numbers them. Receiving runners deliver the number they are given.
         envelope (assoc envelope :seq (store/assign-seq! envelope))
@@ -275,7 +318,8 @@
                                        local-sessions)
                                  (runner-health/classify
                                    (runner-health/read-status)
-                                   (java.time.Instant/now)))
+                                   (java.time.Instant/now))
+                                 {:inferred? inferred?})
                                (ex-data error)
                                error))
                (throw error))))))))

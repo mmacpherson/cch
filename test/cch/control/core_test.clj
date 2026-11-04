@@ -4,8 +4,9 @@
             [cch.control.codex :as codex]
             [cch.control.core :as control]
             [cch.control.remote :as remote]
+            [cch.control.runner-health :as runner-health]
             [cch.control.store :as store]
-            [clojure.test :refer [deftest is use-fixtures]]))
+            [clojure.test :refer [deftest is testing use-fixtures]]))
 
 ;; Channel sequences persist in the control store, so each test numbers its
 ;; channels from a fresh one.
@@ -246,3 +247,56 @@
                    {:status :ok})))
     (is (re-find #"cch control doctor"
                  (control/unleased-source-explanation source nil {:status :ok})))))
+
+(deftest unleased-source-error-gives-agent-specific-registration-guidance
+  (testing "Claude sessions are told how the SessionStart hook registers them"
+    (let [text (control/unleased-source-explanation
+                 "claude:synthetic" nil {:status :ok})]
+      (is (re-find #"SessionStart hook" text))
+      (is (re-find #"claude --resume" text))))
+  (testing "a Claude socket with no registration is named as such"
+    (is (re-find #"messaging socket has no cch registration"
+                 (control/unleased-source-explanation
+                   "claude:unregistered" nil {:status :ok}))))
+  (testing "Codex sessions are told to attach to the shared app-server"
+    (is (re-find #"codex --remote unix://"
+                 (control/unleased-source-explanation
+                   "codex:synthetic" {:available false} {:status :ok}))))
+  (testing "a runner fault is not blamed on registration"
+    (is (not (re-find #"SessionStart"
+                      (control/unleased-source-explanation
+                        "claude:synthetic" nil {:status :stopped}))))))
+
+(deftest unleased-source-error-names-an-inferred-source
+  (testing "an inferred source says where it came from and offers --source operator"
+    (let [text (control/unleased-source-explanation
+                 "codex:synthetic" nil {:status :ok} {:inferred? true})]
+      (is (re-find #"inferred the source codex:synthetic from this Codex session's environment"
+                   text))
+      (is (re-find #"--source operator" text))))
+  (testing "an explicit source gets no inference note"
+    (is (not (re-find #"inferred"
+                      (control/unleased-source-explanation
+                        "codex:synthetic" nil {:status :ok} {:inferred? false}))))))
+
+(deftest send-reports-an-inferred-unleased-source-without-downgrading-it
+  (let [attempted (atom nil)
+        target "codex:synthetic-remote"]
+    (with-redefs [control/inferred-source (constantly "claude:synthetic-sender")
+                  control/list-local-sessions (constantly {:sessions []})
+                  remote/config (constantly {:runner-id "runner-a"})
+                  remote/sessions (constantly [{:id target :runner-id "runner-b"}])
+                  remote/enqueue! (fn [_ envelope]
+                                    (reset! attempted envelope)
+                                    (throw (ex-info "Source route is not leased by this runner"
+                                                    {:type :invalid-source
+                                                     :source (:source envelope)})))
+                  runner-health/read-status (constantly nil)
+                  runner-health/classify (constantly {:status :ok})]
+      (let [error (try (control/send-message! {:target target :message "synthetic"})
+                       nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+        (is (= :invalid-source (:type (ex-data error))))
+        (is (re-find #"inferred the source claude:synthetic-sender" (ex-message error)))
+        (is (= "claude:synthetic-sender" (:source @attempted))
+            "the agent source is sent as-is, never swapped for operator")))))
