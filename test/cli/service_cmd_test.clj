@@ -34,7 +34,7 @@
           home     (System/getProperty "user.home")]
       (is (not (str/includes? rendered "{{HOME}}"))
           "no unresolved {{HOME}} tokens remain")
-      (is (str/includes? rendered (str home "/.local/share/cch/repo"))
+      (is (str/includes? rendered (str "<string>" home "/.local/share/cch</string>"))
           "home directory is baked into the working directory")
       (is (str/includes? rendered (str home "/.local/share/cch/serve.log"))
           "home directory is baked into the log path")
@@ -43,16 +43,21 @@
       (is (str/includes? rendered "<key>MALLOC_ARENA_MAX</key>")
           "glibc malloc arenas are capped to bound RSS fragmentation"))))
 
-(deftest macos-template-runs-clj-server
-  (testing "launchd plist invokes `clj -M:server`, matching the systemd unit and the bash shim"
-    (let [rendered (#'svc/render-template "service/com.cch.server.plist.template")]
-      (is (str/includes? rendered "<string>clj</string>")
-          "uses clj — full JVM Clojure is required (bb can't load nrepl/http-kit)")
-      (is (str/includes? rendered "<string>-M:server</string>")
-          "uses the :server alias from deps.edn"))))
+(deftest macos-template-runs-the-runtime
+  (testing "launchd plist runs `cch serve` from the deployed runtime, like the systemd unit"
+    (let [rendered (#'svc/render-template "service/com.cch.server.plist.template")
+          home     (System/getProperty "user.home")]
+      (is (str/includes? rendered
+                         (str "<string>" home "/.local/share/cch/runtime/bin/cch</string>"))
+          "runs the self-contained runtime launcher")
+      (is (str/includes? rendered "<string>serve</string>"))
+      (is (not (str/includes? rendered "clj"))
+          "does not depend on clj or the repo checkout")
+      (is (not (str/includes? rendered "/.local/share/cch/repo"))
+          "does not depend on the repo symlink"))))
 
 (deftest macos-template-bakes-in-path-at-install-time
-  (testing "launchd plist — {{PATH}} is replaced with the install-time PATH so `clj` and the JDK are findable"
+  (testing "launchd plist — {{PATH}} is replaced with the install-time PATH so tools like git are findable"
     (let [rendered (#'svc/render-template "service/com.cch.server.plist.template")]
       (is (not (str/includes? rendered "{{PATH}}"))
           "no unresolved {{PATH}} tokens remain")

@@ -26,16 +26,10 @@
 
 (defn- cch-runtime-bin
   "Absolute path to the self-contained runtime launcher that `just install`
-  deploys. On Linux `cch serve` runs this, not `clj` from a repo checkout."
+  deploys. Both the systemd unit and the launchd plist run `cch serve` from
+  it, so neither depends on where the repo checkout lives."
   []
   (str (home-dir) "/.local/share/cch/runtime/bin/cch"))
-
-(defn- cch-repo-symlink
-  "Absolute path to the repo symlink the macOS launchd plist still relies on.
-  macOS has not been migrated to the self-contained runtime yet, so its unit
-  launches `clj` from this checkout."
-  []
-  (str (home-dir) "/.local/share/cch/repo"))
 
 (def ^:private uid
   "Memoized user UID — used for macOS `launchctl bootstrap gui/<uid>`."
@@ -79,7 +73,8 @@
 
   {{PATH}} captures the user's current PATH at install time, which
   launchd otherwise scrubs down to a minimal default that doesn't
-  include Homebrew prefixes (so `clj` and the JDK aren't findable)."
+  include Homebrew prefixes (so tools hooks shell out to, like git, aren't
+  findable)."
   [resource-path]
   (-> (io/resource resource-path)
       slurp
@@ -89,21 +84,14 @@
 ;; --- Preconditions ---
 
 (defn- preflight!
-  "Verifies the launcher the unit will reference actually exists, so
-  install-service never writes a unit that points at a missing target.
-  Linux runs the self-contained runtime; macOS still launches `clj` from the
-  repo checkout via the symlink (pending runtime support there)."
-  [os]
-  (let [[target hint]
-        (if (= os :macos)
-          [(cch-repo-symlink)
-           "Run `cch init` in the repo to create the repo symlink first."]
-          [(cch-runtime-bin)
-           "Run `just build && just install` first to deploy the runtime."])]
+  "Verifies the runtime launcher the unit will reference actually exists, so
+  install-service never writes a unit that points at a missing target."
+  []
+  (let [target (cch-runtime-bin)]
     (when-not (fs/exists? target)
       (binding [*out* *err*]
-        (println "Error: cch launcher prerequisite missing at" target)
-        (println hint))
+        (println "Error: cch runtime launcher missing at" target)
+        (println "Run `just build && just install` first to deploy the runtime."))
       (System/exit 1))))
 
 ;; --- Commands ---
@@ -119,7 +107,7 @@
         (println "and macOS (launchd LaunchAgents) right now.")
         (println "Detected OS:" (System/getProperty "os.name")))
       (System/exit 1))
-    (preflight! os)
+    (preflight!)
     (let [{:keys [label path template activate disable logs]} (platform-info os)
           rendered (render-template template)]
       (fs/create-dirs (fs/parent path))

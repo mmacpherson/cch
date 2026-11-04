@@ -54,14 +54,24 @@ install -m 755 "$repo/bin/cch-usage-glyph.sh" "$bin/cch-usage-glyph.sh"
 # long-lived cch process is the same jlink image chosen by subcommand, so a
 # redeploy that only restarts the dispatcher would leave the paired runner (and
 # any broker) executing the OLD jar. Bounce each unit that is actually active.
-restarted_units=()
-for unit in cch.service cch-control-runner.service cch-control-broker.service; do
-  if systemctl --user is-active "$unit" &>/dev/null; then
-    systemctl --user restart "$unit"
-    echo "  ${unit%.service} restarted"
-    restarted_units+=("$unit")
-  fi
-done
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # launchd: kickstart -k restarts a loaded job in place, avoiding the
+  # bootout/bootstrap race that can leave a job unloaded.
+  domain="gui/$(id -u)"
+  for label in com.cch.server com.cch.control-runner; do
+    if launchctl print "$domain/$label" &>/dev/null; then
+      launchctl kickstart -k "$domain/$label"
+      echo "  $label restarted"
+    fi
+  done
+else
+  for unit in cch.service cch-control-runner.service cch-control-broker.service; do
+    if systemctl --user is-active "$unit" &>/dev/null; then
+      systemctl --user restart "$unit"
+      echo "  ${unit%.service} restarted"
+    fi
+  done
+fi
 
 # Per-session MCP subprocesses are spawned by the provider CLIs, not by systemd,
 # so a redeploy cannot bounce them. Point the operator at the refresh path.

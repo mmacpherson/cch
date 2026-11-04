@@ -12,12 +12,11 @@
     <string>2</string>
   </dict>
   <key>WorkingDirectory</key>
-  <string>{{HOME}}/.local/share/cch/repo</string>
+  <string>{{HOME}}/.local/share/cch</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>clj</string>
-    <string>-M:server</string>
+    <string>{{HOME}}/.local/share/cch/runtime/bin/cch</string>
+    <string>serve</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
