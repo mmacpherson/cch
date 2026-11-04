@@ -125,8 +125,8 @@
   [host port]
   (try
     (let [conn (doto ^java.net.HttpURLConnection
-                 (.openConnection (java.net.URI/create
-                                    (format "http://%s:%d/health" host port)))
+                 (.openConnection (.toURL (java.net.URI/create
+                                            (format "http://%s:%d/health" host port))))
                  (.setConnectTimeout 400)
                  (.setReadTimeout 1000))]
       (with-open [in (.getInputStream conn)]

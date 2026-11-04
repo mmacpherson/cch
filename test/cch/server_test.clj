@@ -676,3 +676,6 @@
   (let [body (json/parse-string (:body (http/get (url "/health"))) true)]
     (is (= ["127.0.0.1"] (:bind body))
         "the fixture server was started on one explicit host")))
+
+(deftest doctor-reads-the-bind-report
+  (is (= ["127.0.0.1"] ((requiring-resolve 'cch.doctor/server-bind) "127.0.0.1" *port*))))
