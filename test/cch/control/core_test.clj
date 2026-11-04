@@ -1,10 +1,21 @@
 (ns cch.control.core-test
-  (:require [cch.control.claude :as claude]
+  (:require [babashka.fs :as fs]
+            [cch.control.claude :as claude]
             [cch.control.codex :as codex]
             [cch.control.core :as control]
             [cch.control.remote :as remote]
             [cch.control.store :as store]
-            [clojure.test :refer [deftest is]]))
+            [clojure.test :refer [deftest is use-fixtures]]))
+
+;; Channel sequences persist in the control store, so each test numbers its
+;; channels from a fresh one.
+(use-fixtures :each
+  (fn [f]
+    (let [dir (str (fs/create-temp-dir {:prefix "cch-control-core-"}))]
+      (try
+        (with-redefs [store/db-path (constantly (str dir "/control.db"))]
+          (f))
+        (finally (fs/delete-tree dir))))))
 
 (deftest stable-message-id-makes-delivery-idempotent
   (let [deliveries (atom {})
@@ -132,11 +143,60 @@
                                               :source "operator"
                                               :message "Remote synthetic ping"
                                               :message-id "remote-message"}))))
+      ;; The retry keeps its original channel sequence number.
       (is (= [{:target target :source "operator"
-               :message "Remote synthetic ping" :message-id "remote-message"}
+               :message "Remote synthetic ping" :message-id "remote-message" :seq 1}
               {:target target :source "operator"
-               :message "Remote synthetic ping" :message-id "remote-message"}]
+               :message "Remote synthetic ping" :message-id "remote-message" :seq 1}]
              @enqueued)))))
+
+(deftest outgoing-channels-are-numbered-per-source-and-target
+  (let [sent (atom [])]
+    (with-redefs [store/delivery (constantly nil)
+                  store/record-delivery! identity
+                  claude/sessions (constantly [])
+                  codex/sessions (constantly [])
+                  claude/send! (fn [request]
+                                 (swap! sent conj request)
+                                 {:status "submitted"})]
+      (let [send! #(control/send-message!
+                     (merge {:source "codex:sender" :message "Synthetic ping"} %))]
+        (is (= 1 (:seq (send! {:target "claude:a" :message-id "m1"}))))
+        (is (= 2 (:seq (send! {:target "claude:a" :message-id "m2"
+                               :in-reply-to "reply-to-me"}))))
+        (is (= 1 (:seq (send! {:target "claude:b" :message-id "m3"})))
+            "another target is a separate channel")
+        (is (= 1 (:seq (send! {:target "claude:a" :source "codex:other"
+                               :message-id "m4"})))
+            "another source is a separate channel")
+        (is (= 2 (:seq (send! {:target "claude:a" :message-id "m2"
+                               :in-reply-to "reply-to-me"})))
+            "resending a message id keeps its number")
+        (is (= 3 (:seq (send! {:target "claude:a" :message-id "m5" :seq 99})))
+            "a caller cannot choose its own sequence number")
+        (is (= {:route-id "claude:a" :source "codex:sender" :message-id "m2"
+                :message "Synthetic ping" :seq 2 :in-reply-to "reply-to-me"}
+               (second @sent)))))))
+
+(deftest a-receiving-runner-delivers-the-senders-sequence-number
+  (let [sent (atom nil)]
+    (with-redefs [store/delivery (constantly nil)
+                  store/record-delivery! identity
+                  codex/send! (fn [request]
+                                (reset! sent request)
+                                {:status "submitted"})]
+      (control/send-local-message! {:target "codex:t" :source "claude:s"
+                                    :message "Synthetic ping" :message-id "m1"
+                                    :seq 7 :in-reply-to "m0"})
+      (is (= 7 (:seq @sent)))
+      (is (= "m0" (:in-reply-to @sent))))))
+
+(deftest in-reply-to-must-be-a-label
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"in_reply_to"
+                        (control/send-local-message!
+                          {:target "codex:t" :source "claude:s"
+                           :message "Synthetic ping" :message-id "m1"
+                           :in-reply-to "bad\nid"}))))
 
 (deftest self-aliasing-requires-a-local-route-and-paired-owner
   (let [route-id "claude:30000000-0000-0000-0000-00000000000c"

@@ -51,7 +51,7 @@
 
 (def ^:private send-message-keys
   #{:target :route :message :message_id :message-id
-    :source_proof :source-proof})
+    :in_reply_to :in-reply-to :source_proof :source-proof})
 
 (defn- runtime-key?
   "Recognize only the internal metadata field attached by Codex's code-mode
@@ -88,6 +88,8 @@
     (reject-duplicate-aliases! "send_message" arguments
                                [:message_id :message-id] "message id")
     (reject-duplicate-aliases! "send_message" arguments
+                               [:in_reply_to :in-reply-to] "in-reply-to id")
+    (reject-duplicate-aliases! "send_message" arguments
                                [:source_proof :source-proof] "source proof")
     (when (and (not= "codex" caller)
                (some #(contains? arguments %) [:source_proof :source-proof]))
@@ -95,11 +97,13 @@
                       {:type :unsupported-control-input
                        :fields ["source_proof"]})))
     (cond-> (apply dissoc arguments
-                   :route :message-id :source-proof
+                   :route :message-id :in-reply-to :source-proof
                    (filter runtime-key? (keys arguments)))
       route (assoc :target route)
       (contains? arguments :message-id)
       (assoc :message_id (:message-id arguments))
+      (contains? arguments :in-reply-to)
+      (assoc :in_reply_to (:in-reply-to arguments))
       (contains? arguments :source-proof)
       (assoc :source_proof (:source-proof arguments)))))
 
@@ -146,20 +150,25 @@
   send-message
   "Send plain text to a native agent inbox. This API cannot carry approval,
   permission, control, or arbitrary transport frames. Reusing message_id with
-  the same request is idempotent."
+  the same request is idempotent. Each message gets the next sequence number
+  on its sender->recipient channel, shown as seq in the header the recipient
+  sees; set in_reply_to to the id of the message you are answering."
   [{:keys [^{:doc "Destination route id" :type "string"}
            target
            ^{:doc "Plain-text message (maximum 32768 UTF-8 bytes)" :type "string"}
            message
            ^{:doc "Stable UUID-like id for retries" :type "string" :required? false}
            message_id
+           ^{:doc "Id of the cch message this one answers, from its header"
+             :type "string" :required? false}
+           in_reply_to
            ^{:doc "Reserved Codex hook proof; callers must not supply this field"
              :type "string" :required? false}
            source_proof]
     :as arguments}]
   (let [caller (caller-agent)
         arguments (validate-send-arguments! arguments caller)
-        {:keys [target message message_id source_proof]} arguments
+        {:keys [target message message_id in_reply_to source_proof]} arguments
         source (case caller
                  "codex" (codex-binding/claim-source!
                            {:source-proof source_proof
@@ -170,8 +179,9 @@
                  ;; Unknown/manual callers retain the explicit operator path.
                  nil)]
     (tool-result
-      (control/send-message! {:target target :message message
-                              :message-id message_id :source source}))))
+      (control/send-message! (cond-> {:target target :message message
+                                      :message-id message_id :source source}
+                               in_reply_to (assoc :in-reply-to in_reply_to))))))
 
 #_{:clj-kondo/ignore [:unused-binding]}
 (defn ^{:mcp-name "set_session_alias" :mcp-type :tool}

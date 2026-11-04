@@ -42,12 +42,15 @@
       (runner/tick! config-b dependencies-b)
       (remote/enqueue! config-a {:source (:id codex-a) :target (:id claude-b)
                                  :message "Synthetic cross-runner request"
-                                 :message-id "runner-message-1"})
+                                 :message-id "runner-message-1"
+                                 :seq 4 :in-reply-to "runner-message-0"})
       (is (= {:delivered 1 :failed 0 :retry-later 0}
              (runner/tick! config-b dependencies-b)))
+      ;; The sender's channel sequence and in-reply-to id cross the broker.
       (is (= [{:source (:id codex-a) :target (:id claude-b)
                :message "Synthetic cross-runner request"
-               :message-id "runner-message-1"}]
+               :message-id "runner-message-1"
+               :seq 4 :in-reply-to "runner-message-0"}]
              @delivered-b))
       (remote/enqueue! config-a {:source (:id codex-a) :target (:id codex-b)
                                  :message "Synthetic Codex review request"

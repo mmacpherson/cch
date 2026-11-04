@@ -324,13 +324,39 @@
   [^Broker broker request]
   (set-alias-as! broker (assoc request :require-owned-route? false)))
 
+(defn validate-sequencing!
+  "Check the optional channel sequence and in-reply-to id a sending runner
+  attaches. Shared by the in-memory and Postgres brokers."
+  [{:keys [seq in-reply-to]}]
+  (when (and (some? seq) (not (and (integer? seq) (pos? seq))))
+    (throw (ex-info "seq is invalid" {:type :invalid-message :field :seq})))
+  (when (and (some? in-reply-to) (not (valid-label? in-reply-to)))
+    (throw (ex-info "in_reply_to is invalid"
+                    {:type :invalid-message :field :in-reply-to}))))
+
+(defn earliest-per-target
+  "Keep only the earliest message for each target route, in delivery order.
+  Delivery to one target is strictly sequential: a later message is never
+  leased while an earlier one to the same target is still undelivered, so a
+  transient failure cannot let it overtake."
+  [messages]
+  (->> messages
+       (sort-by (juxt :created-at :message-id))
+       (reduce (fn [[seen kept] message]
+                 (if (contains? seen (:target message))
+                   [seen kept]
+                   [(conj seen (:target message)) (conj kept message)]))
+               [#{} []])
+       second))
+
 (defn- enqueue-as!
   [^Broker broker
    {:keys [source target message message-id ttl-ms source-runner
-           require-owned-source?]}]
+           require-owned-source? seq in-reply-to] :as request}]
   (doseq [[field value] [[:source source] [:target target] [:message-id message-id]]]
     (when-not (valid-label? value)
       (throw (ex-info (str (name field) " is invalid") {:type :invalid-message :field field}))))
+  (validate-sequencing! request)
   (when (str/blank? message)
     (throw (ex-info "message is required" {:type :invalid-message})))
   (when (str/starts-with? (str/triml message) "/")
@@ -365,18 +391,20 @@
              :status "duplicate" :original-status (:status prior)}
             (throw (ex-info "message_id was already used with different content or routing"
                             {:type :message-id-conflict :message-id message-id})))
-          (let [envelope {:message-id message-id
-                          :source source
-                          :source-runner source-runner
-                          :target target
-                          :target-runner target-owner
-                          :body message
-                          :content-sha256 digest
-                          :status "queued"
-                          :attempts 0
-                          :created-at timestamp
-                          :next-at timestamp
-                          :expires-at (+ timestamp ttl-ms)}]
+          (let [envelope (cond-> {:message-id message-id
+                                  :source source
+                                  :source-runner source-runner
+                                  :target target
+                                  :target-runner target-owner
+                                  :body message
+                                  :content-sha256 digest
+                                  :status "queued"
+                                  :attempts 0
+                                  :created-at timestamp
+                                  :next-at timestamp
+                                  :expires-at (+ timestamp ttl-ms)}
+                           seq (assoc :seq seq)
+                           in-reply-to (assoc :in-reply-to in-reply-to))]
             (reset! (:state broker) (assoc-in state [:messages message-id] envelope))
             {:message-id message-id :source source :target target
              :transport "broker-memory" :status "queued"}))))))
@@ -401,8 +429,9 @@
                              :require-owned-source? false)))
 
 (defn poll!
-  "Lease up to limit due envelopes for one runner. Unacked leases become due
-  after ack-timeout-ms, stopping at max-attempts or message expiry."
+  "Lease up to limit due envelopes for one runner, at most one per target
+  route: the earliest undelivered one. Unacked leases become due after
+  ack-timeout-ms, stopping at max-attempts or message expiry."
   [^Broker broker {:keys [runner-id token limit]}]
   (authorize! broker runner-id token)
   (let [timestamp (now broker)
@@ -417,10 +446,10 @@
         (let [due (->> (:messages state)
                        vals
                        (filter #(and (= runner-id (:target-runner %))
-                                     (not (terminal-status? (:status %)))
-                                     (<= (:next-at %) timestamp)
+                                     (not (terminal-status? (:status %)))))
+                       earliest-per-target
+                       (filter #(and (<= (:next-at %) timestamp)
                                      (< (:attempts %) (get-in broker [:options :max-attempts]))))
-                       (sort-by (juxt :created-at :message-id))
                        (take limit)
                        vec)
               leased (mapv #(-> %
@@ -434,6 +463,7 @@
                                  state leased)]
           (reset! (:state broker) next-state)
           {:messages (mapv #(select-keys % [:message-id :source :target :body
+                                            :seq :in-reply-to
                                             :attempts :expires-at])
                            leased)})))))
 

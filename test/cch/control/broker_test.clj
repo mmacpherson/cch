@@ -438,3 +438,53 @@
                   (broker/read-usage!
                     b {:runner-id "runner-a" :token "synthetic-token-a"
                        :after-cursor 0 :limit 10}))))))
+
+(deftest delivery-to-one-target-is-strictly-ordered
+  (let [clock (atom 1000)
+        b (broker/new-broker runner-tokens {:now-fn #(deref clock)
+                                            :ack-timeout-ms 100})
+        source "codex:00000000-0000-0000-0000-00000000000a"
+        codex-b "codex:00000000-0000-0000-0000-00000000000b"
+        claude-c "claude:00000000-0000-0000-0000-00000000000c"
+        send! (fn [id target & {:as extra}]
+                (swap! clock inc)
+                (broker/enqueue! b (merge {:runner-id "runner-a" :token "synthetic-token-a"
+                                           :source source :target target
+                                           :message (str "Synthetic " id) :message-id id}
+                                          extra)))
+        poll! #(mapv :message-id
+                     (:messages (broker/poll! b {:runner-id "runner-b"
+                                                 :token "synthetic-token-b"})))
+        ack! #(broker/ack! b {:runner-id "runner-b" :token "synthetic-token-b"
+                              :message-id % :status "delivered"})]
+    (register-pair! b)
+    (send! "first" codex-b :seq 1)
+    (send! "second" codex-b :seq 2 :in-reply-to "earlier")
+    (send! "other-target" claude-c)
+    (is (= ["first" "other-target"] (poll!))
+        "each target gets only its earliest undelivered message")
+    (is (= [] (poll!)) "a later message never overtakes one in flight")
+    (swap! clock + 200)
+    (is (= ["first" "other-target"] (poll!))
+        "an unacknowledged message is retried before its successors")
+    (ack! "first")
+    (ack! "other-target")
+    (let [[message] (:messages (broker/poll! b {:runner-id "runner-b"
+                                                :token "synthetic-token-b"}))]
+      (is (= "second" (:message-id message)))
+      (is (= 2 (:seq message)))
+      (is (= "earlier" (:in-reply-to message))))))
+
+(deftest sequencing-fields-are-validated
+  (let [b (broker/new-broker runner-tokens)
+        base {:runner-id "runner-a" :token "synthetic-token-a"
+              :source "codex:00000000-0000-0000-0000-00000000000a"
+              :target "codex:00000000-0000-0000-0000-00000000000b"
+              :message "Synthetic" :message-id "m1"}]
+    (register-pair! b)
+    (doseq [bad [{:seq 0} {:seq -1} {:seq "7"} {:in-reply-to ""}
+                 {:in-reply-to "line\nbreak"}]]
+      (is (= :invalid-message
+             (try (broker/enqueue! b (merge base bad))
+                  (catch clojure.lang.ExceptionInfo error (:type (ex-data error)))))
+          (pr-str bad)))))

@@ -33,7 +33,8 @@
   [[nil "--to ROUTE" "Destination route id"]
    [nil "--message TEXT" "Plain-text message"]
    [nil "--source ROUTE" "Source route id (otherwise inferred)"]
-   [nil "--message-id ID" "Stable id for an idempotent retry"]])
+   [nil "--message-id ID" "Stable id for an idempotent retry"]
+   [nil "--in-reply-to ID" "Id of the cch message this one answers"]])
 
 (def ^:private broker-options
   [[nil "--host HOST" "Loopback listener for private HTTPS proxy"
@@ -274,7 +275,8 @@
       (control/send-message! {:target (:to options)
                               :message (:message options)
                               :source (:source options)
-                              :message-id (:message-id options)}))))
+                              :message-id (:message-id options)
+                              :in-reply-to (:in-reply-to options)}))))
 
 (defn- refresh-mcp! [args]
   (case (first args)

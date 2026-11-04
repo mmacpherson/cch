@@ -156,3 +156,24 @@
                (catch clojure.lang.ExceptionInfo error
                  (:type (ex-data error)))))
           (name field)))))
+
+(deftest in-reply-to-is-forwarded-in-either-spelling
+  (doseq [field [:in_reply_to :in-reply-to]]
+    (let [sent (atom nil)]
+      (with-redefs [mcp/caller-agent (constantly "claude")
+                    control/send-message!
+                    (fn [request]
+                      (reset! sent request)
+                      (assoc request :status "submitted"))]
+        (mcp/send-message {:target "codex:thread-1"
+                           :message "Synthetic reply"
+                           field "message-0"})
+        (is (= "message-0" (:in-reply-to @sent)) (name field))))))
+
+(deftest in-reply-to-aliases-cannot-both-be-given
+  (with-redefs [mcp/caller-agent (constantly "claude")]
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (mcp/send-message {:target "codex:thread-1"
+                                    :message "Synthetic reply"
+                                    :in_reply_to "a"
+                                    :in-reply-to "b"})))))

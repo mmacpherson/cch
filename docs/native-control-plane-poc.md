@@ -149,7 +149,8 @@ The runner refreshes only `id`, agent family, availability, and coarse native
 status. It omits names, cwd values, PIDs, sockets, provider credentials, and
 transcript data. The broker accepts only ordinary text messages, retries
 unacknowledged delivery three times within a short expiry window, and drops the
-body after a terminal acknowledgement or expiry. Pairing tokens are never
+body after a terminal acknowledgement or expiry. It leases only the earliest
+undelivered message per destination, so a retried message is never overtaken. Pairing tokens are never
 written to this repository or printed by the broker.
 
 Unsetting the three `CCH_CONTROL_*` runner values returns cch to local-only

@@ -123,13 +123,22 @@ opaque route identifier.
 The message protocol is intentionally narrower than terminal control:
 
 1. An authenticated local caller supplies a source route, destination route,
-   stable message id, and ordinary text.
-2. The broker validates that the source belongs to the caller's runner and
+   stable message id, ordinary text, and optionally the id of the message it
+   answers.
+2. The sending runner numbers the message on its source→destination channel.
+3. The broker validates that the source belongs to the caller's runner and
    creates an idempotent delivery record.
-3. The destination runner leases the message.
-4. Its native adapter injects text using the provider-supported session API.
-5. The runner acknowledges delivery or a terminal failure.
-6. The broker retains delivery metadata, not a durable message body.
+4. The destination runner leases the message. The broker leases only the
+   earliest undelivered message per destination, so delivery to one session
+   is strictly ordered.
+5. Its native adapter injects text using the provider-supported session API,
+   under a header naming the source, id, sequence, and reply target. A Codex
+   turn in progress receives the text by steering; an idle thread queues it.
+6. The runner acknowledges delivery or a terminal failure.
+7. The broker retains delivery metadata, not a durable message body.
+
+[docs/agent-messaging.md](docs/agent-messaging.md) describes the header and the
+conventions agents follow on top of it.
 
 Commands, approval decisions, keystrokes, terminal input, and credentials are
 rejected at this boundary. Rich interaction belongs in the native interface.

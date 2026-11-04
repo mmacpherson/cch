@@ -21,7 +21,8 @@
                               (postgres/migration-6-statements "cch_control")
                               (postgres/migration-7-statements "cch_control")
                               (postgres/migration-8-statements "cch_control")
-                              (postgres/migration-9-statements "cch_control")))]
+                              (postgres/migration-9-statements "cch_control")
+                              (postgres/migration-10-statements "cch_control")))]
     (is (str/includes? ddl "content_sha256"))
     (is (str/includes? ddl "lease_expires_at"))
     (is (str/includes? ddl "awaiting-replay"))
@@ -32,6 +33,8 @@
     (is (str/includes? ddl "local_ui_url"))
     (is (str/includes? ddl "activity_observations"))
     (is (str/includes? ddl "activity_observations_runner_idx"))
+    (is (str/includes? ddl "channel_seq"))
+    (is (str/includes? ddl "in_reply_to"))
     (is (str/includes? ddl "used_percentage"))
     (is (not (re-find #"(?i)\b(session_id|runner_id|account|hostname|path|payload)\b"
                       (str/join "\n" (postgres/migration-5-statements
@@ -244,6 +247,31 @@
                             b1 "postgres-operator-message"))))
           (is (nil? (api/operator-message-metadata b1 "postgres-message-1")))
 
+          ;; Delivery to one target is strictly ordered, and the sender's
+          ;; channel sequence and in-reply-to id survive the round trip.
+          (doseq [[id extra] [["postgres-order-a" {:seq 1}]
+                              ["postgres-order-b" {:seq 2 :in-reply-to "postgres-order-0"}]]]
+            (api/enqueue-message!
+              b1 (merge {:runner-id "runner-a" :token "synthetic-token-a"
+                         :source source :target target
+                         :message (str "Synthetic " id) :message-id id}
+                        extra)))
+          (let [poll! #(:messages (api/poll-messages!
+                                    b1 {:runner-id "runner-b" :token "synthetic-token-b"}))
+                ack! #(api/ack-message!
+                        b1 {:runner-id "runner-b" :token "synthetic-token-b"
+                            :message-id % :status "delivered"})
+                [first-message :as first-poll] (poll!)]
+            (is (= [["postgres-order-a" 1]]
+                   (mapv (juxt :message-id :seq) first-poll)))
+            (is (empty? (poll!)) "the successor waits for the in-flight head")
+            (ack! (:message-id first-message))
+            (let [[second-message :as second-poll] (poll!)]
+              (is (= 1 (count second-poll)))
+              (is (= ["postgres-order-b" 2 "postgres-order-0"]
+                     ((juxt :message-id :seq :in-reply-to) second-message)))
+              (ack! (:message-id second-message))))
+
           ;; Leave a second body queued, then restart the broker. Only its
           ;; digest/route metadata survives; an identical retry rehydrates it.
           (api/enqueue-message!
@@ -335,7 +363,7 @@
                                    "\".schema_migrations")]
                              {:builder-fn rs/as-unqualified-lower-maps})]
               (is (every? true? results))
-              (is (= 9 (:count versions)))
+              (is (= 10 (:count versions)))
               (is (not-any? #{"body" "token" "credential" "transcript"}
                             (map :column_name columns))))))
         (finally

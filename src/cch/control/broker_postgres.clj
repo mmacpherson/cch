@@ -178,6 +178,18 @@
      (str "CREATE INDEX IF NOT EXISTS activity_observations_runner_idx ON "
           observations " (runner_id,observed_at DESC,cursor DESC)")]))
 
+(defn migration-10-statements
+  "Carry the sending runner's channel sequence and in-reply-to id with each
+  envelope. Both are nullable: older runners send neither."
+  [schema]
+  (let [messages (table (schema-name schema) "messages")]
+    [(str "ALTER TABLE " messages
+          " ADD COLUMN IF NOT EXISTS channel_seq bigint CHECK (channel_seq IS NULL OR channel_seq > 0)")
+     (str "ALTER TABLE " messages
+          " ADD COLUMN IF NOT EXISTS in_reply_to text CHECK (in_reply_to IS NULL OR char_length(in_reply_to) BETWEEN 1 AND 512)")
+     (str "CREATE INDEX IF NOT EXISTS messages_target_order_idx ON " messages
+          " (target_runner, target_route, created_at, message_id)")]))
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -246,7 +258,11 @@
         (when-not (contains? applied 9)
           (doseq [statement (migration-9-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (9)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (9)")]))
+        (when-not (contains? applied 10)
+          (doseq [statement (migration-10-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (10)")]))))
     true))
 
 (defn datasource
@@ -519,8 +535,9 @@
 (defn- enqueue-as!
   [^PostgresBroker broker
    {:keys [source target message message-id ttl-ms source-runner
-           require-owned-source?] :as request}]
+           require-owned-source? seq in-reply-to] :as request}]
   (validate-envelope! request)
+  (memory/validate-sequencing! request)
   (let [timestamp-value (now broker)
         digest (store/content-digest message)
         ttl-ms (memory/clamp (or ttl-ms (get-in broker [:options :message-ttl-ms]))
@@ -579,11 +596,12 @@
                       (jdbc/execute!
                         tx [(str "INSERT INTO " messages
                                  " (message_id,source_route,source_runner,target_route,target_runner,"
-                                 "content_sha256,status,attempts,created_at,next_attempt_at,expires_at)"
-                                 " VALUES (?,?,?,?,?,?,'queued',0,?,?,?)")
+                                 "content_sha256,status,attempts,created_at,next_attempt_at,expires_at,"
+                                 "channel_seq,in_reply_to)"
+                                 " VALUES (?,?,?,?,?,?,'queued',0,?,?,?,?,?)")
                             message-id source source-runner target target-owner digest
                             (timestamp timestamp-value) (timestamp timestamp-value)
-                            (timestamp expires)])
+                            (timestamp expires) seq in-reply-to])
                       {:discard discard :store-body? true
                        :value {:message-id message-id :source source :target target
                                :transport "broker-postgres" :status "queued"}})))))]
@@ -625,14 +643,29 @@
                   (when-not runner
                     (throw (ex-info "Runner lease is absent or expired"
                                     {:type :runner-not-registered})))
-                  (let [candidates
-                        (rows tx [(str "SELECT message_id,source_route,target_route,attempts,expires_at"
-                                       " FROM " messages
-                                       " WHERE target_runner=? AND status IN ('queued','in-flight')"
-                                       " AND next_attempt_at<=? AND attempts<?"
-                                       " ORDER BY created_at,message_id FOR UPDATE SKIP LOCKED LIMIT 100")
-                                  runner-id (timestamp timestamp-value)
-                                  (get-in broker [:options :max-attempts])])
+                  (let [;; Delivery to one target is strictly sequential:
+                        ;; only each target's earliest undelivered envelope
+                        ;; is a candidate, so a later one never overtakes an
+                        ;; earlier one that is in flight or awaiting replay.
+                        heads (mapv :message_id
+                                    (rows tx [(str "SELECT DISTINCT ON (target_route) message_id"
+                                                   " FROM " messages
+                                                   " WHERE target_runner=?"
+                                                   " AND status IN ('queued','in-flight','awaiting-replay')"
+                                                   " ORDER BY target_route,created_at,message_id")
+                                              runner-id]))
+                        candidates
+                        (if (empty? heads)
+                          []
+                          (rows tx [(str "SELECT message_id,source_route,target_route,attempts,"
+                                         "expires_at,channel_seq,in_reply_to"
+                                         " FROM " messages
+                                         " WHERE message_id = ANY(?)"
+                                         " AND status IN ('queued','in-flight')"
+                                         " AND next_attempt_at<=? AND attempts<?"
+                                         " ORDER BY created_at,message_id FOR UPDATE SKIP LOCKED LIMIT 100")
+                                    (into-array String heads) (timestamp timestamp-value)
+                                    (get-in broker [:options :max-attempts])]))
                         [present missing]
                         ((juxt #(filter (fn [candidate]
                                          (contains? @(:bodies broker)
@@ -659,12 +692,14 @@
                      :value {:messages
                              (mapv
                                (fn [{:keys [message_id source_route target_route
-                                            attempts expires_at]}]
-                                 {:message-id message_id :source source_route
-                                  :target target_route
-                                  :body (get @(:bodies broker) message_id)
-                                  :attempts (inc attempts)
-                                  :expires-at (epoch-millis expires_at)})
+                                            attempts expires_at channel_seq in_reply_to]}]
+                                 (cond-> {:message-id message_id :source source_route
+                                          :target target_route
+                                          :body (get @(:bodies broker) message_id)
+                                          :attempts (inc attempts)
+                                          :expires-at (epoch-millis expires_at)}
+                                   channel_seq (assoc :seq channel_seq)
+                                   in_reply_to (assoc :in-reply-to in_reply_to)))
                                leased)}}))))]
         (discard-bodies! broker discard)
         value))))

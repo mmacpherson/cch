@@ -35,6 +35,11 @@
    (str "CREATE TABLE IF NOT EXISTS control_deliveries ("
         "message_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
         "content_sha256 TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)")
+   (str "CREATE TABLE IF NOT EXISTS control_message_seqs ("
+        "message_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
+        "seq INTEGER NOT NULL, created_at INTEGER NOT NULL)")
+   (str "CREATE UNIQUE INDEX IF NOT EXISTS idx_control_message_seqs_channel "
+        "ON control_message_seqs(source, target, seq)")
    (str "CREATE TABLE IF NOT EXISTS control_codex_bindings ("
         "tool_use_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
         "message_id TEXT, content_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL,"
@@ -152,6 +157,27 @@
     ["INSERT OR IGNORE INTO control_deliveries (message_id, source, target, content_sha256, status, created_at) VALUES (?, ?, ?, ?, ?, ?)"
      message-id source target content-sha256 status (System/currentTimeMillis)])
   (delivery message-id))
+
+(defn assign-seq!
+  "Return the channel sequence number for one outgoing message: the next
+  integer on its (source, target) channel, or the number already assigned when
+  the same message id is sent again. The single INSERT ... SELECT keeps the
+  increment atomic within SQLite. Two processes racing on one channel collide
+  on the unique channel index; the loser's insert is ignored and it retries."
+  [{:keys [message-id source target]}]
+  (loop [attempt 1]
+    (execute!
+      [(str "INSERT OR IGNORE INTO control_message_seqs"
+            " (message_id, source, target, seq, created_at)"
+            " SELECT ?, ?, ?, COALESCE(MAX(seq), 0) + 1, ? FROM control_message_seqs"
+            " WHERE source=? AND target=?")
+       message-id source target (System/currentTimeMillis) source target])
+    (let [assigned (:seq (first (execute!
+                                  ["SELECT seq FROM control_message_seqs WHERE message_id=?"
+                                   message-id])))]
+      (if (or assigned (>= attempt 5))
+        assigned
+        (recur (inc attempt))))))
 
 (defn record-codex-binding!
   "Record the trusted Codex hook observation that precedes one cch MCP call.

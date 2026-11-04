@@ -3,7 +3,8 @@
 
   The control plane uses only typed app-server methods. It does not spawn or
   wrap agent TUIs and never reads rollout transcript contents."
-  (:require [cch.control.unix-websocket :as websocket]
+  (:require [cch.control.envelope :as envelope]
+            [cch.control.unix-websocket :as websocket]
             [cheshire.core :as json]
             [clojure.string :as str])
   (:import [java.io EOFException]))
@@ -228,10 +229,36 @@
          :status "refreshed"
          :tools (sort cch-tool-names)}))))
 
+(defn- in-progress-turn-id
+  "Return the id of the thread's running turn, or nil when it has none. Turns
+  list newest first by default; only the latest can be in progress."
+  [client native-id]
+  (let [{:keys [data]} (rpc! client "thread/turns/list"
+                             {:threadId native-id :limit 1 :itemsView "notLoaded"})
+        {:keys [id status]} (first data)]
+    (when (= "inProgress" status) id)))
+
+(defn- steer!
+  "Add input to the running turn. Returns nil when the turn ended between the
+  lookup and the request, which the expectedTurnId precondition reports as an
+  RPC error, so the caller can queue instead."
+  [client native-id turn-id params]
+  (try
+    (rpc! client "turn/steer" (assoc params
+                                     :threadId native-id
+                                     :expectedTurnId turn-id))
+    :steered
+    (catch clojure.lang.ExceptionInfo error
+      (when-not (= :codex-rpc-error (:type (ex-data error)))
+        (throw error)))))
+
 (defn send!
-  "Queue normal text input to an active Codex thread. The app-server's
-  clientUserMessageId is the caller's stable id, providing native deduping."
-  [{:keys [route-id message message-id source]}]
+  "Deliver normal text input to a Codex thread. While the thread runs a turn
+  the text is steered into that turn, so the agent sees it at its next model
+  step rather than after the turn ends; an idle thread gets it queued, which
+  starts a turn. The app-server's clientUserMessageId is the caller's stable
+  id, providing native deduping."
+  [{:keys [route-id message-id source] :as envelope}]
   (let [native-id (some-> route-id (str/replace-first #"^codex:" ""))]
     (when (= native-id route-id)
       (throw (ex-info (str "Invalid Codex route: " route-id)
@@ -245,11 +272,14 @@
           (when-not (:available session)
             (throw (ex-info (str "Codex session cannot accept direct input: " route-id)
                             {:type :stale-session :target route-id})))
-          (rpc! client "thread/queue/add"
-                {:threadId native-id
-                 :clientUserMessageId message-id
-                 :input [{:type "text"
-                          :text (str "[cch message from " source
-                                     "; id " message-id "]\n" message)}]})
-          {:message-id message-id :source source :target route-id
-           :transport "codex-app-server" :status "submitted"})))))
+          (let [params {:clientUserMessageId message-id
+                        :input [{:type "text"
+                                 :text (envelope/render envelope)}]}
+                turn-id (when (= "active" (:status session))
+                          (in-progress-turn-id client native-id))
+                steered? (and turn-id (steer! client native-id turn-id params))]
+            (when-not steered?
+              (rpc! client "thread/queue/add" (assoc params :threadId native-id)))
+            {:message-id message-id :source source :target route-id
+             :transport "codex-app-server" :status "submitted"
+             :delivery (if steered? "steered" "queued")}))))))

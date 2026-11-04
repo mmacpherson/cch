@@ -98,7 +98,7 @@
        (not (re-find #"[\p{Cntrl}]" value))))
 
 (defn- validate-envelope
-  [{:keys [target message source message-id]}]
+  [{:keys [target message source message-id seq in-reply-to]}]
   (when (str/blank? target)
     (throw (ex-info "target is required" {:type :invalid-message})))
   (when (str/blank? message)
@@ -121,8 +121,15 @@
     (when-not (valid-envelope-label? source)
       (throw (ex-info "source must be 1-512 characters without control characters"
                       {:type :invalid-message})))
-    {:target target :message message :source source :message-id message-id
-     :content-sha256 (store/content-digest message)}))
+    (when (and (some? in-reply-to) (not (valid-envelope-label? in-reply-to)))
+      (throw (ex-info "in_reply_to must be 1-512 characters without control characters"
+                      {:type :invalid-message})))
+    (when (and (some? seq) (not (pos-int? seq)))
+      (throw (ex-info "seq must be a positive integer" {:type :invalid-message})))
+    (cond-> {:target target :message message :source source :message-id message-id
+             :content-sha256 (store/content-digest message)}
+      seq (assoc :seq seq)
+      in-reply-to (assoc :in-reply-to in-reply-to))))
 
 (defn- with-delivery-dedupe!
   [{:keys [target source message-id content-sha256]} deliver!]
@@ -169,18 +176,20 @@
   "Send only through a machine-local native adapter. The paired runner uses
   this entrypoint so a broker delivery can never bounce back to the broker."
   [request]
-  (let [{:keys [target message source message-id] :as envelope}
-        (validate-envelope request)]
+  (let [{:keys [target] :as envelope} (validate-envelope request)
+        native (-> envelope
+                   (select-keys [:message :message-id :source :seq :in-reply-to])
+                   (assoc :route-id target))]
     (with-delivery-dedupe!
       envelope
       #(cond
          (str/starts-with? target "claude:")
-         (claude/send! {:route-id target :message message
-                        :message-id message-id :source source})
+         (cond-> (claude/send! native)
+           (:seq envelope) (assoc :seq (:seq envelope)))
 
          (str/starts-with? target "codex:")
-         (codex/send! {:route-id target :message message
-                       :message-id message-id :source source})
+         (cond-> (codex/send! native)
+           (:seq envelope) (assoc :seq (:seq envelope)))
 
          :else
          (throw (ex-info (str "Unsupported target route: " target)
@@ -235,8 +244,11 @@
   through the optional paired broker when another runner owns it. There is
   deliberately no raw-frame or approval-response API."
   [request]
-  (let [{:keys [target message source message-id] :as envelope}
-        (validate-envelope request)
+  (let [envelope (validate-envelope (dissoc request :seq))
+        ;; The sending runner owns its routes' outgoing channels, so it alone
+        ;; numbers them. Receiving runners deliver the number they are given.
+        envelope (assoc envelope :seq (store/assign-seq! envelope))
+        {:keys [target message source message-id seq in-reply-to]} envelope
         local-sessions (:sessions (list-local-sessions))
         local-ids (set (map :id local-sessions))
         config (remote/config)]
@@ -244,13 +256,17 @@
             (nil? config)
             (nil? (remote-target config target)))
       (send-local-message! (select-keys envelope
-                                        [:target :message :source :message-id]))
+                                        [:target :message :source :message-id
+                                         :seq :in-reply-to]))
       (with-remote-delivery-dedupe!
         envelope
         #(try
-           (remote/enqueue! config
-                            {:target target :message message
-                             :source source :message-id message-id})
+           (assoc (remote/enqueue! config
+                                   (cond-> {:target target :message message
+                                            :source source :message-id message-id
+                                            :seq seq}
+                                     in-reply-to (assoc :in-reply-to in-reply-to)))
+                  :seq seq)
            (catch clojure.lang.ExceptionInfo error
              (if (= :invalid-source (:type (ex-data error)))
                (throw (ex-info (unleased-source-explanation

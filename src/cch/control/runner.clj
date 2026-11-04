@@ -53,12 +53,14 @@
         live-sessions (filterv :available (:sessions presence))]
     (remote/register! config live-sessions)
     (reduce
-      (fn [result {:keys [message-id source target body]}]
+      (fn [result {:keys [message-id source target body seq in-reply-to]}]
         (try
-          (deliver-local! {:message-id message-id
-                           :source source
-                           :target target
-                           :message body})
+          (deliver-local! (cond-> {:message-id message-id
+                                   :source source
+                                   :target target
+                                   :message body}
+                            seq (assoc :seq seq)
+                            in-reply-to (assoc :in-reply-to in-reply-to)))
           (remote/ack! config message-id "delivered")
           (update result :delivered inc)
           (catch clojure.lang.ExceptionInfo error

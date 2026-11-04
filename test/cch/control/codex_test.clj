@@ -116,3 +116,75 @@
         (is (= :codex-daemon-timeout (:type (ex-data error))))
         (is (deref closed 1000 false)
             "the socket is closed so the abandoned worker unblocks")))))
+
+(defn- thread-transport [status & responses]
+  (->FakeTransport
+    (atom (into [{:id 1 :result {}}
+                 {:id 2 :result {:data ["thread-1"]}}
+                 {:id 3 :result {:thread {:id "thread-1"
+                                          :cwd "/synthetic/project"
+                                          :status status
+                                          :canAcceptDirectInput nil
+                                          :source "cli"}}}]
+                (map-indexed (fn [i response] (assoc response :id (+ 4 i))))
+                responses))
+    (atom [])))
+
+(defn- send-through! [transport]
+  (binding [codex/*connect!* (fn [_] transport)]
+    (codex/send! {:route-id "codex:thread-1"
+                  :message "Synthetic ping"
+                  :message-id "message-1"
+                  :source "claude:session-1"
+                  :seq 3
+                  :in-reply-to "message-0"})))
+
+(defn- requests [transport]
+  (filterv :method @(:requests transport)))
+
+(deftest a-running-turn-is-steered-instead-of-queued
+  (let [transport (thread-transport
+                    {:type "active" :activeFlags []}
+                    {:result {:data [{:id "turn-9" :status "inProgress" :items []}]}}
+                    {:result {:turnId "turn-9"}})
+        result (send-through! transport)
+        [turns steer] (drop 4 (requests transport))]
+    (is (= "steered" (:delivery result)))
+    (is (= "thread/turns/list" (:method turns)))
+    (is (= "notLoaded" (get-in turns [:params :itemsView]))
+        "the lookup never loads transcript items")
+    (is (= "turn/steer" (:method steer)))
+    (is (= {:threadId "thread-1" :expectedTurnId "turn-9"
+            :clientUserMessageId "message-1"
+            :input [{:type "text"
+                     :text (str "[cch message from claude:session-1; id message-1;"
+                                " seq 3; re message-0]\nSynthetic ping")}]}
+           (:params steer)))
+    (is (= 6 (count (requests transport))) "no queue/add after a steer")))
+
+(deftest a-turn-that-ends-before-the-steer-falls-back-to-the-queue
+  (let [transport (thread-transport
+                    {:type "active" :activeFlags []}
+                    {:result {:data [{:id "turn-9" :status "inProgress" :items []}]}}
+                    {:error {:message "expected turn is not active"}}
+                    {:result {}})
+        result (send-through! transport)]
+    (is (= "queued" (:delivery result)))
+    (is (= ["thread/turns/list" "turn/steer" "thread/queue/add"]
+           (mapv :method (drop 4 (requests transport)))))))
+
+(deftest an-idle-thread-is-queued-without-a-turn-lookup
+  (let [transport (thread-transport {:type "idle"} {:result {}})
+        result (send-through! transport)]
+    (is (= "queued" (:delivery result)))
+    (is (= ["thread/queue/add"] (mapv :method (drop 4 (requests transport)))))))
+
+(deftest an-active-thread-without-a-running-turn-is-queued
+  (let [transport (thread-transport
+                    {:type "active" :activeFlags ["waitingOnUserInput"]}
+                    {:result {:data [{:id "turn-8" :status "completed" :items []}]}}
+                    {:result {}})
+        result (send-through! transport)]
+    (is (= "queued" (:delivery result)))
+    (is (= ["thread/turns/list" "thread/queue/add"]
+           (mapv :method (drop 4 (requests transport)))))))

@@ -1,6 +1,7 @@
 (ns cch.control.claude
   "Claude Code native session discovery, registration, and inbox delivery."
   (:require [babashka.fs :as fs]
+            [cch.control.envelope :as envelope]
             [cch.control.store :as store]
             [cch.subprocess :as subprocess]
             [cheshire.core :as json]
@@ -158,7 +159,7 @@
 (defn send!
   "Inject a normal user message through Claude's native inbox. This function
   has no parameter for control responses, permissions, or raw protocol frames."
-  [{:keys [route-id message message-id source]}]
+  [{:keys [route-id message-id source] :as envelope}]
   (let [{:keys [socket_path auth_token native_id] :as session}
         (store/claude-session route-id)]
     (when-not session
@@ -173,8 +174,7 @@
                  :msg_id message-id
                  :priority "next"
                  :message {:role "user"
-                           :content (str "[cch message from " source
-                                         "; id " message-id "]\n" message)}}]
+                           :content (envelope/render envelope)}}]
       (with-open [channel (SocketChannel/open StandardProtocolFamily/UNIX)]
         (.connect channel (UnixDomainSocketAddress/of socket_path))
         (let [writer (Channels/newWriter channel (.newEncoder StandardCharsets/UTF_8) -1)]
