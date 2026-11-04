@@ -20,7 +20,8 @@
     (with-redefs [store/record-codex-binding!
                   (fn [value] (reset! recorded value))]
       (let [response (binding/bind! synthetic-payload)]
-        (is (= {:tool-use-id "tool-call-1"
+        (is (= {:agent "codex"
+                :tool-use-id "tool-call-1"
                 :session-id "thread-1"
                 :target "claude:session-1"
                 :message-id "message-1"
@@ -67,7 +68,8 @@
                   #(reset! recorded %)]
       (let [updated (get-in (binding/bind! payload)
                             [:hookSpecificOutput :updatedInput])]
-        (is (= {:tool-use-id "alias-call-1"
+        (is (= {:agent "codex"
+                :tool-use-id "alias-call-1"
                 :session-id "thread-1"
                 :alias "Review pair"}
                @recorded))

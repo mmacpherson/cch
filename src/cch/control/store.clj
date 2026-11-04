@@ -180,9 +180,12 @@
         (recur (inc attempt))))))
 
 (defn record-codex-binding!
-  "Record the trusted Codex hook observation that precedes one cch MCP call.
-  Only routing metadata and a message digest cross this boundary."
-  [{:keys [tool-use-id session-id target message-id message]}]
+  "Record the trusted hook observation that precedes one cch MCP call. agent
+  names the provider family whose hook observed it (codex by default) and
+  prefixes the recorded source route. Only routing metadata and a message
+  digest cross this boundary."
+  [{:keys [tool-use-id session-id target message-id message agent]
+    :or {agent "codex"}}]
   (let [now (System/currentTimeMillis)]
     ;; Binding rows are immutable: replaying a hook event must never make a
     ;; consumed proof valid again.
@@ -193,7 +196,7 @@
                      [(str "INSERT OR IGNORE INTO control_codex_bindings "
                            "(tool_use_id, source, target, message_id, content_sha256, created_at, consumed_at) "
                            "VALUES (?, ?, ?, ?, ?, ?, NULL)")
-                      tool-use-id (str "codex:" session-id) target message-id
+                      tool-use-id (str agent ":" session-id) target message-id
                       (content-digest message) now]))]
       (if (= 1 (:next.jdbc/update-count result))
         tool-use-id
@@ -223,9 +226,9 @@
              tool-use-id]))))))
 
 (defn record-codex-alias-binding!
-  "Record one trusted Codex observation for a self-alias MCP call. Alias text
+  "Record one trusted hook observation for a self-alias MCP call. Alias text
   is represented only by its digest in the one-time local proof record."
-  [{:keys [tool-use-id session-id alias]}]
+  [{:keys [tool-use-id session-id alias agent] :or {agent "codex"}}]
   (let [now (System/currentTimeMillis)]
     (execute! ["DELETE FROM control_codex_alias_bindings WHERE created_at<?"
                (- now (* 24 60 60 1000))])
@@ -234,7 +237,7 @@
                      [(str "INSERT OR IGNORE INTO control_codex_alias_bindings "
                            "(tool_use_id,source,alias_sha256,created_at,consumed_at) "
                            "VALUES (?,?,?,?,NULL)")
-                      tool-use-id (str "codex:" session-id)
+                      tool-use-id (str agent ":" session-id)
                       (content-digest (or alias "")) now]))]
       (if (= 1 (:next.jdbc/update-count result))
         tool-use-id

@@ -14,7 +14,11 @@ sender cannot forge:
 [cch message from codex:<thread>; id <message-id>; seq 7; re <earlier-id>]
 ```
 
-- **from** is the sending session's route, verified by cch.
+- **from** is the sending session's route, verified by cch. A trusted
+  PreToolUse hook observes the real session before the tool runs: Codex's
+  binding hook, or the dispatcher's `control-source` hook for Claude. A sender
+  without a session (a person at the CLI or the web switchboard) shows as
+  `operator`, and replies cannot be routed to it.
 - **id** is the message id. Retrying with the same id is idempotent.
 - **seq** numbers messages on one sender→recipient channel: 1, 2, 3, …
   The sending machine assigns it. A resent id keeps its number, and a gap

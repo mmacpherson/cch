@@ -67,6 +67,12 @@
                     :event       "PostToolUse"
                     :matcher     "Edit"
                     :description "Detects doubled tokens (rename artifacts) in edited files"}
+   "control-source"
+                   {:type        :code
+                    :ns          "hooks.control-source"
+                    :event       "PreToolUse"
+                    :matcher     "^mcp__cch__(send_message|set_session_alias)$"
+                    :description "Binds Claude cch messages to the sending session"}
    "codex-usage-capture"
                    {:type        :code
                     :ns          "hooks.codex-usage-capture"

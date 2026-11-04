@@ -49,6 +49,21 @@
             (binding [*caller-override* caller] (handler message))
             (handler message)))))))
 
+(def ^:private hook-bound-callers
+  "Caller kinds whose trusted PreToolUse hook injects a source proof: the
+  Codex binding hook, and the dispatcher's control-source hook for Claude."
+  #{"codex" "claude"})
+
+(defn- claude-source
+  "A Claude caller's route. Over HTTP the MCP server shares no environment
+  with the session, so the dispatcher's hook proof is the only identity; a
+  stdio child without one still inherits the session's environment."
+  [claim! request]
+  (if (str/blank? (:source-proof request))
+    (let [inferred (control/inferred-source)]
+      (when-not (= "operator" inferred) inferred))
+    (claim! (assoc request :agent "claude"))))
+
 (def ^:private send-message-keys
   #{:target :route :message :message_id :message-id
     :in_reply_to :in-reply-to :source_proof :source-proof})
@@ -91,9 +106,9 @@
                                [:in_reply_to :in-reply-to] "in-reply-to id")
     (reject-duplicate-aliases! "send_message" arguments
                                [:source_proof :source-proof] "source proof")
-    (when (and (not= "codex" caller)
+    (when (and (not (contains? hook-bound-callers caller))
                (some #(contains? arguments %) [:source_proof :source-proof]))
-      (throw (ex-info "source_proof is reserved for the trusted Codex hook"
+      (throw (ex-info "source_proof is reserved for trusted provider hooks"
                       {:type :unsupported-control-input
                        :fields ["source_proof"]})))
     (cond-> (apply dissoc arguments
@@ -120,9 +135,9 @@
                 :fields (vec (sort (map name unsupported)))})))
     (reject-duplicate-aliases! "set_session_alias" arguments
                                [:source_proof :source-proof] "source proof")
-    (when (and (not= "codex" caller)
+    (when (and (not (contains? hook-bound-callers caller))
                (some #(contains? arguments %) [:source_proof :source-proof]))
-      (throw (ex-info "source_proof is reserved for the trusted Codex hook"
+      (throw (ex-info "source_proof is reserved for trusted provider hooks"
                       {:type :unsupported-control-input
                        :fields ["source_proof"]})))
     (cond-> (apply dissoc arguments :source-proof
@@ -162,7 +177,7 @@
            ^{:doc "Id of the cch message this one answers, from its header"
              :type "string" :required? false}
            in_reply_to
-           ^{:doc "Reserved Codex hook proof; callers must not supply this field"
+           ^{:doc "Reserved hook proof; callers must not supply this field"
              :type "string" :required? false}
            source_proof]
     :as arguments}]
@@ -175,7 +190,11 @@
                             :target target
                             :message-id message_id
                             :message message})
-                 ;; Claude exposes its session identity to the MCP child.
+                 "claude" (claude-source codex-binding/claim-source!
+                                         {:source-proof source_proof
+                                          :target target
+                                          :message-id message_id
+                                          :message message})
                  ;; Unknown/manual callers retain the explicit operator path.
                  nil)]
     (tool-result
@@ -192,7 +211,7 @@
   [{:keys [^{:doc "Short broker-visible alias; empty text clears it"
              :type "string"}
            alias
-           ^{:doc "Reserved Codex hook proof; callers must not supply this field"
+           ^{:doc "Reserved hook proof; callers must not supply this field"
              :type "string" :required? false}
            source_proof]
     :as arguments}]
@@ -202,7 +221,11 @@
         route-id (case caller
                    "codex" (codex-binding/claim-alias-source!
                              {:source-proof source_proof :alias alias})
-                   "claude" (control/inferred-source)
+                   "claude" (or (claude-source codex-binding/claim-alias-source!
+                                               {:source-proof source_proof
+                                                :alias alias})
+                                (throw (ex-info "Claude caller identity is unavailable"
+                                                {:type :unbound-session-source})))
                    (throw (ex-info "Session aliases require a native agent caller"
                                    {:type :unbound-session-source})))]
     (tool-result (control/set-session-alias! {:route-id route-id
