@@ -50,7 +50,8 @@
   (let [directory (fs/create-temp-dir {:prefix "cch-doctor-missing-test-"})
         report
         (doctor/report
-          {:run-command (schema-runner #{"thread/loaded/list" "thread/read"})
+          {:run-command (schema-runner #{"thread/loaded/list" "thread/read"
+                                          "thread/turns/list" "turn/steer"})
            :create-temp-dir (constantly directory)
            :delete-tree fs/delete-tree
            :list-local-sessions (constantly {:sessions [] :errors []})
