@@ -650,3 +650,29 @@
                        "class=\"filter-tab active\" href=\"/usage?agent=agy\"")))
   (testing "the product name is accepted as an alias"
     (is (= "agy" (#'server/parse-agent {:agent "antigravity"})))))
+
+(deftest default-bind-is-loopback-only
+  (is (every? server/loopback? server/loopback-hosts))
+  (is (not (server/loopback? "::")))
+  (is (not (server/loopback? "0.0.0.0"))))
+
+(deftest listeners-bind-each-loopback-address
+  (testing "IPv4 loopback always binds; IPv6 loopback binds where available"
+    (let [p (free-port)
+          listeners (#'server/start-listeners!
+                      (fn [_] {:status 200 :body "ok"}) p server/loopback-hosts)]
+      (try
+        (is (= "127.0.0.1" (:host (first listeners))))
+        (is (every? server/loopback? (map :host listeners)))
+        (doseq [host (map :host listeners)
+                :let [authority (if (str/includes? host ":") (str "[" host "]") host)]]
+          (is (= 200 (:status (http/get (format "http://%s:%d/" authority p)
+                                        {:throw-exceptions false})))
+              (str "listener on " host " answers")))
+        (finally
+          (doseq [{:keys [stop]} listeners] (stop :timeout 100)))))))
+
+(deftest health-reports-bind-addresses
+  (let [body (json/parse-string (:body (http/get (url "/health"))) true)]
+    (is (= ["127.0.0.1"] (:bind body))
+        "the fixture server was started on one explicit host")))

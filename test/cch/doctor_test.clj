@@ -127,3 +127,13 @@
     (is (str/includes? out "claude-code"))
     (is (str/includes? out "codex"))
     (is (str/includes? out "agy"))))
+
+(deftest bind-note-flags-network-exposure
+  (is (= "loopback only" (doctor/bind-note ["127.0.0.1" "::1"])))
+  (is (nil? (doctor/bind-note nil)) "older servers that do not report bind say nothing")
+  (is (re-find #"reachable from the network \(::\)" (doctor/bind-note ["::"]))))
+
+(deftest render-shows-the-bind-line
+  (let [box {:server {:host "127.0.0.1" :port 8888 :reachable? true :bind ["::"]}
+             :hooks {:enabled #{}}}]
+    (is (str/includes? (doctor/render box []) "bind     ⚠ reachable from the network"))))

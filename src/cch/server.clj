@@ -650,12 +650,17 @@
                     (let [body (overview/page-body data)]
                       (into [(first body)] (cons (nav-bar :overview :custom) (rest body))))]]))}))
 
+(defonce ^:private bind-hosts
+  ;; Addresses the running dispatcher listens on, reported by /health.
+  (atom []))
+
 (defn- handle-health
   [hooks]
   {:status 200
    :headers {"Content-Type" "application/json"}
    :body (json/generate-string
            {:status "ok"
+            :bind @bind-hosts
             :hooks (mapv (fn [[n h]] {:name n :ns (:ns h) :description (:description h)})
                          (sort-by first hooks))})})
 
@@ -1252,6 +1257,36 @@
     (try (nrepl/stop-server server) (catch Exception _ nil))
     (try (fs/delete-if-exists ".nrepl-port") (catch Exception _ nil))))
 
+(def loopback-hosts
+  "Default bind addresses: IPv4 and IPv6 loopback."
+  ["127.0.0.1" "::1"])
+
+(defn loopback?
+  "True when host names a loopback address. Pure for literal addresses."
+  [host]
+  (contains? #{"127.0.0.1" "::1" "localhost"} host))
+
+(defn- url-host [host]
+  (if (str/includes? host ":") (str "[" host "]") host))
+
+(defn- start-listeners!
+  "Start one http-kit listener per host. The first host must bind; later ones
+  are best-effort, since a machine may have IPv6 loopback disabled."
+  [handler port hosts]
+  (let [[primary & others] hosts
+        first-listener {:host primary
+                        :stop (httpkit/run-server handler {:port port :ip primary})}]
+    (into [first-listener]
+          (keep (fn [host]
+                  (try
+                    {:host host
+                     :stop (httpkit/run-server handler {:port port :ip host})}
+                    (catch Exception e
+                      (println (format "cch serve: not listening on %s (%s)"
+                                       host (.getMessage e)))
+                      nil))))
+          others)))
+
 (defn start!
   "Start the httpkit server. Returns a stop-fn that gracefully shuts it down.
 
@@ -1262,11 +1297,12 @@
   When :nrepl-port is set (or arrives via -main's --nrepl flag), also
   starts an in-process nREPL on 127.0.0.1 for live re-eval of any ns.
 
-  Default host '::' binds all interfaces dual-stack on Linux/macOS so
-  both `localhost` (often resolves to IPv6 ::1 first) and 127.0.0.1
-  work without the browser eating a connection-refused retry loop.
-  Pass --host 127.0.0.1 via start args to restrict to IPv4 loopback."
-  [{:keys [port host nrepl-port] :or {port 8888 host "::"}}]
+  By default the dispatcher listens on loopback only, IPv4 and IPv6, so
+  `localhost` works whichever address it resolves to and nothing off this
+  machine can reach hook dispatch, the dashboard, or /mcp. Pass :host (or
+  --host / CCH_HOST) to listen on one explicit address instead, e.g. \"::\" to
+  open it to the network deliberately."
+  [{:keys [port host nrepl-port] :or {port 8888}}]
   (registry/validate-registry!)
   (log/start-writer!)
   (db/open-db!)
@@ -1279,11 +1315,20 @@
   (let [hooks     (build-registry)
         event-idx (build-event-index hooks)
         nrepl     (start-nrepl! nrepl-port)
-        stop-fn   (httpkit/run-server (fn [req] (route hooks event-idx req))
-                                      {:port port :ip host})]
+        handler   (fn [req] (route hooks event-idx req))
+        listeners (start-listeners! handler port (if host [host] loopback-hosts))
+        bound     (mapv :host listeners)
+        stop-fn   (fn [& args]
+                    (doseq [{:keys [stop]} listeners]
+                      (try (apply stop args) (catch Exception _ nil))))
+        host      (url-host (first bound))]
+    (reset! bind-hosts bound)
     (forecast/start-bg-refresh!)
-    (println (format "cch serve listening on http://%s:%d (%d code hook(s) loaded)"
-                     host port (count hooks)))
+    (println (format "cch serve listening on %s port %d (%d code hook(s) loaded)"
+                     (str/join ", " bound) port (count hooks)))
+    (when-not (every? loopback? bound)
+      (println "WARNING: cch serve is reachable from the network; hook dispatch,"
+               "the dashboard, and /mcp are exposed beyond this machine."))
     (doseq [[n h] (sort-by first hooks)]
       (println (format "  → %-16s %s" n (:description h))))
     (println)
@@ -1291,7 +1336,7 @@
     (println (format "Dashboard:  http://%s:%d/" host port))
     {:stop  (fn shutdown [& args]
               ;; httpkit's stop-fn takes &{:as opts}, e.g. (stop :timeout 100)
-              (try (apply stop-fn args) (catch Exception _ nil))
+              (apply stop-fn args)
               (stop-nrepl! nrepl)
               (forecast/stop-bg-refresh!)
               (db/close-db!)
@@ -1313,12 +1358,14 @@
 
   Flags:
     --port <n>     HTTP dispatcher port (default 8888)
-    --host <h>     bind address (default :: dual-stack)
+    --host <h>     one bind address; default is IPv4 + IPv6 loopback.
+                   Falls back to env CCH_HOST. \"::\" opens it to the network.
     --nrepl <n>    optional nREPL port; off when omitted.
                    Falls back to env CCH_NREPL_PORT."
   [& args]
   (let [port       (or (parse-int-opt args "--port"  "CCH_PORT")  8888)
-        host       (or (some->> args (drop-while #(not= "--host" %)) second) "::")
+        host       (not-empty (or (some->> args (drop-while #(not= "--host" %)) second)
+                                  (System/getenv "CCH_HOST")))
         nrepl-port (parse-int-opt args "--nrepl" "CCH_NREPL_PORT")
         {:keys [stop]} (start! {:port port :host host :nrepl-port nrepl-port})
         latch (promise)]

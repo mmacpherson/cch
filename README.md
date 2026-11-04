@@ -88,7 +88,10 @@ enables a provider's proprietary Remote Control feature, copies provider
 credentials, or requires per-session pairing.
 
 Open the runner-local application at `http://127.0.0.1:8888/` after starting
-the installed service. Fleet operation additionally requires a deployed broker
+the installed service. It listens on loopback only (IPv4 and IPv6) because it
+serves hook dispatch and local activity; set `CCH_HOST` (or `cch serve --host`)
+only if you deliberately want it reachable from the network, and `cch doctor`
+will warn while it is. Fleet operation additionally requires a deployed broker
 and a one-time runner pairing; deployment credentials and machine identities do
 not belong in this repository.
 

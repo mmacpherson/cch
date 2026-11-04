@@ -119,6 +119,29 @@
       true)
     (catch Exception _ false)))
 
+(defn server-bind
+  "Addresses the running dispatcher reports listening on, or nil when it is
+  unreachable or predates the report."
+  [host port]
+  (try
+    (let [conn (doto ^java.net.HttpURLConnection
+                 (.openConnection (java.net.URI/create
+                                    (format "http://%s:%d/health" host port)))
+                 (.setConnectTimeout 400)
+                 (.setReadTimeout 1000))]
+      (with-open [in (.getInputStream conn)]
+        (not-empty (:bind (json/parse-string (slurp in) true)))))
+    (catch Exception _ nil)))
+
+(defn bind-note
+  "One line about who can reach the dispatcher. Pure."
+  [bind]
+  (cond
+    (empty? bind) nil
+    (every? #{"127.0.0.1" "::1" "localhost"} bind) "loopback only"
+    :else (str "⚠ reachable from the network (" (str/join ", " bind)
+               "); unset --host/CCH_HOST to restrict to loopback")))
+
 (defn- read-agy-hooks [path]
   (when (fs/exists? path)
     (try (json/parse-string (slurp path)) (catch Exception _ nil))))
@@ -160,7 +183,8 @@
   code hooks are enabled globally."
   []
   {:server {:host "127.0.0.1" :port 8888
-            :reachable? (server-reachable? "127.0.0.1" 8888)}
+            :reachable? (server-reachable? "127.0.0.1" 8888)
+            :bind (server-bind "127.0.0.1" 8888)}
    :hooks  {:enabled (enabled-code-hooks (cdb/list-for-scope cdb/global-scope))}})
 
 ;; ---------------------------------------------------------------------------
@@ -218,8 +242,10 @@
          ""
          (format "  server   http://%s:%d   %s"
                  (:host server) (:port server)
-                 (if (:reachable? server) "● reachable" "○ NOT reachable"))
-         (format "  hooks    %d code hook(s) enabled globally"
+                 (if (:reachable? server) "● reachable" "○ NOT reachable"))]
+        (when-let [note (bind-note (:bind server))]
+          [(format "  bind     %s" note)])
+        [(format "  hooks    %d code hook(s) enabled globally"
                  (count (:enabled hooks)))
          ""
          (format "  %-13s %-10s %s" "agent" "cch wired" "notes")
