@@ -166,3 +166,24 @@
         (is (= 2 (:calls u)))
         (is (= 150 (:input_tokens u)))
         (is (= 0.75 (:cost_usd u)))))))
+
+(deftest legacy-delivery-tables-gain-envelope-columns-in-place
+  (with-temp-store
+    (fn [path]
+      ;; A control.db written before seq/in_reply_to lived on deliveries.
+      (jdbc/execute! {:dbtype "sqlite" :dbname path}
+                     [(str "CREATE TABLE control_deliveries ("
+                           "message_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
+                           "content_sha256 TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)")])
+      (jdbc/execute! {:dbtype "sqlite" :dbname path}
+                     ["INSERT INTO control_deliveries VALUES ('old', 'claude:a', 'codex:b', 'x', 'submitted', 1)"])
+      (store/record-delivery! {:message-id "new" :source "codex:b" :target "claude:a"
+                               :content-sha256 "y" :status "delivered"
+                               :seq 4 :in-reply-to "old"})
+      (let [rows (into {} (map (juxt :message_id identity))
+                       (store/deliveries-for-route "claude:a" 10))]
+        (is (= {:seq nil :in_reply_to nil}
+               (select-keys (rows "old") [:seq :in_reply_to]))
+            "old rows survive with empty envelope metadata")
+        (is (= {:seq 4 :in_reply_to "old"}
+               (select-keys (rows "new") [:seq :in_reply_to])))))))
