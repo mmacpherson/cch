@@ -2,7 +2,7 @@
   (:require [cch.summarizer :as summary]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]))
@@ -54,7 +54,16 @@
   (let [parsed (summary/parse-response (response {:status (apply str (repeat 200 "x"))
                                                  :name (apply str (repeat 80 "a"))}))]
     (is (= 100 (count (:status parsed))))
+    (is (str/ends-with? (:status parsed) "…"))
     (is (= 32 (count (:name parsed)))))
+  (testing "an overlong status ends at a word boundary, not mid-word"
+    (let [status (str (str/join " " (repeat 12 "Drafting")) " a review answer and deciding whether to post")
+          capped (:status (summary/parse-response (response {:status status})))]
+      (is (<= (count capped) 100))
+      (is (str/ends-with? capped "Drafting…"))
+      (is (str/starts-with? status (subs capped 0 (dec (count capped)))))))
+  (is (= "Checks the trace page." (:status (summary/parse-response (response {:status "Checks the trace page."}))))
+      "a status within the limit is untouched")
   (let [pem (str "-----BEGIN " "PRIVATE KEY-----\nsample\n-----END " "PRIVATE KEY-----")
         parsed (summary/parse-response (response {:status pem}))]
     (is (not (str/includes? (:status parsed) "sample")))) )

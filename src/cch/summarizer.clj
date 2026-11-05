@@ -16,7 +16,7 @@
 
 (def ^:private system-prompt
   (str "Summarize this coding-agent session for a display field. Return only JSON matching the supplied schema. "
-       "status: one line, at most 100 characters, present tense, describing what the session is doing now. "
+       "status: one line of about 80 characters (never more than 100), present tense, describing what the session is doing now. "
        "name: a short role name describing what this session is or does, lowercase kebab-case, at most 32 characters "
        "(examples: activity-trace, scrub-rules, tax-1099-review). Describe the session's ongoing area of work "
        "(component or domain, noun-like), not its latest step. Avoid moment words such as wrap, fix, done, "
@@ -55,6 +55,20 @@
 (defn- cap-name [s limit]
   (str/replace (subs s 0 (min limit (count s))) #"-+$" ""))
 
+(def ^:private max-status-chars 100)
+
+(defn- cap-status
+  "Fit status within max-status-chars. An overlong status is cut at the last
+  word boundary and marked with an ellipsis rather than ending mid-word. The
+  cut goes through scrub's cap, which never leaves a partial placeholder."
+  [status]
+  (if (<= (count status) max-status-chars)
+    status
+    (let [capped (:text (scrub/scrub status {:max-chars (dec max-status-chars)}))
+          space (.lastIndexOf ^String capped " ")
+          words (if (> space (quot max-status-chars 2)) (subs capped 0 space) capped)]
+      (str (str/replace words #"[\s\p{Punct}&&[^\]\)]]+$" "") "…"))))
+
 (defn parse-response
   "Return validated display data or nil. Reject malformed/multiple JSON values,
   missing fields and wrong types. Scrub before normalizing or capping, so a
@@ -70,8 +84,7 @@
                    (= #{:status :name :topic_changed} (set (keys value)))
                    (string? status) (string? name) (instance? Boolean topic_changed))
           (let [status (-> status (scrub/scrub (dissoc scrub-opts :max-chars)) :text
-                           (str/replace #"[\p{Z}\p{Cc}\s]+" " ") str/trim
-                           (scrub/scrub {:max-chars 100}) :text str/trim)
+                           (str/replace #"[\p{Z}\p{Cc}\s]+" " ") str/trim cap-status)
                 name (-> name (scrub/scrub (dissoc scrub-opts :max-chars)) :text normalize-name (cap-name 32))]
             (when (and (not (str/blank? status)) (not (str/blank? name)))
               {:status status :name name :topic-changed topic_changed}))))
