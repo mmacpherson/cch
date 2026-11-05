@@ -1474,7 +1474,7 @@
         {:keys [stop]} (start! {:port port :host host :nrepl-port nrepl-port
                                 ;; EX_TEMPFAIL: systemd (Restart=on-failure)
                                 ;; and launchd (KeepAlive) start a fresh JVM.
-                                :on-spawn-failure (fn [_] (System/exit 75))})
+                                :on-spawn-failure (fn [_] (spawn-health/exit-for-restart! 75))})
         latch (promise)]
     (.addShutdownHook (Runtime/getRuntime)
                       (Thread. (fn []

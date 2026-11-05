@@ -13,14 +13,16 @@
 (def ^:private defaults
   {:interval-ms 60000
    :threshold 3
-   :argv ["/bin/sh" "-c" "exit 0"]})
+   :argv ["/bin/sh" "-c" "exit 0"]
+   :probe-timeout-ms 10000})
 
 (defonce ^:private state
   (atom {:consecutive-failures 0 :last-error nil :unhealthy? false}))
 
 (defn next-state
-  "Fold one probe result into the state. result is :ok or an error class
-  name; only spawn errors count, a child's exit status never does. Pure."
+  "Fold one probe result into the state. result is :ok or a failure name
+  (a spawn error class, or ProbeTimeout); a child's exit status never
+  counts. Pure."
   [current result threshold]
   (if (= :ok result)
     (assoc current :consecutive-failures 0 :unhealthy? false)
@@ -29,19 +31,23 @@
              :unhealthy? (>= n threshold)))))
 
 (defn probe
-  "Start argv and wait for it. Return :ok, or the simple class name of the
-  error that stopped the child from starting."
-  [argv]
-  (try
-    (let [p (-> (ProcessBuilder. ^java.util.List (vec argv))
-                (.redirectErrorStream true)
-                .start)]
-      (.close (.getOutputStream p))
-      (.readAllBytes (.getInputStream p))
-      (.waitFor p)
-      :ok)
-    (catch java.io.IOException e
-      (.getSimpleName (class e)))))
+  "Start argv and wait up to timeout-ms for it. Return :ok, or why it failed:
+  the simple class name of the error that stopped the child from starting, or
+  \"ProbeTimeout\" when a trivial child never exits, so a hung helper cannot
+  silently disable the watchdog."
+  ([argv] (probe argv 10000))
+  ([argv timeout-ms]
+   (try
+     (let [p (-> (ProcessBuilder. ^java.util.List (vec argv))
+                 (.redirectOutput java.lang.ProcessBuilder$Redirect/DISCARD)
+                 (.redirectError java.lang.ProcessBuilder$Redirect/DISCARD)
+                 .start)]
+       (.close (.getOutputStream p))
+       (if (.waitFor p (long timeout-ms) java.util.concurrent.TimeUnit/MILLISECONDS)
+         :ok
+         (do (.destroyForcibly p) "ProbeTimeout")))
+     (catch java.io.IOException e
+       (.getSimpleName (class e))))))
 
 (defn health
   "Snapshot for /health."
@@ -52,8 +58,22 @@
 
 (defn check!
   "Run one probe and fold it into the state. Returns the new state."
-  [{:keys [argv threshold]}]
-  (swap! state next-state (probe argv) threshold))
+  [{:keys [argv threshold probe-timeout-ms]}]
+  (swap! state next-state (probe argv probe-timeout-ms) threshold))
+
+(defn exit-for-restart!
+  "Exit so the service manager starts a fresh JVM. Shutdown hooks get
+  grace-ms; if they hang, halt anyway so recovery cannot stall."
+  ([status] (exit-for-restart! status 30000))
+  ([status grace-ms]
+   (doto (Thread. (fn []
+                    (try (Thread/sleep (long grace-ms))
+                         (catch InterruptedException _ nil))
+                    (.halt (Runtime/getRuntime) status))
+                  "cch-spawn-health-halt")
+     (.setDaemon true)
+     .start)
+   (System/exit status)))
 
 (defonce ^:private worker (atom nil))
 

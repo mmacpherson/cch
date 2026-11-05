@@ -53,14 +53,31 @@ ln -s "runtimes/$version" "$share/.runtime.$$"
 atomic_rename "$share/.runtime.$$" "$runtime_dst"
 echo "  $runtime_dst -> runtimes/$version  (deployed from target/cch-runtime)"
 
-# Prune: keep the newest $keep_runtimes versions; never the current one.
+# Prune: keep the newest $keep_runtimes versions, never the current one, and
+# never one a running process still uses. The launcher execs the real
+# versioned path, so a process using a version names it on its command line.
+# The legacy directory's processes name the unversioned runtime path instead.
+running="$(ps -axww -o command= 2>/dev/null || true)"
+in_use() {
+  local dir="$1"
+  if [[ "$(basename "$dir")" == *-legacy ]]; then
+    [[ "$running" == *"$runtime_dst/"* ]]
+  else
+    [[ "$running" == *"$dir/"* ]]
+  fi
+}
 old_versions=()
 while IFS= read -r dir; do old_versions+=("$dir"); done \
   < <(find "$runtimes" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | sort)
 prune_count=$(( ${#old_versions[@]} - keep_runtimes ))
 for (( i = 0; i < prune_count; i++ )); do
-  [[ "$(basename "${old_versions[i]}")" == "$version" ]] && continue
-  rm -rf "${old_versions[i]}"
+  dir="${old_versions[i]}"
+  [[ "$(basename "$dir")" == "$version" ]] && continue
+  if in_use "$dir"; then
+    echo "  kept $(basename "$dir"): still in use by a running process"
+    continue
+  fi
+  rm -rf "$dir"
 done
 find "$runtimes" -mindepth 1 -maxdepth 1 -name '.*.partial' -type d -mmin +60 -exec rm -rf {} + 2>/dev/null || true
 

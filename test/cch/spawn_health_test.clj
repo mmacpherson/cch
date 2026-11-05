@@ -16,7 +16,9 @@
   (is (= :ok (spawn-health/probe ["/bin/sh" "-c" "exit 0"])))
   (is (= :ok (spawn-health/probe ["/bin/sh" "-c" "exit 3"]))
       "a child's own exit status says nothing about spawning")
-  (is (= "IOException" (spawn-health/probe ["/nonexistent/cch-probe"]))))
+  (is (= "IOException" (spawn-health/probe ["/nonexistent/cch-probe"])))
+  (is (= "ProbeTimeout" (spawn-health/probe ["/bin/sh" "-c" "sleep 5"] 100))
+      "a child that never exits counts against the JVM"))
 
 (deftest health-reports-ok-by-default
   (is (true? (:ok (spawn-health/health)))))
