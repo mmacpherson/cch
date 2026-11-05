@@ -79,6 +79,30 @@
     (authenticated
       #(is (= 200 (:status (handler (access-request :get "/"))))))))
 
+(deftest trace-links-need-a-runner-address-and-a-native-route
+  (let [urls {"runner-a" "https://runner.invalid"}]
+    (is (= "https://runner.invalid/trace?session=abc"
+           (switchboard/trace-href {:id "codex:abc" :runner-id "runner-a"} urls)))
+    (is (nil? (switchboard/trace-href {:id "codex:abc" :runner-id "runner-b"} urls)))
+    (is (nil? (switchboard/trace-href {:id "operator" :runner-id "runner-a"} urls)))))
+
+(deftest summaries-show-on-agents-and-overview
+  (authenticated
+    (fn []
+      (let [b (registered-broker)
+            _ (broker/register!
+                b {:runner-id "runner-a" :token "synthetic-runner-token"
+                   :local-ui-url "https://runner.invalid/"
+                   :sessions [{:id target :status "waiting" :available true
+                               :auto-name "trace-page"
+                               :summary "Adding <reply> ids"}]})
+            handler (switchboard/handler b config)]
+        (doseq [uri ["/agents" "/"]]
+          (let [page (:body (handler (access-request :get uri)))]
+            (is (str/includes? page "trace-page") uri)
+            (is (str/includes? page "Adding &lt;reply&gt; ids") uri)
+            (is (str/includes? page "/trace?session=") uri)))))))
+
 (deftest hosted-mark-and-favicon-share-the-meta-runner-treatment
   (authenticated
     (fn []
@@ -122,7 +146,11 @@
         (is (str/includes? page "Needs you"))
         (is (str/includes? page "Open this Claude session"))
         (is (str/includes? page "href=\"/usage\""))
-        (is (not (str/includes? page "https://runner.invalid")))
+        (is (str/includes?
+              page (str "href=\"https://runner.invalid/trace?session="
+                        (subs target (count "claude:")) "\""))
+            "the only runner link is the session's own trace")
+        (is (not (str/includes? page "href=\"https://runner.invalid\"")))
         (is (not (str/includes? page ">Hooks<")))
         (is (str/includes? page
                            "https://claude.ai/code/session_synthetic123"))

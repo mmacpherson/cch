@@ -22,7 +22,8 @@
                               (postgres/migration-7-statements "cch_control")
                               (postgres/migration-8-statements "cch_control")
                               (postgres/migration-9-statements "cch_control")
-                              (postgres/migration-10-statements "cch_control")))]
+                              (postgres/migration-10-statements "cch_control")
+                              (postgres/migration-11-statements "cch_control")))]
     (is (str/includes? ddl "content_sha256"))
     (is (str/includes? ddl "lease_expires_at"))
     (is (str/includes? ddl "awaiting-replay"))
@@ -35,6 +36,7 @@
     (is (str/includes? ddl "activity_observations_runner_idx"))
     (is (str/includes? ddl "channel_seq"))
     (is (str/includes? ddl "in_reply_to"))
+    (is (str/includes? ddl "auto_name"))
     (is (str/includes? ddl "used_percentage"))
     (is (not (re-find #"(?i)\b(session_id|runner_id|account|hostname|path|payload)\b"
                       (str/join "\n" (postgres/migration-5-statements

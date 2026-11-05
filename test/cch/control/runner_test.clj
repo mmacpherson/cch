@@ -103,6 +103,27 @@
       (is (= [live-a live-b] @registered)
           "stale sessions are dropped before registering"))))
 
+(deftest tick-attaches-summaries-and-survives-a-summary-failure
+  (let [registered (atom nil)
+        live (route "codex" "a")]
+    (with-redefs [remote/register! (fn [_ sessions] (reset! registered sessions))
+                  remote/poll! (constantly [])]
+      (runner/tick! {:runner-id "runner-a"}
+                    {:list-local-sessions #(hash-map :sessions [live] :errors [])
+                     :deliver-local! identity
+                     :session-summaries
+                     (constantly {(:id live) {:auto-name "trace-page"
+                                              :status "Adding reply ids"
+                                              :turn-key "private-turn"}})})
+      (is (= [(assoc live :auto-name "trace-page" :summary "Adding reply ids")]
+             @registered)
+          "only the name and status line leave the runner")
+      (runner/tick! {:runner-id "runner-a"}
+                    {:list-local-sessions #(hash-map :sessions [live] :errors [])
+                     :deliver-local! identity
+                     :session-summaries #(throw (ex-info "store down" {}))})
+      (is (= [live] @registered)))))
+
 (deftest report-loop-error-surfaces-http-status
   ;; A broker rejection carries an HTTP status in ex-data; the operator-facing
   ;; log must show it so a typed 413/409 is diagnosable, not a bare message.

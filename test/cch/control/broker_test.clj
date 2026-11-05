@@ -488,3 +488,22 @@
              (try (broker/enqueue! b (merge base bad))
                   (catch clojure.lang.ExceptionInfo error (:type (ex-data error)))))
           (pr-str bad)))))
+
+(deftest presence-carries-a-validated-auto-name-and-summary
+  (let [b (broker/new-broker runner-tokens)
+        route "codex:00000000-0000-0000-0000-0000000000a1"
+        bad "codex:00000000-0000-0000-0000-0000000000a2"]
+    (broker/register! b {:runner-id "runner-a" :token "synthetic-token-a"
+                         :sessions [{:id route :status "idle" :available true
+                                     :auto-name "trace-page"
+                                     :summary "Adding reply ids to the trace"}
+                                    {:id bad :status "idle" :available true
+                                     :auto-name "Not Kebab"
+                                     :summary (apply str (repeat 200 "x"))}]})
+    (let [by-id (into {} (map (juxt :id identity)) (broker/sessions b))]
+      (is (= "trace-page" (:auto-name (by-id route))))
+      (is (= "Adding reply ids to the trace" (:summary (by-id route))))
+      (is (str/starts-with? (:display-name (by-id route)) "trace-page · "))
+      (is (not (contains? (by-id bad) :auto-name)) "malformed values are dropped")
+      (is (not (contains? (by-id bad) :summary)))
+      (is (some? (by-id bad)) "and the session is still present"))))

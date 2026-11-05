@@ -144,7 +144,7 @@
         (throw (ex-info "local_ui_url is invalid" {:type :invalid-runner})))
       (str/replace value #"/+$" ""))))
 
-(defn sanitize-session [{:keys [id status available native-url name]}]
+(defn sanitize-session [{:keys [id status available native-url name auto-name summary]}]
   (when-let [agent (and (valid-label? id) (route-agent id))]
     (let [native-url (sanitized-native-url agent native-url)
           native-name (try
@@ -156,7 +156,9 @@
          :status (if (valid-label? status) status "unknown")
          :available (boolean available)}
         native-name (assoc :name native-name)
-        native-url (assoc :native-url native-url)))))
+        native-url (assoc :native-url native-url)
+        (naming/normalize-auto-name auto-name) (assoc :auto-name auto-name)
+        (naming/normalize-summary summary) (assoc :summary (naming/normalize-summary summary))))))
 
 (defn clamp [value lower upper]
   (-> (or value lower) (max lower) (min upper)))

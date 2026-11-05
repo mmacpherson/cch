@@ -61,3 +61,22 @@
     (is (nil? (:alias session)))
     (is (= (str "Panel name · " (:mnemonic session))
            (:display-name session)))))
+
+(deftest auto-names-and-summaries-are-bounded-or-dropped
+  (is (= "trace-page" (naming/normalize-auto-name "trace-page")))
+  (doseq [bad [nil "" "Trace Page" "-lead" (apply str (repeat 33 "a")) "a\u202eb" 7]]
+    (is (nil? (naming/normalize-auto-name bad)) (pr-str bad)))
+  (is (= "Fixing the writer" (naming/normalize-summary "  Fixing\n the   writer ")))
+  (doseq [bad [nil "" "   " (apply str (repeat 101 "x")) "bidi \u202e trick" 7]]
+    (is (nil? (naming/normalize-summary bad)) (pr-str bad))))
+
+(deftest auto-name-ranks-after-alias-and-provider-name
+  (let [route "codex:00000000-0000-0000-0000-00000000000a"
+        m (naming/mnemonic route)]
+    (is (= (str "trace-page · " m)
+           (:display-name (naming/present-session {:id route :auto-name "trace-page"}))))
+    (is (= (str "native · " m)
+           (:display-name (naming/present-session {:id route :auto-name "trace-page"
+                                                   :name "native"}))))
+    (is (= "trace-page" (:auto-name (naming/present-session {:id route :auto-name "trace-page"
+                                                              :alias "mine"}))))))

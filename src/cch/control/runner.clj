@@ -40,17 +40,36 @@
 (defn- thread-stack [^Thread thread]
   (str/join "\n" (map #(str "    at " %) (.getStackTrace thread))))
 
+(defn with-summaries
+  "Attach each session's model-written role name and status line, already
+  scrubbed on this runner, so the broker can show what each agent is doing.
+  The broker validates both again. Pure."
+  [sessions summaries]
+  (mapv (fn [{:keys [id] :as session}]
+          (let [{:keys [auto-name status]} (get summaries id)]
+            (cond-> session
+              auto-name (assoc :auto-name auto-name)
+              status (assoc :summary status))))
+        sessions))
+
+(defn- summaries-or-empty
+  "Summaries are decoration: a store failure must never block presence."
+  [session-summaries]
+  (try (or (when session-summaries (session-summaries)) {})
+       (catch Exception _ {})))
+
 (defn tick!
   "Run one reconnect-safe exchange. Dependencies are explicit so the transport
   and native delivery boundary can be exercised without real agent sessions."
-  [config {:keys [list-local-sessions deliver-local!]}]
+  [config {:keys [list-local-sessions deliver-local! session-summaries]}]
   (let [presence (list-local-sessions)
         ;; Publish only live presence. list-local-sessions returns every
         ;; discovered session, including stale/dead ones; registering all of
         ;; them both misrepresents fleet presence and can push the payload past
         ;; the broker's request-body cap, which rejects the whole register (413)
         ;; so nothing lands and the runner silently vanishes from the fleet.
-        live-sessions (filterv :available (:sessions presence))]
+        live-sessions (with-summaries (filterv :available (:sessions presence))
+                                      (summaries-or-empty session-summaries))]
     (remote/register! config live-sessions)
     (reduce
       (fn [result {:keys [message-id source target body seq in-reply-to]}]
@@ -83,6 +102,8 @@
    (requiring-resolve 'cch.control.core/list-local-sessions)
    :deliver-local!
    (requiring-resolve 'cch.control.core/send-local-message!)
+   :session-summaries
+   (requiring-resolve 'cch.control.store/session-summaries)
    :sync-usage!
    #(usage-sync/tick! config (db/db-path))
    :sync-activity!

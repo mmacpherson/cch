@@ -190,6 +190,16 @@
      (str "CREATE INDEX IF NOT EXISTS messages_target_order_idx ON " messages
           " (target_runner, target_route, created_at, message_id)")]))
 
+(defn migration-11-statements
+  "Carry the runner's model-written role name and one-line status with
+  presence. Both are nullable and bounded like the broker's validation."
+  [schema]
+  (let [sessions (table (schema-name schema) "sessions")]
+    [(str "ALTER TABLE " sessions
+          " ADD COLUMN IF NOT EXISTS auto_name text CHECK (auto_name IS NULL OR char_length(auto_name) BETWEEN 1 AND 32)")
+     (str "ALTER TABLE " sessions
+          " ADD COLUMN IF NOT EXISTS summary text CHECK (summary IS NULL OR char_length(summary) BETWEEN 1 AND 100)")]))
+
 (defn- timestamp [millis]
   (OffsetDateTime/ofInstant (Instant/ofEpochMilli millis) ZoneOffset/UTC))
 
@@ -262,7 +272,11 @@
         (when-not (contains? applied 10)
           (doseq [statement (migration-10-statements schema)]
             (jdbc/execute! tx [statement]))
-          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (10)")]))))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (10)")]))
+        (when-not (contains? applied 11)
+          (doseq [statement (migration-11-statements schema)]
+            (jdbc/execute! tx [statement]))
+          (jdbc/execute! tx [(str "INSERT INTO " migrations " (version) VALUES (11)")]))))
     true))
 
 (defn datasource
@@ -345,12 +359,14 @@
 
 (defn- row->session
   [{:keys [route_id runner_id agent native_status available native_url
-           native_name alias]}]
+           native_name alias auto_name summary]}]
   (naming/present-session
     (cond-> {:id route_id :runner-id runner_id :agent agent
              :status native_status :available available}
       native_url (assoc :native-url native_url)
       native_name (assoc :name native_name)
+      auto_name (assoc :auto-name auto_name)
+      summary (assoc :summary summary)
       alias (assoc :alias alias))))
 
 (defn- row->metadata
@@ -415,10 +431,12 @@
                     (doseq [[route-id session] sanitized]
                       (jdbc/execute!
                         tx [(str "INSERT INTO " routes
-                                 " (route_id,runner_id,agent,native_status,available,native_url,native_name,lease_expires_at)"
-                                 " VALUES (?,?,?,?,?,?,?,?)")
+                                 " (route_id,runner_id,agent,native_status,available,native_url,native_name,"
+                                 "auto_name,summary,lease_expires_at)"
+                                 " VALUES (?,?,?,?,?,?,?,?,?,?)")
                             route-id runner-id (:agent session) (:status session)
                             true (:native-url session) (:name session)
+                            (:auto-name session) (:summary session)
                             (timestamp expires)]))
                     {:discard discard
                      :value {:status "registered" :runner-id runner-id
@@ -462,7 +480,7 @@
              :value (mapv row->session
                           (rows tx [(str "SELECT r.route_id,r.runner_id,r.agent,"
                                          "r.native_status,r.available,r.native_url,"
-                                         "r.native_name,a.alias FROM "
+                                         "r.native_name,r.auto_name,r.summary,a.alias FROM "
                                          routes " r LEFT JOIN " aliases
                                          " a ON a.route_id=r.route_id"
                                          " AND a.runner_id=r.runner_id"
@@ -482,7 +500,7 @@
       (:datasource broker)
       (fn [tx]
         (let [route (row tx [(str "SELECT route_id,runner_id,agent,native_status,"
-                                  "available,native_url,native_name FROM " routes
+                                  "available,native_url,native_name,auto_name,summary FROM " routes
                                   " WHERE route_id=? AND lease_expires_at>?")
                              route-id (timestamp timestamp-value)])]
           (when-not route

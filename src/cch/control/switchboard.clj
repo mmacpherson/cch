@@ -148,7 +148,7 @@
 .badge-attention{color:var(--c-ask);border-color:var(--c-ask);background:var(--c-ask-bg)}.badge-working{color:var(--c-allow);border-color:var(--c-allow);background:var(--c-allow-bg)}.badge-ready{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
 label{display:block;margin:0 0 .35em;color:var(--fg-muted);font-size:var(--font-sm)}select,textarea,.alias-form input[name=alias]{width:100%;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);padding:.6em;font:inherit}.alias-form{margin-top:.8em}.alias-form input[name=alias]{min-width:0;flex:1}textarea{min-height:110px;resize:vertical}.fields{display:grid;grid-template-columns:1fr 2fr;gap:1em}
 .session-details{border-top:1px solid var(--border);margin-top:.8em;padding-top:.6em}.session-details summary{color:var(--fg-muted);cursor:pointer;font-size:var(--font-sm)}.session-meta{display:grid;gap:.45em;margin-top:.7em}.session-meta small{display:block;color:var(--fg-muted)}
-button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid var(--accent);border-radius:4px;background:var(--accent);color:var(--bg);font:inherit;cursor:pointer}button.secondary{background:var(--surface);border-color:var(--border);color:var(--fg)}.actions{display:flex;gap:.6em;align-items:center;margin-top:.8em}.notice{border-left:3px solid var(--accent);padding:.7em .9em;background:var(--surface);margin-bottom:1em}.error{border-color:var(--c-deny)}.status-delivered{border-color:var(--c-allow)}.status-failed,.status-expired{border-color:var(--c-deny)}.inline{display:inline}.provider{margin-top:.6em}.empty{text-align:center;padding:2em;color:var(--fg-muted)}
+button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid var(--accent);border-radius:4px;background:var(--accent);color:var(--bg);font:inherit;cursor:pointer}button.secondary{background:var(--surface);border-color:var(--border);color:var(--fg)}.actions{display:flex;gap:.6em;align-items:center;margin-top:.8em}.notice{border-left:3px solid var(--accent);padding:.7em .9em;background:var(--surface);margin-bottom:1em}.error{border-color:var(--c-deny)}.status-delivered{border-color:var(--c-allow)}.status-failed,.status-expired{border-color:var(--c-deny)}.inline{display:inline}.provider{margin-top:.6em}.session-summary{margin:.35em 0 0;color:var(--fg);font-size:var(--font-sm)}.session-links{display:flex;gap:1em;margin-top:.6em}.agent-row{display:flex;flex-wrap:wrap;gap:.2em .8em;align-items:baseline;padding:.45em 0;border-top:1px solid var(--border)}.agent-row:first-child{border-top:0}.agent-row .session-summary{margin:0;flex:1 1 16em}.empty{text-align:center;padding:2em;color:var(--fg-muted)}
 .fleet-hero{display:grid;grid-template-columns:minmax(250px,1.2fr) minmax(360px,1fr);gap:2em;align-items:center;padding:1.25em 1.4em;border-color:oklch(72% .18 235/.35);background:linear-gradient(120deg,var(--accent-soft),var(--surface) 52%);position:relative;overflow:hidden}.fleet-hero:after{content:'';position:absolute;right:-5em;top:-8em;width:18em;height:18em;border:1px solid oklch(72% .18 235/.13);border-radius:50%;pointer-events:none}.fleet-kicker{font:500 var(--font-xs)/1.3 var(--family-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--accent);display:flex;align-items:center;gap:.55em;margin-bottom:.35em}.panel h2.fleet-title{font-size:1.45em;margin:0 0 .25em}.fleet-copy{color:var(--fg-muted);font-size:var(--font-sm);margin:0}.fleet-metrics{display:grid;grid-template-columns:repeat(3,1fr);position:relative;z-index:1}.fleet-metric{padding:.2em 1em;border-left:1px solid var(--border)}.fleet-metric strong{display:block;font:600 1.7em/1.2 var(--family-mono)}.fleet-metric small{color:var(--fg-muted)}
 .session-context{display:flex;align-items:center;gap:.45em;margin-top:.15em;color:var(--fg-muted);font-size:var(--font-sm)}.session-context .runner-chip{color:var(--fg)}.context-separator{color:var(--border)}.recent-panel{padding:1.1em 1.2em}.recent-heading{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:.7em}.recent-heading h2{margin:0}.live-label{display:inline-flex;align-items:center;gap:.45em;color:var(--fg-muted);font:var(--font-xs)/1 var(--family-mono);margin-left:.7em}.live-label .dot{background:var(--c-allow)}
 .activity-table .event-time{width:13%;font-family:var(--family-mono);color:var(--fg-muted)}.activity-table .event-runner{width:12%;font-family:var(--family-mono)}.activity-table .event-agent{width:11%}.activity-table .event-action{width:21%;font-weight:500}.activity-table .event-tool{width:13%;color:var(--fg-muted)}.activity-table .event-outcome{width:18%}.activity-table .event-ms{width:6%;text-align:right;font-family:var(--family-mono);color:var(--fg-muted)}.runner-chip{display:inline-block;padding:1px 7px;border:1px solid var(--border);border-radius:999px;background:var(--bg);font-size:var(--font-xs);max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}.event-outcome .dot{margin-right:.45em}.event-filters{margin-bottom:1em}.event-filters select{width:auto;min-width:11em;padding:4px 8px}
@@ -196,7 +196,21 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
   (apply page-with nil title active identity content))
 
 (defn- primary-name [session]
-  (or (:alias session) (:name session) (:mnemonic session)))
+  (or (:alias session) (:name session) (:auto-name session) (:mnemonic session)))
+
+(defn trace-href
+  "Link to a session's trace on the runner that owns it, or nil when that
+  runner advertises no local web address. The broker never fetches it; the
+  operator's browser must be able to reach the runner. Pure."
+  [session runner-urls]
+  (when-let [base (get runner-urls (:runner-id session))]
+    (when-let [[_ native-id] (re-matches #"(?:claude|codex):(.+)" (or (:id session) ""))]
+      (str base "/trace?session=" (url-encode native-id)))))
+
+(defn- runner-urls [b]
+  (into {} (keep (fn [{:keys [runner-id local-ui-url]}]
+                   (when local-ui-url [runner-id local-ui-url])))
+        (broker/active-runners b)))
 
 (defn- visible-name [session duplicate-names]
   (let [primary (primary-name session)]
@@ -211,7 +225,7 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
          (map str/capitalize)
          (str/join " "))))
 
-(defn- session-card [session csrf duplicate-names]
+(defn- session-card [session csrf duplicate-names runner-urls]
   (let [{:keys [key label]} (attention session)]
     [:article.session
      [:div.session-top
@@ -222,15 +236,25 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
       [:span.context-separator "·"]
       [:span.runner-chip {:title (:runner-id session)}
        (runner-label (:runner-id session))]]
-     (when-let [native-url (:native-url session)]
-       [:div.provider
-        [:a {:href native-url :target "_blank" :rel "noopener noreferrer"}
-         (str "Open this " (str/capitalize (:agent session)) " session")]])
+     (when-let [summary (:summary session)]
+       [:p.session-summary summary])
+     (let [native-url (:native-url session)
+           trace (trace-href session runner-urls)]
+       (when (or native-url trace)
+         [:div.session-links
+          (when native-url
+            [:a {:href native-url :target "_blank" :rel "noopener noreferrer"}
+             (str "Open this " (str/capitalize (:agent session)) " session")])
+          (when trace
+            [:a {:href trace :target "_blank" :rel "noopener noreferrer"}
+             "Trace"])]))
      [:details.session-details
       [:summary "Details & rename"]
       [:div.session-meta
        (when-let [native-name (:name session)]
          [:div [:small "Provider name"] [:div native-name]])
+       (when-let [auto-name (:auto-name session)]
+         [:div [:small "Auto name"] [:div auto-name]])
        [:div [:small "Mnemonic"] [:div.route (:mnemonic session)]]
        [:div [:small "Route"] [:div.route (:id session)]]
        [:div [:small "Runner"] [:div.route (:runner-id session)]]
@@ -249,6 +273,7 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
 
 (defn- switchboard-page [b identity {:keys [error message-id]}]
   (let [sessions (broker/active-sessions b)
+        urls (runner-urls b)
         name-counts (frequencies (map primary-name sessions))
         duplicate-names (->> name-counts
                              (keep (fn [[session-name count]]
@@ -280,7 +305,7 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
        [:p.muted "Choose a session by name. Routing details and rename controls are collapsed."]
        (if (seq sessions)
          [:div.sessions
-          (map #(session-card % (:csrf identity) duplicate-names) sessions)]
+          (map #(session-card % (:csrf identity) duplicate-names urls) sessions)]
          [:div.empty "No active runner leases are currently visible."])]
       [:section.panel
        [:h2 "Send ordinary text"]
@@ -412,7 +437,8 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
         runners (count (set (map :runner-id sessions)))
         needs-attention (count (filter #(= "attention" (:key (attention %)))
                                        sessions))
-        recent (broker/recent-activity-observations b {:limit 8})]
+        recent (broker/recent-activity-observations b {:limit 8})
+        urls (runner-urls b)]
     (page
       "overview" :overview identity
       [:section.panel.fleet-hero
@@ -428,6 +454,17 @@ button{display:inline-flex;align-items:center;padding:5px 12px;border:1px solid 
         [:div.fleet-metric [:strong (count sessions)] [:small "active agents"]]
         [:div.fleet-metric [:strong runners] [:small "runners"]]
         [:div.fleet-metric [:strong needs-attention] [:small "need attention"]]]]
+      (when (seq sessions)
+        [:section.panel.recent-panel
+         [:div.recent-heading [:h2.inline "Agents"] [:a {:href "/agents"} "Manage"]]
+         (for [session sessions]
+           [:div.agent-row
+            [:strong (primary-name session)]
+            [:span.muted (str (str/capitalize (:agent session)) " · "
+                              (runner-label (:runner-id session)))]
+            [:p.session-summary (or (:summary session) "")]
+            (when-let [trace (trace-href session urls)]
+              [:a {:href trace :target "_blank" :rel "noopener noreferrer"} "Trace"])])])
       [:section.panel.recent-panel
        [:div.recent-heading
         [:div [:h2.inline "Recent activity"]

@@ -63,6 +63,31 @@
                   :max-length max-native-name-length})))
       native-name)))
 
+(def ^:const max-auto-name-length 32)
+(def ^:const max-summary-length 100)
+
+(defn normalize-auto-name
+  "A runner's model-written role name: lowercase kebab-case, at most 32
+  characters. Anything else is dropped rather than rejected, so one bad
+  summary never blocks a runner's presence."
+  [value]
+  (when (and (string? value)
+             (<= 1 (count value) max-auto-name-length)
+             (re-matches #"[a-z0-9]+(?:-[a-z0-9]+)*" value))
+    value))
+
+(defn normalize-summary
+  "A runner's model-written one-line status, already scrubbed on the runner.
+  Whitespace collapses to single spaces; overlong, control, or formatting
+  characters drop it."
+  [value]
+  (when (string? value)
+    (let [line (str/trim (str/replace value #"\s+" " "))]
+      (when (and (not (str/blank? line))
+                 (<= (count line) max-summary-length)
+                 (not (re-find unsafe-name-pattern line)))
+        line))))
+
 (defn mnemonic
   "Derive a stable human-readable name from an opaque route id only. The
   suffix makes accidental word-pair collisions visible."
@@ -76,7 +101,8 @@
 
 (defn present-session
   "Add presentation-only naming fields. Explicit aliases take precedence over
-  provider-advertised names; both retain the mnemonic for disambiguation."
+  provider-advertised names, and those over the runner's model-written auto
+  name; all retain the mnemonic for disambiguation."
   [session]
   (let [fallback (mnemonic (:id session))
         alias (try
@@ -85,7 +111,8 @@
         native-name (try
                       (normalize-native-name (:name session))
                       (catch clojure.lang.ExceptionInfo _ nil))
-        preferred (or alias native-name)]
+        auto-name (normalize-auto-name (:auto-name session))
+        preferred (or alias native-name auto-name)]
     (cond-> (assoc (dissoc session :alias :name)
                    :mnemonic fallback
                    :display-name (if preferred

@@ -218,6 +218,16 @@ cwd, process id, socket, token, or message body view. A native action is shown
 only when the local adapter advertises a narrowly validated, exact session URL;
 generic provider home links are omitted.
 
+When a runner has the optional summarizer enabled, its presence also carries
+each session's model-written role name (lowercase kebab-case, at most 32
+characters) and one-line status (at most 100 characters). Both are scrubbed on
+the runner and validated again by the broker, which drops rather than rejects a
+malformed value. The role name is used after an alias or provider name. When a
+runner also advertises `CCH_CONTROL_LOCAL_UI_URL`, each of its sessions links
+to that session's trace on the runner. The trace stays runner-local: the
+broker neither fetches nor proxies it, and only a browser that can reach the
+runner can open it.
+
 The Usage page is the same full presentation used locally: agent and window
 filters, stat tiles, observed curve, credible projection band, and burn-rate
 chart. Its data adapter computes fleet-wide values from the bounded normalized
