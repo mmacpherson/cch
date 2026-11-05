@@ -29,7 +29,7 @@
    ;; Dotted words in prose are commonly source files or namespaces.
    ;; Recognize hosts only in URL authority positions; known-hosts handles
    ;; private single-word names and host references in ordinary prose.
-   [:hostname #"(?i)\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|lan|internal|home\.arpa|ts\.net|corp|invalid)\b"]
+   [:hostname #"(?i)(?<![\w./-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:local|lan|internal|home\.arpa|ts\.net|corp|invalid)(?![\w-]|\.[a-z0-9])"]
    [:hostname #"(?i)([a-z][a-z0-9+.-]*://)([a-z0-9-]+(?:\.[a-z0-9-]+)+)"]])
 
 

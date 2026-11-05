@@ -104,3 +104,11 @@
   (is (= "scp f [redacted:hostname]:/x"
          (:text (scrub/scrub "scp f host.internal:/x"))))
   (is (= "tokens: 42 author: example" (:text (scrub/scrub "tokens: 42 author: example")))))
+
+(deftest private-suffix-filenames-stay-readable
+  (doseq [text ["main.local.edn" ".env.local" "config/.env.local" "src/main.local.edn"
+                "settings.internal.yaml" "Edit main.local.edn and .env.local"]]
+    (is (= text (:text (scrub/scrub text)))))
+  (doseq [text ["host.internal" "host.local" "host.lan" "host.home.arpa" "host.ts.net"
+                "scp f host.internal:/x" "https://host.internal/path" "host.internal."]]
+    (is (pos? (get-in (scrub/scrub text) [:counts :hostname] 0)))))
