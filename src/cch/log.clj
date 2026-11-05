@@ -4,12 +4,13 @@
   Two write paths:
 
     1. **Background writer (preferred).** When `start-writer!` has been
-       called (cch serve does this in start!), inserts are queued onto a
-       bounded LinkedBlockingQueue and a daemon thread pipes them to one
-       long-lived `sqlite3` subprocess via stdin. Per-call cost is just
-       the queue offer + a few-byte write — sub-millisecond. WAL is
-       enabled on the writer's connection so the dashboard's read
-       queries don't block writes.
+       called (cch serve does this in start!), rows are queued onto a
+       bounded LinkedBlockingQueue and a daemon thread inserts them over
+       one JDBC connection with bound parameters, in small batches. Per-call
+       cost is just the queue offer. Parameters, not SQL text, carry the
+       values, so no payload byte (quotes, NUL, newlines) can change the
+       statement; failures are reported, not swallowed. WAL lets the
+       dashboard's reads run alongside writes.
 
     2. **Per-call fallback.** When no writer is registered (subprocess
        invocations of hooks, tests without setup), log-event! spawns a
@@ -25,7 +26,8 @@
             [cch.usage-observation :as usage]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [honey.sql :as sql]))
+            [honey.sql :as sql]
+            [next.jdbc :as jdbc]))
 
 (defn ensure-db!
   "Create the database directory if needed, apply the baseline schema,
@@ -53,10 +55,12 @@
     (swap! ensured-paths conj path)))
 
 (defn- escape-sql
-  "Escape a string for SQLite single-quoted literals."
+  "Escape a string for SQLite single-quoted literals on the per-call
+  fallback path. NUL is dropped: the sqlite3 CLI and process arguments both
+  end a string there, which would unbalance the quotes."
   [s]
   (when s
-    (str/replace (str s) "'" "''")))
+    (-> (str s) (str/replace "\u0000" "") (str/replace "'" "''"))))
 
 (defn- sql-value
   "Format a value for SQL insertion. nil becomes NULL, strings get single-quoted."
@@ -67,30 +71,83 @@
 
 ;; --- Background writer ---
 
-;; When non-nil, holds {:proc <bb-process> :queue <BlockingQueue> :thread <Thread>}.
+;; When non-nil, holds {:queue <BlockingQueue> :thread <Thread> :running <atom>}.
 ;; Set by start-writer!, cleared by stop-writer!. log-event! checks this to
 ;; decide between queued and per-call modes.
 (defonce ^:private writer-state (atom nil))
 
 (def ^:private writer-queue-capacity 4096)
+(def ^:private writer-batch-max 200)
+
+(def ^:private insert-sql
+  (str "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path,"
+       " cwd, decision, reason, elapsed_ms, extra, agent) VALUES (?,?,?,?,?,?,?,?,?,?,?)"))
+
+(defn- event-statement
+  "The bound insert for one event, in insert-sql column order."
+  [{:keys [session-id hook-name event-type tool-name file-path cwd
+           decision reason elapsed-ms extra agent]}]
+  [insert-sql session-id hook-name event-type tool-name file-path cwd
+   (when decision (name decision)) reason
+   elapsed-ms extra (or agent "claude-code")])
+
+(defonce ^:private writer-failures (atom {:count 0 :last nil}))
+
+(defn writer-health
+  "Insert failures since start: {:count n :last {:at ms :error class-name}}."
+  []
+  @writer-failures)
+
+(defn- open-writer-connection [path]
+  (doto (jdbc/get-connection {:dbtype "sqlite" :dbname path})
+    (jdbc/execute! ["PRAGMA journal_mode=WAL"])
+    (jdbc/execute! ["PRAGMA busy_timeout=5000"])))
+
+(defn- run-item! [conn {:keys [statements]}]
+  (doseq [stmt statements] (jdbc/execute! conn stmt)))
+
+(defn- write-batch!
+  "Run a batch of queued items in one transaction. On failure, report it and
+  retry each item alone, in its own transaction, so one bad item cannot drop
+  its neighbours. A transaction is always committed or rolled back here, so
+  none can be left open."
+  [conn items]
+  (try
+    (jdbc/with-transaction [tx conn]
+      (doseq [item items] (run-item! tx item)))
+    (catch Exception _
+      (doseq [item items]
+        (try (jdbc/with-transaction [tx conn] (run-item! tx item))
+             (catch Exception e
+               (swap! writer-failures #(-> % (update :count inc)
+                                           (assoc :last {:at (System/currentTimeMillis)
+                                                         :error (.getName (class e))})))
+               (binding [*out* *err*]
+                 (println "cch.log: event insert failed:" (.getName (class e))))))))))
 
 (defn- writer-loop
-  "Drain queue → write SQL to sqlite3 stdin. Runs on a daemon thread.
-  Sets a one-time PRAGMA before the loop. ::stop sentinel breaks out."
-  [^java.io.OutputStream out ^java.util.concurrent.BlockingQueue queue]
-  (try
-    (.write out (.getBytes "PRAGMA journal_mode=WAL;\n" "UTF-8"))
-    (.flush out)
-    (loop []
-      (let [item (.take queue)]
-        (when-not (identical? item ::stop)
-          (try
-            (.write out (.getBytes (str item "\n") "UTF-8"))
-            (.flush out)
-            (catch Exception _ nil))
-          (recur))))
-    (catch InterruptedException _ nil)
-    (catch Exception _ nil)))
+  "Drain the queue in batches until ::stop. Reopens the connection after a
+  connection-level failure; never exits on a bad row."
+  [path ^java.util.concurrent.BlockingQueue queue]
+  (loop [conn nil]
+    (let [item (try (.take queue) (catch InterruptedException _ ::stop))]
+      (if (identical? item ::stop)
+        (some-> ^java.sql.Connection conn .close)
+        (let [batch (java.util.ArrayList.)
+              _ (.drainTo queue batch (dec writer-batch-max))
+              stop? (.remove batch ::stop)
+              rows (cons item (vec batch))
+              conn (try (or conn (open-writer-connection path))
+                        (catch Exception e
+                          (binding [*out* *err*]
+                            (println "cch.log: cannot open event DB:" (.getName (class e))))
+                          nil))]
+          (if conn
+            (write-batch! conn rows)
+            (swap! writer-failures update :count + (count rows)))
+          (if stop?
+            (some-> ^java.sql.Connection conn .close)
+            (recur (when (and conn (not (.isClosed ^java.sql.Connection conn))) conn))))))))
 
 (defn start-writer!
   "Spin up the background writer. Idempotent — no-op if already running.
@@ -99,26 +156,20 @@
   (or @writer-state
       (let [path  (db/db-path)
             _     (ensure-db-once! path)
-            proc  (p/process ["sqlite3" path]
-                             {:in :write :out :discard :err :discard})
             queue (java.util.concurrent.LinkedBlockingQueue. writer-queue-capacity)
-            thread (Thread. ^Runnable #(writer-loop (:in proc) queue))]
+            thread (Thread. ^Runnable #(writer-loop path queue))]
         (.setDaemon thread true)
         (.setName thread "cch-sqlite-writer")
         (.start thread)
-        (reset! writer-state {:proc proc :queue queue :thread thread}))))
+        (reset! writer-state {:queue queue :thread thread}))))
 
 (defn stop-writer!
-  "Shut the writer down. Sends a stop sentinel so any queued events
-  drain before stdin is closed. Idempotent."
+  "Shut the writer down. Sends a stop sentinel so any queued events drain
+  first. Idempotent."
   []
-  (when-let [{:keys [proc queue thread]} @writer-state]
-    (try (.put queue ::stop) (catch Exception _ nil))
-    (try (.join thread 1000) (catch Exception _ nil))
-    (try (.close ^java.io.Closeable (:in proc)) (catch Exception _ nil))
-    ;; Wait for sqlite3 to exit so its WAL/SHM cleanup completes before
-    ;; callers (e.g. tests) try to delete the DB directory.
-    (try (deref (:exit proc) 1000 nil) (catch Exception _ nil))
+  (when-let [{:keys [queue ^Thread thread]} @writer-state]
+    (try (.put ^java.util.concurrent.BlockingQueue queue ::stop) (catch Exception _ nil))
+    (try (.join thread 2000) (catch Exception _ nil))
     (reset! writer-state nil)))
 
 ;; --- log-event! ---
@@ -142,9 +193,8 @@
            session-id decision reason elapsed-ms extra agent]}]
   (let [path  (db/db-path)
         sync? (= "1" (System/getenv "CCH_LOG_SYNC"))
-        ;; Insert SQL. PRAGMA busy_timeout matters only on the per-call
-        ;; fallback path (concurrent sqlite3 procs); the writer thread
-        ;; sets WAL once at startup and is the sole writer.
+        ;; SQL text for the per-call fallback only; the writer binds
+        ;; parameters instead.
         insert (format
                  "INSERT INTO events (session_id, hook_name, event_type, tool_name, file_path, cwd, decision, reason, elapsed_ms, extra, agent) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);"
                  (sql-value session-id)
@@ -167,7 +217,13 @@
 
         @writer-state
         (let [{:keys [^java.util.concurrent.BlockingQueue queue]} @writer-state]
-          (when-not (.offer queue insert)
+          (when-not (.offer queue {:statements
+                                   [(event-statement
+                                      {:session-id session-id :hook-name hook-name
+                                       :event-type event-type :tool-name tool-name
+                                       :file-path file-path :cwd cwd :decision decision
+                                       :reason reason :elapsed-ms elapsed-ms
+                                       :extra extra :agent agent})]})
             (binding [*out* *err*]
               (println "cch.log: writer queue full; dropping event"))))
 
@@ -361,7 +417,23 @@
     (try
       (ensure-db-once! path)
       (if-let [{:keys [^java.util.concurrent.BlockingQueue queue]} @writer-state]
-        (when-not (.offer queue insert)
+        (when-not (.offer queue
+                          {:statements
+                           (into [[(str "INSERT INTO context_snapshots (agent, session_id, used_pct,"
+                                        " current_tokens, window_size, model_id, payload)"
+                                        " VALUES (?,?,?,?,?,?,?)")
+                                   agent session-id used-pct
+                                   (some-> current-tokens long) (some-> window-size long)
+                                   model-id payload]]
+                                 (for [{:keys [event-id schema-version observed-at agent
+                                               window used-percentage resets-at]}
+                                       observations]
+                                   [(str "INSERT OR IGNORE INTO usage_observations (event_id,"
+                                         " schema_version, observed_at, agent, window_key,"
+                                         " used_percentage, resets_at, publishable)"
+                                         " VALUES (?,?,?,?,?,?,?,1)")
+                                    event-id schema-version observed-at agent window
+                                    used-percentage resets-at]))})
           (binding [*out* *err*]
             (println "cch.log: writer queue full; dropping context snapshot")))
         (p/process ["sqlite3" path fallback-sql]

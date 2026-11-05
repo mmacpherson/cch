@@ -751,6 +751,7 @@
    :body (json/generate-string
            {:status "ok"
             :bind @bind-hosts
+            :event-writer (log/writer-health)
             :hooks (mapv (fn [[n h]] {:name n :ns (:ns h) :description (:description h)})
                          (sort-by first hooks))})})
 

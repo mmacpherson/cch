@@ -6,7 +6,9 @@
             [babashka.fs :as fs]
             [babashka.process :as p]
             [clojure.set]
-            [clojure.string]))
+            [clojure.string]
+            [next.jdbc]
+            [next.jdbc.result-set]))
 
 (deftest test-ensure-db
   (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-test-"}))
@@ -320,3 +322,31 @@
         (is (= ["s2" "s1"] (mapv :session_id (log/recent-session-summaries)))))
       (finally
         (fs/delete-tree tmp-dir)))))
+
+(deftest writer-survives-hostile-payload-bytes
+  (testing "quotes, NUL, newlines and SQL-looking text are stored verbatim and do not stall later rows"
+    (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-writer-hostile-"}))
+          db      (str tmp-dir "/test.db")
+          hostile (str "it's a \u0000 NUL'); BEGIN; DROP TABLE events; --\nnext line '' ")
+          failures-before (:count (log/writer-health))]
+      (try
+        (with-redefs [db/db-path (fn [] db)]
+          (log/ensure-db! db)
+          (log/start-writer!)
+          (try
+            (log/log-event! {:hook-name "hostile" :event-type "PostToolUse"
+                             :session-id "s1" :extra hostile :elapsed-ms 1.5
+                             :decision :allow})
+            (dotimes [i 3]
+              (log/log-event! {:hook-name "after" :event-type "PreToolUse"
+                               :session-id "s1" :extra (str "{\"i\":" i "}")}))
+            (finally (log/stop-writer!)))
+          (let [rows (next.jdbc/execute! {:dbtype "sqlite" :dbname db}
+                                         ["SELECT hook_name, extra, elapsed_ms, decision FROM events ORDER BY id"]
+                                         {:builder-fn next.jdbc.result-set/as-unqualified-maps})]
+            (is (= ["hostile" "after" "after" "after"] (mapv :hook_name rows)))
+            (is (= hostile (:extra (first rows))) "stored byte-for-byte, NUL included")
+            (is (= 1.5 (:elapsed_ms (first rows))))
+            (is (= "allow" (:decision (first rows))))
+            (is (= failures-before (:count (log/writer-health))))))
+        (finally (fs/delete-tree tmp-dir))))))
