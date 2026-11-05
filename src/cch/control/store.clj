@@ -219,9 +219,13 @@
   []
   (:last_event_id (first (execute! ["SELECT last_event_id FROM control_summarizer_state WHERE singleton_id=1"]))))
 
-(defn save-summarizer-cursor! [event-id]
+(defn save-summarizer-cursor!
+  "Advance the cursor. It never moves backwards, so a slow pass cannot undo a
+  later one."
+  [event-id]
   (execute! [(str "INSERT INTO control_summarizer_state (singleton_id, last_event_id) VALUES (1, ?) "
-                  "ON CONFLICT(singleton_id) DO UPDATE SET last_event_id=excluded.last_event_id")
+                  "ON CONFLICT(singleton_id) DO UPDATE SET "
+                  "last_event_id=MAX(last_event_id, excluded.last_event_id)")
              (long event-id)]))
 
 (defn assign-seq!

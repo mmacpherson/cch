@@ -144,6 +144,8 @@
       (store/save-summarizer-cursor! 41)
       (store/save-summarizer-cursor! 42)
       (is (= 42 (store/summarizer-cursor)))
+      (store/save-summarizer-cursor! 7)
+      (is (= 42 (store/summarizer-cursor)) "the cursor never moves backwards")
       (store/save-session-summary! {:route-id "codex:a" :status "s1" :auto-name "n1"
                                     :repo "r" :turn-key "t1"})
       (store/save-session-summary! {:route-id "codex:a" :status "s2" :auto-name "n1"

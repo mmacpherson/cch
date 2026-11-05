@@ -351,11 +351,11 @@
 
 (defn turn-ends-after
   "Turn-ending event-log rows (Stop) with id > after-id, oldest first:
-  [{:id :session_id :agent} ...]."
+  [{:id :session_id :agent :timestamp} ...]."
   [after-id & {:keys [limit] :or {limit 500}}]
   (db/query
     (first (sql/format
-             {:select [:id :session-id :agent]
+             {:select [:id :session-id :agent :timestamp]
               :from [:events]
               :where [:and [:> :id (long after-id)]
                       [:= :hook-name "event-log"]
@@ -364,6 +364,11 @@
               :order-by [[:id :asc]]
               :limit (int limit)}
              {:inline true}))))
+
+(defn max-event-id
+  "The newest event id, or 0 for an empty table."
+  []
+  (or (:id (first (db/query "SELECT MAX(id) AS id FROM events"))) 0))
 
 (defn first-event-id-since
   "The id just before the first event at or after an events.timestamp, so a

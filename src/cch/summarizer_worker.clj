@@ -63,10 +63,22 @@
 
 (defn- today-utc [] (str (LocalDate/now ZoneOffset/UTC)))
 
-(defn- seed-cursor [hours]
-  (log/first-event-id-since
-    (.format (.minusHours (LocalDateTime/now ZoneOffset/UTC) hours)
-             (DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss.SSS"))))
+(defn- utc-hours-ago [hours]
+  (.format (.minusHours (LocalDateTime/now ZoneOffset/UTC) hours)
+           (DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss.SSS")))
+
+(defn- seed-cursor
+  "Where a first run starts: the first event of the seed window, or the
+  newest event when the window is empty, never the start of history."
+  [hours]
+  (let [since (log/first-event-id-since (utc-hours-ago hours))]
+    (if (pos? since) since (log/max-event-id))))
+
+(defn recent-ends
+  "Turn ends no older than the cutoff timestamp. History is never summarized,
+  whatever the cursor says. Pure."
+  [ends cutoff]
+  (filter #(and (:timestamp %) (pos? (compare (:timestamp %) cutoff))) ends))
 
 (defn fleet-context
   "Other sessions' summaries updated within window-ms, for distinct naming."
@@ -146,7 +158,8 @@
     (when api-key
       (let [cursor (or (store/summarizer-cursor) (seed-cursor seed-window-hours))
             ends (log/turn-ends-after cursor)
-            sessions (distinct (map (juxt :agent :session_id) ends))]
+            sessions (distinct (map (juxt :agent :session_id)
+                                    (recent-ends ends (utc-hours-ago seed-window-hours))))]
         (doseq [[agent sid] sessions]
           (try
             (summarize-session! s api-key agent sid)

@@ -47,3 +47,9 @@
 (deftest only-priced-models-run
   (is (contains? w/priced-models "claude-haiku-5-5"))
   (is (not (contains? w/priced-models "claude-opus-5-5"))))
+
+(deftest history-is-never-summarized
+  (let [ends [{:id 1 :timestamp "2026-01-01T00:00:00.000"}
+              {:id 2 :timestamp "2026-06-01T12:00:00.000"}
+              {:id 3 :timestamp nil}]]
+    (is (= [2] (map :id (w/recent-ends ends "2026-06-01T00:00:00.000"))))))
