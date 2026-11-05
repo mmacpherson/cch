@@ -136,3 +136,24 @@
         (is (= #{"m1" "m2"} (set (map :message_id rows))))
         (is (= 1 (:seq (first (filter #(= "m1" (:message_id %)) rows)))))
         (is (nil? (:seq (first (filter #(= "m2" (:message_id %)) rows)))))))))
+
+(deftest summaries-usage-and-cursor-round-trip
+  (with-temp-store
+    (fn [_]
+      (is (nil? (store/summarizer-cursor)))
+      (store/save-summarizer-cursor! 41)
+      (store/save-summarizer-cursor! 42)
+      (is (= 42 (store/summarizer-cursor)))
+      (store/save-session-summary! {:route-id "codex:a" :status "s1" :auto-name "n1"
+                                    :repo "r" :turn-key "t1"})
+      (store/save-session-summary! {:route-id "codex:a" :status "s2" :auto-name "n1"
+                                    :repo "r" :turn-key "t2"})
+      (is (= {:status "s2" :auto-name "n1" :repo "r" :turn-key "t2"}
+             (dissoc (get (store/session-summaries) "codex:a") :updated-at)))
+      (is (= 0.0 (:cost_usd (store/summarizer-usage "2026-01-01"))))
+      (store/record-summarizer-usage! "2026-01-01" {:input-tokens 100 :output-tokens 10 :cost-usd 0.25})
+      (store/record-summarizer-usage! "2026-01-01" {:input-tokens 50 :output-tokens 5 :cost-usd 0.5})
+      (let [u (store/summarizer-usage "2026-01-01")]
+        (is (= 2 (:calls u)))
+        (is (= 150 (:input_tokens u)))
+        (is (= 0.75 (:cost_usd u)))))))

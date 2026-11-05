@@ -293,6 +293,35 @@
           :when row]
       row)))
 
+(defn turn-ends-after
+  "Turn-ending event-log rows (Stop) with id > after-id, oldest first:
+  [{:id :session_id :agent} ...]."
+  [after-id & {:keys [limit] :or {limit 500}}]
+  (db/query
+    (first (sql/format
+             {:select [:id :session-id :agent]
+              :from [:events]
+              :where [:and [:> :id (long after-id)]
+                      [:= :hook-name "event-log"]
+                      [:= :event-type "Stop"]
+                      [:is-not :session-id nil]]
+              :order-by [[:id :asc]]
+              :limit (int limit)}
+             {:inline true}))))
+
+(defn first-event-id-since
+  "The id just before the first event at or after an events.timestamp, so a
+  cursor set to it starts there; 0 when there is none."
+  [timestamp]
+  (or (some-> (first (db/query
+                       (first (sql/format
+                                {:select [[[:min :id] :id]]
+                                 :from [:events]
+                                 :where [:>= :timestamp timestamp]}
+                                {:inline true}))))
+              :id dec)
+      0))
+
 ;; --- Context snapshots ---
 
 (defn log-context-snapshot!

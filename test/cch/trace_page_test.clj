@@ -141,3 +141,19 @@
     (is (str/includes? html "<th>name</th><th>id</th>"))
     (is (str/includes? html ">Scrub turn digests<"))
     (is (str/includes? html ">—<") "unnamed sessions show a dash in the name column")))
+
+(deftest auto-names-and-statuses-display
+  (let [names {"codex:c1" {:auto-name "scrub-rules" :status "Tightening host rules"}
+               "codex:c2" {:name "Picked by a person" :auto-name "ignored-auto"}}
+        html (str (hic/html
+                    (page/index-body
+                      {:zone utc :names names
+                       :sessions [{:session_id "c1" :agent "codex" :cwd "/y"
+                                   :timestamp "2026-01-01T00:00:00.000"}
+                                  {:session_id "c2" :agent "codex" :cwd "/y"
+                                   :timestamp "2026-01-01T00:00:00.000"}]})))]
+    (is (str/includes? html "trace-auto"))
+    (is (str/includes? html ">scrub-rules<"))
+    (is (str/includes? html "Tightening host rules"))
+    (is (str/includes? html ">Picked by a person<"))
+    (is (not (str/includes? html "ignored-auto")) "a real name wins over the auto name")))

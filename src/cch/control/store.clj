@@ -47,7 +47,17 @@
    (str "CREATE TABLE IF NOT EXISTS control_codex_alias_bindings ("
         "tool_use_id TEXT PRIMARY KEY, source TEXT NOT NULL,"
         "alias_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL,"
-        "consumed_at INTEGER)")])
+        "consumed_at INTEGER)")
+   ;; Model-written, scrubbed summaries. Never raw provider content.
+   (str "CREATE TABLE IF NOT EXISTS control_session_summaries ("
+        "route_id TEXT PRIMARY KEY, status TEXT, auto_name TEXT, repo TEXT,"
+        "turn_key TEXT, updated_at INTEGER NOT NULL)")
+   (str "CREATE TABLE IF NOT EXISTS control_summarizer_usage ("
+        "day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input_tokens INTEGER NOT NULL,"
+        "output_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL)")
+   (str "CREATE TABLE IF NOT EXISTS control_summarizer_state ("
+        "singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),"
+        "last_event_id INTEGER NOT NULL)")])
 
 (defonce ^:private ensured-paths (atom #{}))
 
@@ -169,6 +179,50 @@
           "WHERE d.source = ? OR d.target = ? "
           "ORDER BY d.created_at DESC LIMIT ?")
      route-id route-id limit]))
+
+(defn session-summaries
+  "Stored summaries keyed by route: {route {:status :auto-name :repo
+  :turn-key :updated-at}}."
+  []
+  (into {}
+        (map (fn [{:keys [route_id status auto_name repo turn_key updated_at]}]
+               [route_id {:status status :auto-name auto_name :repo repo
+                          :turn-key turn_key :updated-at updated_at}]))
+        (execute! ["SELECT route_id, status, auto_name, repo, turn_key, updated_at FROM control_session_summaries"])))
+
+(defn save-session-summary!
+  [{:keys [route-id status auto-name repo turn-key]}]
+  (execute! [(str "INSERT INTO control_session_summaries "
+                  "(route_id, status, auto_name, repo, turn_key, updated_at) VALUES (?,?,?,?,?,?) "
+                  "ON CONFLICT(route_id) DO UPDATE SET status=excluded.status, "
+                  "auto_name=excluded.auto_name, repo=excluded.repo, "
+                  "turn_key=excluded.turn_key, updated_at=excluded.updated_at")
+             route-id status auto-name repo turn-key (System/currentTimeMillis)]))
+
+(defn summarizer-usage
+  "Usage recorded for one UTC day (yyyy-MM-dd), zeros when none."
+  [day]
+  (or (first (execute! ["SELECT day, calls, input_tokens, output_tokens, cost_usd FROM control_summarizer_usage WHERE day=?" day]))
+      {:day day :calls 0 :input_tokens 0 :output_tokens 0 :cost_usd 0.0}))
+
+(defn record-summarizer-usage!
+  [day {:keys [input-tokens output-tokens cost-usd]}]
+  (execute! [(str "INSERT INTO control_summarizer_usage (day, calls, input_tokens, output_tokens, cost_usd) "
+                  "VALUES (?, 1, ?, ?, ?) ON CONFLICT(day) DO UPDATE SET calls=calls+1, "
+                  "input_tokens=input_tokens+excluded.input_tokens, "
+                  "output_tokens=output_tokens+excluded.output_tokens, "
+                  "cost_usd=cost_usd+excluded.cost_usd")
+             day (long input-tokens) (long output-tokens) (double cost-usd)]))
+
+(defn summarizer-cursor
+  "The last event id the summarizer has looked at, or nil before its first run."
+  []
+  (:last_event_id (first (execute! ["SELECT last_event_id FROM control_summarizer_state WHERE singleton_id=1"]))))
+
+(defn save-summarizer-cursor! [event-id]
+  (execute! [(str "INSERT INTO control_summarizer_state (singleton_id, last_event_id) VALUES (1, ?) "
+                  "ON CONFLICT(singleton_id) DO UPDATE SET last_event_id=excluded.last_event_id")
+             (long event-id)]))
 
 (defn assign-seq!
   "Return the channel sequence number for one outgoing message: the next

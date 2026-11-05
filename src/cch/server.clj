@@ -35,6 +35,7 @@
             [cch.overview :as overview]
             [cch.protocol :as proto]
             [cch.stats :as stats]
+            [cch.summarizer-worker :as summarizer-worker]
             [cch.trace-page :as trace-page]
             [cch.usage :as usage]
             [cch.web :as web]
@@ -689,6 +690,17 @@
       (refresh-session-names!))
     names))
 
+(defn- trace-names
+  "Provider names and aliases from the cache, merged with stored model-written
+  auto names and statuses: {route {:name :auto-name :status}}."
+  []
+  (merge-with merge
+              (cached-session-names)
+              (try (into {} (map (fn [[route {:keys [auto-name status]}]]
+                                   [route {:auto-name auto-name :status status}]))
+                         (control-store/session-summaries))
+                   (catch Exception _ {}))))
+
 (defn- handle-trace-page
   "GET /trace lists recent sessions; GET /trace?session=ID shows one
   session's turns, tool calls, replies, and cch messages."
@@ -697,7 +709,7 @@
         zone (java.time.ZoneId/systemDefault)
         body (if (str/blank? session-id)
                (trace-page/index-body {:sessions (log/recent-session-summaries)
-                                       :names (cached-session-names)
+                                       :names (trace-names)
                                        :zone zone})
                (let [rows (log/session-trace-rows session-id)
                      {:keys [agent cwd]} (last rows)
@@ -708,7 +720,7 @@
                     :cwd cwd
                     :turns (activity-trace/turns rows)
                     :messages (session-messages (trace-page/route-id agent session-id))
-                    :names (cached-session-names)
+                    :names (trace-names)
                     :zone zone
                     :now-ms (System/currentTimeMillis)})))]
     {:status 200
@@ -1405,6 +1417,8 @@
         host      (url-host (first bound))]
     (reset! bind-hosts bound)
     (forecast/start-bg-refresh!)
+    ;; Idles unless the global config enables it; see cch.summarizer-worker.
+    (summarizer-worker/start!)
     (println (format "cch serve listening on %s port %d (%d code hook(s) loaded)"
                      (str/join ", " bound) port (count hooks)))
     (when-not (every? loopback? bound)
@@ -1420,6 +1434,7 @@
               (apply stop-fn args)
               (stop-nrepl! nrepl)
               (forecast/stop-bg-refresh!)
+              (summarizer-worker/stop!)
               (db/close-db!)
               (log/stop-writer!))
      :hooks hooks

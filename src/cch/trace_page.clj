@@ -48,6 +48,19 @@
   [agent session-id names]
   (get-in names [(route-id agent session-id) :name]))
 
+(defn- name-cell
+  "The session's name for display: its own name, else the model-written auto
+  name (marked as such), else nil."
+  [agent session-id names]
+  (let [{:keys [name auto-name]} (get names (route-id agent session-id))]
+    (cond
+      name [:span name]
+      auto-name [:span.trace-auto {:title "name suggested by the summarizer"} auto-name]
+      :else nil)))
+
+(defn session-status [agent session-id names]
+  (get-in names [(route-id agent session-id) :status]))
+
 (defn session-label
   "Name and mnemonic together (\"homelab-a8 · rapid-maple-af69\"), or the
   mnemonic alone when the session has no name."
@@ -170,11 +183,13 @@
         turns (place-messages turns (map #(message-step route % names) messages))]
     (list
       [:div.page-header
-       [:h1 (or (session-name agent session-id names)
+       [:h1 (or (name-cell agent session-id names)
                 (session-label agent session-id))]
        [:div.page-actions
         [:a.btn {:href (str "/trace?session=" session-id)} "↻ refresh"]
         [:a.btn {:href (str "/events?session=" session-id)} "raw events"]]]
+      (when-let [status (session-status agent session-id names)]
+        [:p.trace-status status])
       [:p.page-subtitle.mono.sm
        (session-label agent session-id) " · "
        (if (= "codex" agent) "Codex" "Claude") " · " route
@@ -198,7 +213,9 @@
               :when (#{"claude-code" "codex"} agent)]
           [:tr
            [:td [:a {:href (str "/trace?session=" session_id)}
-                 (or (session-name agent session_id names) "—")]]
+                 (or (name-cell agent session_id names) "—")]
+            (when-let [status (session-status agent session_id names)]
+              [:div.xs.muted.trace-status-line status])]
            [:td.mono.xs [:a {:href (str "/trace?session=" session_id)}
                          (session-label agent session_id)]]
            [:td.sm (if (= "codex" agent) "Codex" "Claude")]

@@ -582,3 +582,6 @@ body {
   .trace-step { grid-template-columns: 0.9em 5em minmax(0, 1fr); }
   .trace-step .trace-time, .trace-step .trace-duration { display: none; }
 }
+.trace-auto { font-style: italic; }
+.trace-status { margin: -0.4em 0 0.6em; color: var(--fg); }
+.trace-status-line { margin-top: 0.1em; max-width: 42em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
