@@ -240,3 +240,42 @@
       (is (= "model = \"gpt-5.5\"\n" (slurp path)))
       (finally
         (fs/delete-tree dir)))))
+
+(deftest dispatcher-content-survives-lost-displaced-and-duplicate-markers
+  (let [block (cs/render-block "cch-dispatcher" sample-entries)
+        raw (str/replace block #"(?m)^# cch:.*\n" "")]
+    (doseq [contents [raw (str "# cch:begin cch-dispatcher\n" raw)
+                       (str raw "# cch:end cch-dispatcher\n")
+                       (str "# cch:begin cch-dispatcher\n[user]\nvalue = 1\n" raw
+                            "# cch:end cch-dispatcher\n")
+                       (str raw block)]]
+      (is (= contents (cs/upsert-block contents "cch-dispatcher" sample-entries)))))
+  (with-tmp
+    (fn [tmp]
+      (let [contents (str/replace (cs/render-block "cch-dispatcher" sample-entries)
+                                #"(?m)^# cch:.*\n" "")]
+        (spit tmp contents)
+        (with-redefs [cs/write-config! (fn [& _] (throw (ex-info "Should not write" {})))]
+          (is (= contents (cs/install-hook! tmp "cch-dispatcher" sample-entries))))))))
+
+(deftest dispatcher-diagnostics-report-counts-without-command-values
+  (let [block (cs/render-block "cch-dispatcher" sample-entries)
+        report (cs/dispatcher-diagnostics (str block block))
+        begin-only (cs/dispatcher-diagnostics "# cch:begin cch-dispatcher\n")
+        mismatched (cs/dispatcher-diagnostics "# cch:begin a\n# cch:end b\n")]
+    (is (= {"PreToolUse" 2} (:events report)))
+    (is (= {"PreToolUse" 2} (:duplicates report)))
+    (is (empty? (:orphan-markers report)))
+    (is (= 1 (count (:orphan-markers begin-only))))
+    (is (= 2 (count (:orphan-markers mismatched))))))
+
+(deftest dispatcher-scanner-handles-rewritten-toml
+  (let [command (:command (first sample-entries))
+        inline (str "hooks = [{type = 'command', command = " (pr-str command) "}]\n")
+        multiline (str "command = '''\n" command "\n'''\n")]
+    (doseq [contents [inline multiline]]
+      (is (= {"PreToolUse" 1} (:events (cs/dispatcher-diagnostics contents))))
+      (is (= contents (cs/upsert-block contents "cch-dispatcher" sample-entries))))
+    (is (empty? (:events (cs/dispatcher-diagnostics (str "# command = " (pr-str command) "\n")))))
+    (is (empty? (:orphan-markers
+                 (cs/dispatcher-diagnostics "note = '''\n# cch:begin not-a-marker\n'''\n"))))))

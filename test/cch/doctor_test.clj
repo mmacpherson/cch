@@ -21,10 +21,10 @@
   (testing "false for empty settings"
     (is (not (doctor/claude-dispatch-installed? {})))))
 
-(deftest codex-block-installed?-detects-sentinel
-  (testing "sentinel block form"
-    (is (doctor/codex-block-installed?
-          (str "foo\n# cch:begin " codex/block-name "\nbar\n# cch:end " codex/block-name))))
+(deftest codex-block-installed?-detects-content
+  (testing "sentinel comments alone do not prove functional wiring"
+    (is (not (doctor/codex-block-installed?
+          (str "foo\n# cch:begin " codex/block-name "\nbar\n# cch:end " codex/block-name)))))
   (testing "raw dispatch-command form (pre-sentinel installs)"
     (is (doctor/codex-block-installed?
           (str "[[hooks.PreToolUse.hooks]]\ntype = \"command\"\n"
@@ -137,3 +137,13 @@
   (let [box {:server {:host "127.0.0.1" :port 8888 :reachable? true :bind ["::"]}
              :hooks {:enabled #{}}}]
     (is (str/includes? (doctor/render box []) "bind     ⚠ reachable from the network"))))
+
+(deftest duplicate-dispatch-and-orphan-markers-are-actionable
+  (let [box {:server {:reachable? true}}
+        agents [{:agent "codex" :present? true :installed? true
+                 :extra {:dispatcher {:duplicates {"Stop" 2}
+                                      :orphan-markers [{:name "cch-dispatcher"}]}}}]
+        problems (doctor/problems box agents)]
+    (is (= 2 (count problems)))
+    (is (some #(str/includes? % "duplicate dispatcher") problems))
+    (is (some #(str/includes? % "orphaned") problems))))

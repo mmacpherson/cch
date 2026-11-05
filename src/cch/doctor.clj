@@ -15,7 +15,6 @@
   (:require [babashka.fs :as fs]
             [cheshire.core :as json]
             [cch.agents.agy :as agy]
-            [cch.agents.codex :as codex]
             [cch.config-db :as cdb]
             [cli.codex-settings :as cs]
             [cli.registry :as registry]
@@ -50,9 +49,10 @@
   not a tag)."
   [toml]
   (let [s (or toml "")]
-    (or (and (str/includes? s "/dispatch/")
-             (str/includes? s "X-CCH-Agent: codex"))
-        (str/includes? s (str "# cch:begin " codex/block-name)))))
+    (boolean
+      (or (seq (:events (cs/dispatcher-diagnostics s)))
+          (and (str/includes? s "/dispatch/")
+               (str/includes? s "X-CCH-Agent: codex"))))))
 
 (defn agy-hooks-installed?
   "True if a parsed agy hooks.json (string keys) carries cch's dispatcher key."
@@ -161,7 +161,8 @@
      :present?   (fs/exists? (cs/codex-home))
      :installed? (codex-block-installed? toml)
      :config     path
-     :extra      {:trusted-projects (count trusted)
+     :extra      {:dispatcher (cs/dispatcher-diagnostics toml)
+                  :trusted-projects (count trusted)
                   :cwd-trusted?     (path-covered-by? trusted cwd)}}))
 
 (defn detect-agy []
@@ -217,12 +218,23 @@
 
 (defn- dot [ok?] (if ok? "●" "○"))
 
+(defn dispatcher-problems [agents]
+  (mapcat (fn [{:keys [agent extra]}]
+            (let [{:keys [duplicates orphan-markers events dispatcher-markers?]} (:dispatcher extra)]
+              (cond-> []
+                (and dispatcher-markers? (empty? events))
+                (conj (str agent " dispatcher markers contain no dispatcher commands; repair stale markers before installing"))
+                (seq duplicates) (conj (str agent " has duplicate dispatcher entries: "
+                                            (str/join ", " (sort (keys duplicates)))))
+                (seq orphan-markers) (conj (str agent " has orphaned or mismatched cch markers")))))
+          agents))
+
 (defn problems
   "Actionable problems worth a nonzero exit: the server is down, or an agent
   present on this box has cch not wired. Codex trust is advisory (best-effort,
   version-dependent) so it warns but never fails the exit code."
   [box agents]
-  (cond-> []
+  (cond-> (vec (dispatcher-problems agents))
     (not (get-in box [:server :reachable?]))
     (conj "dispatcher not reachable — code-hook dispatch will fail")
     :always

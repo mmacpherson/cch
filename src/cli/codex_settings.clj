@@ -21,6 +21,7 @@
 
   See `claude-code-hooks-x9h` and 14s notes for the Codex TOML schema."
   (:require [babashka.fs :as fs]
+            [cheshire.core :as json]
             [clojure.string :as str]))
 
 (defn resolve-codex-home
@@ -173,24 +174,80 @@
   [contents]
   (str/replace contents any-block-pattern ""))
 
+;; Read string assignments without round-tripping TOML. Matching the whole
+;; value also avoids interpreting commands or markers inside multiline strings.
+(def ^:private string-field-pattern
+  #"(?m)#[^\r\n]*|(?:^|[\s,{])([A-Za-z0-9_-]+|\"[^\"\r\n]+\"|'[^'\r\n]+')[ \t]*=[ \t]*(?:\"\"\"([\s\S]*?)\"\"\"|'''([\s\S]*?)'''|\"((?:\\.|[^\"\\\r\n])*)\"|'([^'\r\n]*)')")
+
+(defn- string-fields [contents]
+  (for [[_ key multi-basic multi-literal basic literal] (re-seq string-field-pattern (or contents ""))
+        :when key]
+    {:key (str/replace key #"^[\"']|[\"']$" "")
+     :value (or multi-basic multi-literal
+                (when basic
+                  (try (json/parse-string (str "\"" basic "\""))
+                       (catch Exception _ basic)))
+                literal)}))
+
+(defn- dispatch-event [command]
+  (when (and (re-find #"(?i)\bcurl\b" command)
+             (re-find #"(?i)(?:(?:-X|--request)(?:=|\s*)[\"']?POST\b|--data(?:-binary|-raw|-ascii|-urlencode)?(?:=|\s))" command))
+    (second (re-find #"/dispatch/([A-Za-z][A-Za-z0-9]*)" command))))
+
+(defn dispatcher-diagnostics
+  "Content-based dispatcher counts and malformed cch markers. No command
+  values are returned. Best-effort TOML scanning; existing dispatch commands
+  are preserved rather than rewritten, including hand-managed entries."
+  [contents]
+  (let [events (frequencies (keep #(when (= "command" (:key %)) (dispatch-event (:value %)))
+                                  (string-fields contents)))
+        outside-strings (str/replace (or contents "") string-field-pattern
+                                     #(if (second %) (str/replace (first %) #"[^\r\n]" " ") (first %)))
+        markers (keep-indexed (fn [index ln]
+                                (when-let [[_ direction name] (re-matches #"\s*# cch:(begin|end) ([^\s]+)\s*" ln)]
+                                  {:direction direction :name name :line (inc index)}))
+                              (str/split-lines outside-strings))
+        {:keys [stack issues]} (reduce (fn [{:keys [stack] :as state} marker]
+                                         (if (= "begin" (:direction marker))
+                                           (update state :stack conj marker)
+                                           (if (= (:name marker) (:name (peek stack)))
+                                             (update state :stack pop)
+                                             (update state :issues conj marker))))
+                                       {:stack [] :issues []} markers)]
+    {:events events
+     :duplicates (into {} (filter (fn [[_ n]] (> n 1))) events)
+     :orphan-markers (vec (concat issues stack))
+     :dispatcher-markers? (boolean (some #(= "cch-dispatcher" (:name %)) markers))}))
+
+(defn dispatcher-present?
+  "True when dispatcher content or its markers need preservation/review."
+  [contents]
+  (let [{:keys [events dispatcher-markers?]} (dispatcher-diagnostics contents)]
+    (boolean (or (seq events) dispatcher-markers?))))
+
 (defn upsert-block
   "Return new contents with the named cch block replaced (or appended).
-  Always separates from prior content by a blank line."
+  Dispatcher content is left untouched when commands or dispatcher markers
+  already exist, even if markers moved. Other blocks are replaced as before.
+  Always separates new blocks from prior content by a blank line."
   [contents name entries]
-  (let [stripped (strip-block contents name)
+  (if (and (= name "cch-dispatcher") (dispatcher-present? contents))
+    contents
+    (let [stripped (strip-block contents name)
         sep (cond
               (str/blank? stripped) ""
               (str/ends-with? stripped "\n\n") ""
               (str/ends-with? stripped "\n") "\n"
               :else "\n\n")]
-    (str stripped sep (render-block name entries))))
+    (str stripped sep (render-block name entries)))))
 
 (defn install-hook!
   "Atomically install (or replace) the cch block for `name` in the
   Codex config at `path`. `entries` as in `render-block`."
   [path name entries]
-  (let [updated (upsert-block (read-config path) name entries)]
-    (write-config! path updated)
+  (let [contents (read-config path)
+        updated (upsert-block contents name entries)]
+    (when-not (= contents updated) (write-config! path updated))
     updated))
 
 (defn- install-mcp-block!

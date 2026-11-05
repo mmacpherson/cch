@@ -18,6 +18,7 @@
             [cch.db :as db]
             [cch.doctor :as doctor]
             [cch.log :as log]
+            [cli.codex-settings :as cs]
             [cli.registry :as registry]
             [cli.settings :as settings]
             [clojure.string :as str]))
@@ -101,10 +102,13 @@
     (print-server-warning-if-down)))
 
 (defn- run-codex-install! []
-  (let [{:keys [path written skipped]} (codex/install!)]
+  (let [existing? (cs/dispatcher-present? (cs/read-config (cs/codex-config-path)))
+        {:keys [path written skipped]} (codex/install!)]
     (enable-code-hooks-globally!)
     (println (format "Installed cch to %s" path))
-    (println (format "  %d codex hook entries written" written))
+    (if existing?
+      (println "  existing dispatcher configuration preserved; no entries appended (run cch doctor to check it)")
+      (println (format "  %d codex hook entries written" written)))
     (when (seq skipped)
       (println (format "  skipped %d event(s) Codex doesn't support: %s"
                        (count skipped) (str/join ", " skipped))))
