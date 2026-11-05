@@ -103,7 +103,10 @@
                "# code cache, mmapped jar, native libs make up the rest).\n"
                "# Override via $CCH_JAVA_OPTS for debugging.\n"
                "set -euo pipefail\n"
-               "here=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"\n"
+               ;; pwd -P: resolve the versioned directory behind the
+               ;; runtime symlink, so this JVM's java.home stays put
+               ;; when a later install swaps the link.
+               "here=\"$(cd \"$(dirname \"$0\")/..\" && pwd -P)\"\n"
                "exec \"$here/bin/java\" \\\n"
                "  -Xmx256m \\\n"
                "  -XX:+UseSerialGC \\\n"

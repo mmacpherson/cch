@@ -35,6 +35,7 @@
             [cch.overview :as overview]
             [cch.protocol :as proto]
             [cch.stats :as stats]
+            [cch.spawn-health :as spawn-health]
             [cch.summarizer-worker :as summarizer-worker]
             [cch.trace-page :as trace-page]
             [cch.usage :as usage]
@@ -752,6 +753,7 @@
            {:status "ok"
             :bind @bind-hosts
             :event-writer (log/writer-health)
+            :spawn (spawn-health/health)
             :hooks (mapv (fn [[n h]] {:name n :ns (:ns h) :description (:description h)})
                          (sort-by first hooks))})})
 
@@ -1395,8 +1397,11 @@
   `localhost` works whichever address it resolves to and nothing off this
   machine can reach hook dispatch, the dashboard, or /mcp. Pass :host (or
   --host / CCH_HOST) to listen on one explicit address instead, e.g. \"::\" to
-  open it to the network deliberately."
-  [{:keys [port host nrepl-port] :or {port 8888}}]
+  open it to the network deliberately.
+
+  :on-spawn-failure is called when this JVM repeatedly fails to start child
+  processes (see cch.spawn-health); -main exits so the service restarts."
+  [{:keys [port host nrepl-port on-spawn-failure] :or {port 8888}}]
   (registry/validate-registry!)
   (log/start-writer!)
   (db/open-db!)
@@ -1420,6 +1425,7 @@
     (forecast/start-bg-refresh!)
     ;; Idles unless the global config enables it; see cch.summarizer-worker.
     (summarizer-worker/start!)
+    (spawn-health/start! {:on-unhealthy on-spawn-failure})
     (println (format "cch serve listening on %s port %d (%d code hook(s) loaded)"
                      (str/join ", " bound) port (count hooks)))
     (when-not (every? loopback? bound)
@@ -1436,6 +1442,7 @@
               (stop-nrepl! nrepl)
               (forecast/stop-bg-refresh!)
               (summarizer-worker/stop!)
+              (spawn-health/stop!)
               (db/close-db!)
               (log/stop-writer!))
      :hooks hooks
@@ -1464,7 +1471,10 @@
         host       (not-empty (or (some->> args (drop-while #(not= "--host" %)) second)
                                   (System/getenv "CCH_HOST")))
         nrepl-port (parse-int-opt args "--nrepl" "CCH_NREPL_PORT")
-        {:keys [stop]} (start! {:port port :host host :nrepl-port nrepl-port})
+        {:keys [stop]} (start! {:port port :host host :nrepl-port nrepl-port
+                                ;; EX_TEMPFAIL: systemd (Restart=on-failure)
+                                ;; and launchd (KeepAlive) start a fresh JVM.
+                                :on-spawn-failure (fn [_] (System/exit 75))})
         latch (promise)]
     (.addShutdownHook (Runtime/getRuntime)
                       (Thread. (fn []

@@ -87,6 +87,15 @@ registration and their narrowly scoped MCP routing tools. Neither command
 enables a provider's proprietary Remote Control feature, copies provider
 credentials, or requires per-session pairing.
 
+`scripts/install` deploys each build into its own directory under
+`~/.local/share/cch/runtimes/`, switches the `runtime` symlink atomically, and
+restarts the cch services. The newest three builds are kept. A running process
+keeps using the build it started from, because replacing a JVM's files in
+place breaks its ability to start child processes. If that happens anyway, for
+example after an in-place JDK upgrade, `cch serve` notices repeated spawn
+failures, reports them under `spawn` in `/health`, and exits so its service
+manager starts a fresh process.
+
 Open the runner-local application at `http://127.0.0.1:8888/` after starting
 the installed service. It listens on loopback only (IPv4 and IPv6) because it
 serves hook dispatch and local activity; set `CCH_HOST` (or `cch serve --host`)

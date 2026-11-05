@@ -20,14 +20,49 @@ runtime_bin="$runtime_dst/bin/cch"
 mkdir -p "$bin" "$share"
 
 # Runtime: deploy the jlink'd image built by `just build`.
+#
+# Each install lands in a fresh versioned directory under runtimes/, and
+# `runtime` is a symlink swapped to it with one atomic rename. A running JVM
+# never has its own JRE files replaced underneath it: replacing them in place
+# breaks its ability to start child processes (posix_spawn fails) until it
+# restarts. The launcher resolves its real directory, so each JVM keeps
+# using the version it started from. The newest few versions are kept, so
+# processes not restarted below (per-session `cch control mcp`) keep theirs.
 runtime_src="$repo/target/cch-runtime"
 if [[ ! -d "$runtime_src" ]]; then
   echo "Error: runtime image not found at $runtime_src" >&2
   echo "Build it first:  just build" >&2
   exit 1
 fi
-rsync -a --delete "$runtime_src/" "$runtime_dst/"
-echo "  $runtime_dst  (deployed from target/cch-runtime)"
+runtimes="$share/runtimes"
+keep_runtimes=3
+version="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "$runtimes"
+rsync -a "$runtime_src/" "$runtimes/.$version.partial/"
+mv "$runtimes/.$version.partial" "$runtimes/$version"
+
+# rename(2) replaces the symlink atomically and, unlike `mv`, never descends
+# into the directory an existing symlink points at (GNU and BSD alike).
+atomic_rename() { perl -e 'rename($ARGV[0], $ARGV[1]) or die "rename: $!\n"' "$1" "$2"; }
+
+if [[ -d "$runtime_dst" && ! -L "$runtime_dst" ]]; then
+  # One-time migration from the old in-place directory.
+  mv "$runtime_dst" "$runtimes/00000000T000000Z-legacy"
+fi
+ln -s "runtimes/$version" "$share/.runtime.$$"
+atomic_rename "$share/.runtime.$$" "$runtime_dst"
+echo "  $runtime_dst -> runtimes/$version  (deployed from target/cch-runtime)"
+
+# Prune: keep the newest $keep_runtimes versions; never the current one.
+old_versions=()
+while IFS= read -r dir; do old_versions+=("$dir"); done \
+  < <(find "$runtimes" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | sort)
+prune_count=$(( ${#old_versions[@]} - keep_runtimes ))
+for (( i = 0; i < prune_count; i++ )); do
+  [[ "$(basename "${old_versions[i]}")" == "$version" ]] && continue
+  rm -rf "${old_versions[i]}"
+done
+find "$runtimes" -mindepth 1 -maxdepth 1 -name '.*.partial' -type d -mmin +60 -exec rm -rf {} + 2>/dev/null || true
 
 # cch — thin launcher that execs the bundled runtime. NOT a symlink: the runtime
 # launcher locates its JRE and uberjar relative to its own real path, so it must
