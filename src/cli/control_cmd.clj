@@ -100,11 +100,14 @@
   ["claude" "mcp" "add" "--scope" "user" "--transport" "http" "cch" url
    "--header" (str "Authorization: Bearer " token)])
 
+(def ^:private claude-mcp-remove-command
+  ["claude" "mcp" "remove" "cch" "--scope" "user"])
+
 (defn- mcp-commands [agent codex-home cch-bin pairing-path revision]
   (case agent
     :claude
     {:get ["claude" "mcp" "get" "cch"]
-     :remove ["claude" "mcp" "remove" "cch" "--scope" "user"]
+     :remove claude-mcp-remove-command
      :add (vec (concat ["claude" "mcp" "add" "--scope" "user" "cch"
                         "--env" (str "CODEX_HOME=" codex-home)
                         "--env" "CCH_MCP_CALLER=claude"
@@ -284,14 +287,16 @@
       (update-in data [:permissions :allow] #(vec (remove (set settings/control-mcp-permissions) %)))
       data)))
 
-(defn- private-json! [path data]
-  (let [dir (or (fs/parent path) (fs/path "."))
-        tmp (fs/create-temp-file {:dir dir :prefix ".cch-uninstall-" :suffix ".json"})]
-    (try
-      (try (fs/set-posix-file-permissions tmp "rw-------") (catch UnsupportedOperationException _ nil))
-      (spit (str tmp) (json/generate-string data {:pretty true}))
-      (fs/move tmp path {:replace-existing true})
-      (finally (fs/delete-if-exists tmp)))))
+(defn- write-control-json! [path data]
+  (codex-settings/write-config! path (json/generate-string data {:pretty true})))
+
+(defn- remove-claude-mcp! []
+  (when (command-available? "claude")
+    (let [result (subprocess/run claude-mcp-remove-command)]
+      (when-not (zero? (:exit result))
+        (throw (ex-info "Could not remove Claude MCP configuration through its CLI"
+                        {:type :mcp-uninstall-failed})))
+      true)))
 
 (defn- read-control-json [path]
   (try
@@ -312,17 +317,18 @@
          data (read-control-json claude-path)
          settings-path (or settings-path (settings/global-settings-path))
          settings-data (read-control-json settings-path)
-         codex-result (codex-settings/remove-control-config! (or codex-path (codex-settings/codex-config-path)))
          entry (get-in data [:mcpServers :cch])
          owned? (boolean (and entry (owned-claude-mcp? entry)))
-         _ (when owned? (private-json! claude-path (update data :mcpServers dissoc :cch)))
+         claude-removed? (boolean (and owned? (remove-claude-mcp!)))
+         codex-result (codex-settings/remove-control-config! (or codex-path (codex-settings/codex-config-path)))
          cleaned (strip-control-settings settings-data)
-         _ (when-not (= settings-data cleaned) (private-json! settings-path cleaned))
+         _ (when-not (= settings-data cleaned) (write-control-json! settings-path cleaned))
          env-path (or env-path (codex-service/env-file-path (System/getProperty "user.home")))
          env-existed? (fs/exists? env-path)]
      (codex-service/remove-env-file! env-path)
      {:codex codex-result
-      :claude {:mcp-removed? owned? :preserved-mcp? (boolean (and entry (not owned?)))}
+      :claude (cond-> {:mcp-removed? claude-removed? :preserved-mcp? (boolean (and entry (not claude-removed?)))}
+                (and owned? (not claude-removed?)) (assoc :reason :cli-unavailable))
       :settings-updated? (not= settings-data cleaned)
       :environment-file-removed? env-existed?})))
 

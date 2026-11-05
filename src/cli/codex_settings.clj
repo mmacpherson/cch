@@ -57,15 +57,21 @@
     ""))
 
 (defn write-config!
-  "Write contents atomically (write to tmp, rename)."
+  "Write contents atomically. Temporary data is owner-only; existing file
+  permissions are retained at replacement, while a new file defaults to 0600."
   [path contents]
   (let [dir (or (fs/parent path) (fs/path "."))]
     (when-not (fs/exists? dir)
       (fs/create-dirs dir))
-    (let [tmp (fs/create-temp-file {:dir dir :prefix ".cch-config-" :suffix ".toml"})]
+    (let [permissions (when (fs/exists? path)
+                        (try (java.nio.file.Files/getPosixFilePermissions
+                               (fs/path path) (make-array java.nio.file.LinkOption 0))
+                             (catch UnsupportedOperationException _ nil)))
+          tmp (fs/create-temp-file {:dir dir :prefix ".cch-config-" :suffix ".toml"})]
       (try
         (try (fs/set-posix-file-permissions tmp "rw-------") (catch UnsupportedOperationException _ nil))
         (spit (str tmp) contents)
+        (when permissions (java.nio.file.Files/setPosixFilePermissions (fs/path tmp) permissions))
         (fs/move tmp path {:replace-existing true})
         (finally (fs/delete-if-exists tmp))))))
 

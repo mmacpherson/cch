@@ -44,7 +44,9 @@
                  (and cch? (some #(= ["control" "mcp"] %) (partition 2 1 args)))))))
 
 (defn stdio-mcp-children
-  "Read process metadata, returning only matching PIDs, never command lines."
+  "Read process metadata, returning only matching PIDs, never command lines.
+  Best effort: OS permissions may hide argv, especially for other users on
+  macOS. An empty result does not prove that no stdio processes exist."
   []
   (try
     (with-open [processes (java.lang.ProcessHandle/allProcesses)]
