@@ -7,7 +7,8 @@ or more machines, and incorporates supported AGY lifecycle and usage
 observations. Execution, credentials, transcripts, approvals, and terminal
 control remain with each provider's native runtime.
 
-The project began as a Claude Code hook framework. Hooks remain a first-class
+The project began as a Claude Code hook framework (hence the name: cch was
+originally `claude-code-hooks`). Hooks remain a first-class
 capability, but they are now one part of a broader system for agent presence,
 ordinary-text routing, execution events, and shared usage forecasts.
 
