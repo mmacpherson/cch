@@ -147,3 +147,20 @@
     (is (= 2 (count problems)))
     (is (some #(str/includes? % "duplicate dispatcher") problems))
     (is (some #(str/includes? % "orphaned") problems))))
+
+(deftest mcp-transport-and-process-reporting
+  (is (= :http (doctor/mcp-transport {:type "http" :url "http://127.0.0.1:8888/mcp"})))
+  (is (= :stdio (doctor/mcp-transport {:command "cch" :args ["control" "mcp"]})))
+  (is (= :absent (doctor/mcp-transport nil)))
+  (is (doctor/stdio-mcp-process? {:command "/opt/cch/bin/java" :args ["-jar" "/opt/cch/lib/cch.jar" "control" "mcp"]}))
+  (is (doctor/stdio-mcp-process? {:command "/opt/cch/bin/cch" :args ["control" "mcp"]}))
+  (is (not (doctor/stdio-mcp-process? {:command "python" :args ["control" "mcp"]})))
+  (is (not (doctor/stdio-mcp-process? {:command "cch" :args ["control" "runner"]})))
+  (let [box {:server {:host "127.0.0.1" :port 8888 :reachable? true}
+             :hooks {:enabled #{}} :mcp-stdio-children [{:pid 123}]}
+        agent {:agent "codex" :present? true :installed? true
+               :extra {:trusted-projects 1 :cwd-trusted? true} :mcp-transport :http}]
+    (is (some #(str/includes? % "lingering") (doctor/problems box [agent])))
+    (is (empty? (doctor/problems box [(assoc agent :mcp-transport :stdio)])))
+    (is (str/includes? (doctor/render box [agent]) "http"))
+    (is (str/includes? (doctor/render box [agent]) "children: 123"))))

@@ -291,3 +291,46 @@
     (is (= new-text (cs/upsert-block new-text "cch-dispatcher" entries)))
     (is (= displaced (cs/upsert-block displaced "cch-dispatcher" entries)))
     (is (= user-hook (cs/upsert-block user-hook "cch-dispatcher" entries)))))
+
+(deftest control-mcp-removal-survives-displaced-markers
+  (let [user-before "model = 'example'\n"
+        user-after "[mcp_servers.other]\ncommand = 'other-mcp'\n"
+        block (cs/render-control-mcp-http-block {:url "http://127.0.0.1:8888/mcp"})
+        displaced (str "# cch:begin cch-control-mcp\n" user-before
+                       (str/replace block #"(?m)^# cch:.*\n" "") user-after
+                       "# cch:end cch-control-mcp\n")
+        result (cs/strip-control-config displaced)]
+    (is (:mcp-removed? result))
+    (is (= :http (:transport (cs/control-mcp-info displaced))))
+    (is (str/includes? (:contents result) user-before))
+    (is (str/includes? (:contents result) user-after))
+    (is (not (str/includes? (:contents result) "[mcp_servers.cch]")))
+    (is (= (:contents result) (:contents (cs/strip-control-config (:contents result)))))))
+
+(deftest stdio-control-removal-is-narrow
+  (let [block (cs/render-control-mcp-block {:command "/opt/cch/bin/cch"
+                                          :args ["control" "mcp"] :env {"CCH_MCP_CALLER" "codex"}})
+        binding (cs/render-block "cch-control-plane" [{:event "PreToolUse" :matcher ".*"
+                                                      :command "'/opt/cch/bin/cch' control bind-codex-source"}])
+        dispatcher (cs/render-block "cch-dispatcher" sample-entries)
+        result (cs/strip-control-config (str block binding dispatcher))
+        unrelated "[mcp_servers.cch]\ncommand = 'other-mcp'\nargs = []\n"]
+    (is (= :stdio (:transport (cs/control-mcp-info block))))
+    (is (:binding-removed? result))
+    (is (str/includes? (:contents result) "cch-dispatcher"))
+    (is (not (str/includes? (:contents result) "CCH_MCP_CALLER")))
+    (is (= unrelated (:contents (cs/strip-control-config unrelated))))
+    (is (:preserved-mcp? (cs/strip-control-config unrelated)))))
+
+(deftest uninstall-never-treats-multiline-string-text-as-config
+  (let [embedded (str "notes = '''\n"
+                      (cs/render-control-mcp-http-block {:url "http://127.0.0.1:8888/mcp"})
+                      (cs/render-block "cch-dispatcher" sample-entries)
+                      "'''\n")
+        genuine (cs/render-control-mcp-http-block {:url "http://127.0.0.1:8888/mcp"})
+        result (cs/strip-control-config (str embedded genuine))]
+    (is (str/starts-with? (:contents result) embedded))
+    (is (str/blank? (subs (:contents result) (count embedded))))
+    (is (= embedded (cs/strip-block embedded "cch-control-mcp")))
+    (is (= embedded (cs/strip-all-blocks embedded)))
+    (is (not (:owned? (cs/control-mcp-info embedded))))))

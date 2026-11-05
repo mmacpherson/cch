@@ -59,12 +59,15 @@
 (defn write-config!
   "Write contents atomically (write to tmp, rename)."
   [path contents]
-  (let [dir (fs/parent path)]
+  (let [dir (or (fs/parent path) (fs/path "."))]
     (when-not (fs/exists? dir)
       (fs/create-dirs dir))
-    (let [tmp (str path ".tmp")]
-      (spit tmp contents)
-      (fs/move tmp path {:replace-existing true}))))
+    (let [tmp (fs/create-temp-file {:dir dir :prefix ".cch-config-" :suffix ".toml"})]
+      (try
+        (try (fs/set-posix-file-permissions tmp "rw-------") (catch UnsupportedOperationException _ nil))
+        (spit (str tmp) contents)
+        (fs/move tmp path {:replace-existing true})
+        (finally (fs/delete-if-exists tmp))))))
 
 (defn- escape-toml-string
   "Minimal escape for a TOML basic string. Backslash and quote only —
@@ -164,15 +167,17 @@
   ;; collapsed into one giant block.
   #"(?m)(?:\A|\n)# cch:begin (?<cchname>[^\n]+)\n[\s\S]*?# cch:end \k<cchname>(?:\n|\z)")
 
+(declare ^:private block-spans ^:private remove-spans)
+
 (defn strip-block
   "Remove the named cch block from `contents`. No-op if absent."
   [contents name]
-  (str/replace contents (block-pattern name) ""))
+  (remove-spans contents (block-spans contents (block-pattern name))))
 
 (defn strip-all-blocks
   "Remove every cch sentinel block from `contents`."
   [contents]
-  (str/replace contents any-block-pattern ""))
+  (remove-spans contents (block-spans contents any-block-pattern)))
 
 ;; Read string assignments without round-tripping TOML. Matching the whole
 ;; value also avoids interpreting commands or markers inside multiline strings.
@@ -189,6 +194,22 @@
                        (catch Exception _ basic)))
                 literal)}))
 
+(defn- structure-text [contents]
+  (str/replace (or contents "") string-field-pattern
+               #(if (second %) (str/replace (first %) #"[^\r\n]" " ") (first %))))
+
+(defn- block-spans [contents pattern]
+  (let [m (re-matcher pattern (structure-text contents))]
+    (loop [result []]
+      (if (.find m)
+        (recur (conj result {:start (.start m) :end (.end m)
+                             :text (subs contents (.start m) (.end m))}))
+        result))))
+
+(defn- remove-spans [contents spans]
+  (reduce (fn [s {:keys [start end]}] (str (subs s 0 start) (subs s end)))
+          contents (reverse spans)))
+
 (defn- dispatch-event [command]
   (when (and (re-find #"(?i)\bcurl\b" command)
              (re-find #"(?i)(?:(?:-X|--request)(?:=|\s*)[\"']?POST\b|--data(?:-binary|-raw|-ascii|-urlencode)?(?:=|\s))" command))
@@ -201,8 +222,7 @@
   [contents]
   (let [events (frequencies (keep #(when (= "command" (:key %)) (dispatch-event (:value %)))
                                   (string-fields contents)))
-        outside-strings (str/replace (or contents "") string-field-pattern
-                                     #(if (second %) (str/replace (first %) #"[^\r\n]" " ") (first %)))
+        outside-strings (structure-text contents)
         markers (keep-indexed (fn [index ln]
                                 (when-let [[_ direction name] (re-matches #"\s*# cch:(begin|end) ([^\s]+)\s*" ln)]
                                   {:direction direction :name name :line (inc index)}))
@@ -225,15 +245,14 @@
   (let [{:keys [events dispatcher-markers?]} (dispatcher-diagnostics contents)]
     (boolean (or (seq events) dispatcher-markers?))))
 
-(defn- safe-dispatcher-block?
+(defn- safe-hook-block?
   "A matched pair can have moved around unrelated TOML. Only splice it when
   its entire body consists of dispatcher hook tables and generated fields."
-  [block]
+  [block command?]
   (let [fields (string-fields block)
-        structure (str/replace block string-field-pattern
-                               #(if (second %) (str/replace (first %) #"[^\r\n]" " ") (first %)))]
+        structure (structure-text block)]
     (and (every? #(contains? #{"matcher" "type" "command"} (:key %)) fields)
-         (every? #(dispatch-event (:value %)) (filter #(= "command" (:key %)) fields))
+         (every? #(command? (:value %)) (filter #(= "command" (:key %)) fields))
          (= 2 (count (re-seq #"(?m)^\s*# cch:(?:begin|end) " structure)))
          (every? #(or (str/blank? %) (re-matches #"\s*#.*" %)
                       (re-matches #"\s*\[\[hooks\.[A-Za-z]+(?:\.hooks)?\]\]\s*" %)
@@ -247,8 +266,8 @@
   Other blocks are replaced as before.
   Always separates new blocks from prior content by a blank line."
   [contents name entries]
-  (let [blocks (re-seq (block-pattern name) contents)
-        safe? (every? safe-dispatcher-block? blocks)
+  (let [blocks (map :text (block-spans contents (block-pattern name)))
+        safe? (every? #(safe-hook-block? % dispatch-event) blocks)
         stripped (if (or (not= name "cch-dispatcher") safe?)
                    (strip-block contents name) contents)]
     (if (and (= name "cch-dispatcher") (dispatcher-present? stripped))
@@ -310,3 +329,72 @@
   (let [updated (strip-all-blocks (read-config path))]
     (write-config! path updated)
     updated))
+
+(defn- tables [contents]
+  (let [structure (structure-text contents)
+        matcher (re-matcher #"(?m)^[ \t]*(\[\[?[^\r\n]+?\]\]?)[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)" structure)
+        headers (loop [result []]
+                  (if (.find matcher)
+                    (let [header (.group matcher 1)
+                          inner (str/replace header #"^\[+|\]+$" "")
+                          path (mapv #(str/replace % #"^[\"']|[\"']$" "")
+                                     (re-seq #"\"[^\"\r\n]+\"|'[^'\r\n]+'|[A-Za-z0-9_-]+" inner))]
+                      (recur (conj result {:start (.start matcher) :path path
+                                           :array? (str/starts-with? header "[[")})))
+                    result))]
+    (mapv (fn [header end] (assoc header :end end :text (subs contents (:start header) end)))
+          headers (concat (map :start (rest headers)) [(count contents)]))))
+
+(defn control-mcp-info
+  "Transport and ownership of the cch MCP table, never credential values."
+  [contents]
+  (let [ts (tables (or contents ""))
+        main (first (filter #(and (not (:array? %)) (= ["mcp_servers" "cch"] (:path %))) ts))
+        fields (into {} (map (juxt :key :value)) (string-fields (:text main)))
+        command (get fields "command")
+        url (get fields "url")
+        args? (boolean (re-find #"(?s)\bargs\s*=\s*\[\s*[\"']control[\"']\s*,\s*[\"']mcp[\"']\s*\]"
+                                (or (:text main) "")))
+        tagged? (boolean (re-find #"(?m)^\s*# cch:begin cch-control-mcp\s*$" (structure-text contents)))
+        owned? (or tagged? (and main (or (= "CCH_MCP_TOKEN" (get fields "bearer_token_env_var"))
+                             (and command args? (re-find #"(?i)(?:^|[/\\])cch(?:\.exe)?$" command)))))]
+    {:present? (boolean main) :owned? (boolean owned?)
+     :transport (cond url :http command :stdio main :unknown :else :absent)}))
+
+(defn strip-control-config
+  "Remove cch-owned MCP tables and the intact source-binding hook. Table
+  boundaries protect unrelated TOML even when cch comments were displaced.
+  Unknown same-named servers and malformed binding blocks are preserved."
+  [contents]
+  (let [info (control-mcp-info contents)
+        owned-tables (when (:owned? info)
+                       (filter #(and (not (:array? %))
+                                     (= ["mcp_servers" "cch"] (subvec (:path %) 0 (min 2 (count (:path %))))))
+                               (tables contents)))
+        stripped (reduce (fn [s {:keys [start text]}]
+                           ;; Preserve comments/spacing after the final property.
+                           (let [m (re-matcher #"(?s)(?:\r?\n[ \t]*(?:#[^\r\n]*)?)*$" text)
+                                 _ (.find m)
+                                 cut (+ start (.start m))]
+                             (str (subs s 0 start) (subs s cut))))
+                         contents (reverse owned-tables))
+        stripped (if (:owned? info)
+                   (remove-spans stripped (block-spans stripped #"(?m)^[ \t]*# cch:(?:begin|end) cch-control-mcp[ \t]*(?:\r?\n|$)"))
+                   stripped)
+        blocks (map :text (block-spans stripped (block-pattern "cch-control-plane")))
+        binding-owned? (and (seq blocks)
+                            (every? #(safe-hook-block? % (fn [command]
+                                                         (re-find #"(?:^|[/\\])cch['\"]?\s+control\s+bind-codex-source\b" command)))
+                                    blocks))]
+    {:contents (if binding-owned? (strip-block stripped "cch-control-plane") stripped)
+     :mcp-removed? (:owned? info)
+     :binding-removed? (boolean binding-owned?)
+     :preserved-binding? (boolean (and (not binding-owned?)
+                                      (re-find #"(?m)^\s*# cch:begin cch-control-plane\s*$" (structure-text stripped))))
+     :preserved-mcp? (and (:present? info) (not (:owned? info)))}))
+
+(defn remove-control-config! [path]
+  (let [contents (read-config path)
+        result (strip-control-config contents)]
+    (when-not (= contents (:contents result)) (write-config! path (:contents result)))
+    (dissoc result :contents)))

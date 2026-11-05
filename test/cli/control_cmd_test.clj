@@ -1,9 +1,12 @@
 (ns cli.control-cmd-test
   (:require [cch.subprocess :as subprocess]
+            [babashka.fs :as fs]
+            [cheshire.core :as json]
             [cch.control.codex :as codex]
             [cch.control.mcp-http :as mcp-http]
             [cli.codex-settings :as codex-settings]
             [cli.control-cmd :as control-cmd]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]))
 
 (deftest claude-http-add-args-registers-http-transport-with-bearer-header
@@ -123,3 +126,76 @@
   (with-redefs [codex/refresh-mcp! (fn [_] (throw (ex-info "bug" {})))]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"bug"
                           (control-cmd/run "refresh-mcp" "codex")))))
+
+(deftest control-uninstall-is-scoped-and-idempotent
+  (let [dir (fs/create-temp-dir {:prefix "cch-uninstall-"})
+        paths {:codex-path (str dir "/config.toml") :claude-path (str dir "/claude.json")
+               :settings-path (str dir "/settings.json") :env-path (str dir "/codex-mcp.env")}
+        other {:command "other-mcp"}
+        claude {:mcpServers {:cch {:type "http" :url "http://127.0.0.1:8888/mcp"} :other other}
+                :projects {:example {:unchanged true}}}
+        settings {:hooks {:SessionStart [{:hooks [{:command "cch control register-claude"
+                                                   :__cch "control-plane:claude-registration"}
+                                                  {:command "user-hook"}]}]
+                           :PreToolUse [{:hooks [{:type "http" :url "http://127.0.0.1:8888/dispatch/PreToolUse"}]}]}
+                  :permissions {:allow ["Read" "mcp__cch__send_message" "mcp__other__tool"]}}]
+    (try
+      (spit (:codex-path paths) (str "model = 'example'\n"
+                                    (codex-settings/render-control-mcp-http-block {:url "http://127.0.0.1:8888/mcp"})))
+      (spit (:claude-path paths) (json/generate-string claude))
+      (spit (:settings-path paths) (json/generate-string settings))
+      (spit (:env-path paths) (str "CCH_MCP_TOKEN=" "synthetic-value"))
+      (with-redefs [subprocess/run (fn [& _] (throw (ex-info "No services or provider commands" {})))]
+        (let [result (control-cmd/uninstall-control! paths)
+              cleaned (json/parse-string (slurp (:claude-path paths)) true)
+              clean-settings (json/parse-string (slurp (:settings-path paths)) true)]
+          (is (get-in result [:codex :mcp-removed?]))
+          (is (get-in result [:claude :mcp-removed?]))
+          (is (:environment-file-removed? result))
+          (is (= {:other other} (:mcpServers cleaned)))
+          (is (= (:projects claude) (:projects cleaned)))
+          (is (= [{:command "user-hook"}] (get-in clean-settings [:hooks :SessionStart 0 :hooks])))
+          (is (= (get-in settings [:hooks :PreToolUse]) (get-in clean-settings [:hooks :PreToolUse])))
+          (is (= ["Read" "mcp__other__tool"] (get-in clean-settings [:permissions :allow])))
+          (is (str/includes? (slurp (:codex-path paths)) "model = 'example'"))
+          (is (not (fs/exists? (:env-path paths))))
+          (when (.contains (.supportedFileAttributeViews (java.nio.file.FileSystems/getDefault)) "posix")
+            (doseq [path [(:claude-path paths) (:settings-path paths) (:codex-path paths)]]
+              (is (= #{java.nio.file.attribute.PosixFilePermission/OWNER_READ
+                       java.nio.file.attribute.PosixFilePermission/OWNER_WRITE}
+                     (set (java.nio.file.Files/getPosixFilePermissions
+                            (fs/path path) (make-array java.nio.file.LinkOption 0))))))))
+        (let [again (control-cmd/uninstall-control! paths)]
+          (is (not (get-in again [:codex :mcp-removed?])))
+          (is (not (get-in again [:claude :mcp-removed?])))
+          (is (not (:settings-updated? again)))
+          (is (not (:environment-file-removed? again)))))
+      (finally (fs/delete-tree dir)))))
+
+(deftest uninstall-help-never-removes-config
+  (with-redefs [control-cmd/uninstall-control! (fn [& _] (throw (ex-info "Must not uninstall" {})))]
+    (is (= "Usage: cch control uninstall\n" (with-out-str (control-cmd/run "uninstall" "--help"))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Usage"
+                          (#'control-cmd/dispatch "uninstall" "--unknown")))))
+
+(deftest control-uninstall-preserves-unknown-server-and-preflights-json
+  (let [dir (fs/create-temp-dir {:prefix "cch-uninstall-"})
+        paths {:codex-path (str dir "/config.toml") :claude-path (str dir "/claude.json")
+               :settings-path (str dir "/settings.json") :env-path (str dir "/codex-mcp.env")}
+        codex "[mcp_servers.cch]\ncommand = 'other-mcp'\n"
+        claude {:mcpServers {:cch {:command "other-mcp" :args []}}}]
+    (try
+      (spit (:codex-path paths) codex)
+      (spit (:claude-path paths) (json/generate-string claude))
+      (spit (:settings-path paths) "{malformed")
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"files left unchanged"
+                            (control-cmd/uninstall-control! paths)))
+      (is (= codex (slurp (:codex-path paths))))
+      (is (= claude (json/parse-string (slurp (:claude-path paths)) true)))
+      (spit (:settings-path paths) "{}")
+      (let [result (control-cmd/uninstall-control! paths)]
+        (is (get-in result [:codex :preserved-mcp?]))
+        (is (get-in result [:claude :preserved-mcp?]))
+        (is (= codex (slurp (:codex-path paths))))
+        (is (= claude (json/parse-string (slurp (:claude-path paths)) true))))
+      (finally (fs/delete-tree dir)))))

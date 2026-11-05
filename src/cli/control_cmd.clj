@@ -15,7 +15,9 @@
             [cch.control.remote :as remote]
             [cch.control.runner :as runner]
             [cch.control.web-auth :as web-auth]
+            [cch.doctor :as doctor]
             [cch.subprocess :as subprocess]
+            [babashka.fs :as fs]
             [cheshire.core :as json]
             [cli.codex-app-server-service :as codex-service]
             [cli.codex-settings :as codex-settings]
@@ -257,6 +259,77 @@
 (defn- print-json [value]
   (println (json/generate-string value {:pretty true})))
 
+(defn- owned-claude-mcp? [entry]
+  (let [command (:command entry)
+        url (:url entry)
+        uri (when (string? url) (try (java.net.URI. url) (catch Exception _ nil)))]
+    (or (some? (:__cch entry))
+        (and (string? command)
+             (re-find #"(?i)(?:^|[/\\])cch(?:\.exe)?$" command)
+             (= ["control" "mcp"] (vec (:args entry))))
+        (and uri (= "/mcp" (.getPath uri))
+             (or (= url (mcp-http/endpoint-url))
+                 (and (#{"http" "https"} (.getScheme uri))
+                      (#{"127.0.0.1" "localhost" "::1" "[::1]"} (.getHost uri))))))))
+
+(defn- strip-control-settings [data]
+  (let [data (if (contains? (:hooks data) :SessionStart)
+               (update-in data [:hooks :SessionStart]
+                          #(vec (keep (fn [entry]
+                                        (let [kept (vec (remove (fn [h] (= "control-plane:claude-registration" (:__cch h)))
+                                                               (:hooks entry)))]
+                                          (when (seq kept) (assoc entry :hooks kept)))) %)))
+               data)]
+    (if (contains? (:permissions data) :allow)
+      (update-in data [:permissions :allow] #(vec (remove (set settings/control-mcp-permissions) %)))
+      data)))
+
+(defn- private-json! [path data]
+  (let [dir (or (fs/parent path) (fs/path "."))
+        tmp (fs/create-temp-file {:dir dir :prefix ".cch-uninstall-" :suffix ".json"})]
+    (try
+      (try (fs/set-posix-file-permissions tmp "rw-------") (catch UnsupportedOperationException _ nil))
+      (spit (str tmp) (json/generate-string data {:pretty true}))
+      (fs/move tmp path {:replace-existing true})
+      (finally (fs/delete-if-exists tmp)))))
+
+(defn- read-control-json [path]
+  (try
+    (let [data (settings/read-settings path)]
+      (when-not (map? data)
+        (throw (ex-info "Invalid control config" {})))
+      data)
+    (catch Exception _
+      (throw (ex-info "Cannot parse control JSON configuration; files left unchanged"
+                      {:type :invalid-control-config})))))
+
+(defn uninstall-control!
+  "Remove only control-owned MCP entries, registration and exact tool grants.
+  Paths are injectable; services, dispatcher hooks and unrelated config remain."
+  ([] (uninstall-control! {}))
+  ([{:keys [codex-path claude-path settings-path env-path]}]
+   (let [claude-path (or claude-path (doctor/claude-mcp-config-path))
+         data (read-control-json claude-path)
+         settings-path (or settings-path (settings/global-settings-path))
+         settings-data (read-control-json settings-path)
+         codex-result (codex-settings/remove-control-config! (or codex-path (codex-settings/codex-config-path)))
+         entry (get-in data [:mcpServers :cch])
+         owned? (boolean (and entry (owned-claude-mcp? entry)))
+         _ (when owned? (private-json! claude-path (update data :mcpServers dissoc :cch)))
+         cleaned (strip-control-settings settings-data)
+         _ (when-not (= settings-data cleaned) (private-json! settings-path cleaned))
+         env-path (or env-path (codex-service/env-file-path (System/getProperty "user.home")))
+         env-existed? (fs/exists? env-path)]
+     (codex-service/remove-env-file! env-path)
+     {:codex codex-result
+      :claude {:mcp-removed? owned? :preserved-mcp? (boolean (and entry (not owned?)))}
+      :settings-updated? (not= settings-data cleaned)
+      :environment-file-removed? env-existed?})))
+
+(defn- uninstall! []
+  (print-json (uninstall-control!))
+  (println "Existing sessions keep their current connections; reconnect MCP sessions to apply removal."))
+
 (defn- register-claude! []
   (let [payload (json/parse-string (slurp *in*) true)]
     (claude/register-from-hook! payload)
@@ -377,6 +450,7 @@
   (println)
   (println "Commands:")
   (println "  install          One-time automatic registration + MCP setup")
+  (println "  uninstall        Remove control MCP config and token environment file")
   (println "  pair             Persist one-time runner environment + install service")
   (println "  doctor           Check pairing, supervision, and native capabilities")
   (println "  sessions         List sanitized native session presence")
@@ -419,6 +493,12 @@
   (let [[command & more] args]
     (case command
       "install" (install!)
+      "uninstall" (cond
+                    (empty? more) (uninstall!)
+                    (contains? #{["--help"] ["-h"]} (vec more))
+                    (println "Usage: cch control uninstall")
+                    :else (throw (ex-info "Usage: cch control uninstall"
+                                          {:type :invalid-cli-options})))
       "pair" (pair!)
       "doctor" (print-json (control-doctor/report))
       "sessions" (print-json (control/list-sessions))

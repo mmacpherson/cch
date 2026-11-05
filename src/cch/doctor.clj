@@ -23,6 +23,41 @@
 
 (defn- home [] (System/getProperty "user.home"))
 
+(defn claude-mcp-config-path [] (str (home) "/.claude.json"))
+
+(defn mcp-transport
+  "Transport of a parsed named MCP entry. Never returns configuration values."
+  [entry]
+  (cond
+    (not (map? entry)) :absent
+    (string? (:url entry)) :http
+    (string? (:command entry)) :stdio
+    :else :unknown))
+
+(defn stdio-mcp-process?
+  "Recognize cch MCP subprocesses from executable/argv without shell parsing."
+  [{:keys [command args]}]
+  (let [args (vec args)
+        cch? (or (re-find #"(?i)(?:^|[/\\])cch(?:\.exe)?$" (or command ""))
+                 (some #(or (re-find #"(?:^|[/\\])cch\.jar$" %) (= "cli.cch" %)) args))]
+    (boolean (or (some #{"cch.control.mcp"} args)
+                 (and cch? (some #(= ["control" "mcp"] %) (partition 2 1 args)))))))
+
+(defn stdio-mcp-children
+  "Read process metadata, returning only matching PIDs, never command lines."
+  []
+  (try
+    (with-open [processes (java.lang.ProcessHandle/allProcesses)]
+      (vec (keep (fn [^java.lang.ProcessHandle p]
+                   (try
+                     (let [info (.info p)]
+                       (when (stdio-mcp-process? {:command (.orElse (.command info) "")
+                                                 :args (vec (.orElse (.arguments info) (make-array String 0)))})
+                         {:pid (.pid p)}))
+                     (catch Exception _ nil)))
+                 (iterator-seq (.iterator processes)))))
+    (catch Exception _ [])))
+
 ;; ---------------------------------------------------------------------------
 ;; Pure detectors — operate on already-parsed content, no I/O.
 ;; ---------------------------------------------------------------------------
@@ -151,7 +186,10 @@
     {:agent      "claude-code"
      :present?   (fs/exists? (str (home) "/.claude"))
      :installed? (claude-dispatch-installed? (settings/read-settings path))
-     :config     path}))
+     :config     path
+     :mcp-transport (try (mcp-transport (get-in (settings/read-settings (claude-mcp-config-path))
+                                               [:mcpServers :cch]))
+                         (catch Exception _ :unknown))}))
 
 (defn detect-codex [cwd]
   (let [path (cs/codex-config-path)
@@ -161,6 +199,7 @@
      :present?   (fs/exists? (cs/codex-home))
      :installed? (codex-block-installed? toml)
      :config     path
+     :mcp-transport (:transport (cs/control-mcp-info toml))
      :extra      {:dispatcher (cs/dispatcher-diagnostics toml)
                   :trusted-projects (count trusted)
                   :cwd-trusted?     (path-covered-by? trusted cwd)}}))
@@ -186,7 +225,8 @@
   {:server {:host "127.0.0.1" :port 8888
             :reachable? (server-reachable? "127.0.0.1" 8888)
             :bind (server-bind "127.0.0.1" 8888)}
-   :hooks  {:enabled (enabled-code-hooks (cdb/list-for-scope cdb/global-scope))}})
+   :hooks  {:enabled (enabled-code-hooks (cdb/list-for-scope cdb/global-scope))}
+   :mcp-stdio-children (stdio-mcp-children)})
 
 ;; ---------------------------------------------------------------------------
 ;; Report model + rendering.
@@ -230,11 +270,14 @@
           agents))
 
 (defn problems
-  "Actionable problems worth a nonzero exit: the server is down, or an agent
-  present on this box has cch not wired. Codex trust is advisory (best-effort,
+  "Actionable problems worth a nonzero exit: wiring/dispatcher failures and
+  leftover stdio children after the HTTP cutover. Codex trust is advisory (best-effort,
   version-dependent) so it warns but never fails the exit code."
   [box agents]
   (cond-> (vec (dispatcher-problems agents))
+    (and (seq (:mcp-stdio-children box))
+         (not-any? #(= :stdio (:mcp-transport %)) agents))
+    (conj "lingering per-session cch control mcp children — reconnect agent MCP sessions to use HTTP")
     (not (get-in box [:server :reachable?]))
     (conj "dispatcher not reachable — code-hook dispatch will fail")
     :always
@@ -260,13 +303,17 @@
         [(format "  hooks    %d code hook(s) enabled globally"
                  (count (:enabled hooks)))
          ""
-         (format "  %-13s %-10s %s" "agent" "cch wired" "notes")
+         (format "  %-13s %-10s %-8s %s" "agent" "cch wired" "MCP" "notes")
          (str "  " (apply str (repeat 60 "─")))]
         (for [{:keys [installed?] :as a} agents]
-          (format "  %-13s %-10s %s"
+          (format "  %-13s %-10s %-8s %s"
                   (:agent a)
                   (str (dot installed?) " " (if installed? "yes" "no"))
+                  (name (or (:mcp-transport a) :absent))
                   (agent-note a)))
+        (when (seq (:mcp-stdio-children box))
+          [(str "  ⚠ per-session cch control mcp children: "
+                (str/join ", " (map :pid (:mcp-stdio-children box))))])
         [""
          "  legend: ● ok   ○ absent/not-wired   ⚠ needs attention"]
         (when (seq probs)
