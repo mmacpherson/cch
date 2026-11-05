@@ -24,11 +24,14 @@
         out (page/message-step route {:message_id "m1" :source route :target "codex:peer"
                                       :status "submitted" :created_at 10 :seq 3})
         in (page/message-step route {:message_id "m2" :source "operator" :target route
-                                     :status "delivered" :created_at 20 :seq nil})]
+                                     :status "delivered" :created_at 20 :seq nil
+                                     :in_reply_to "m1"})]
     (is (str/starts-with? (:summary out) "→ "))
     (is (str/includes? (:summary out) "m1 · seq 3"))
     (is (= :ok (:outcome out)))
     (is (str/starts-with? (:summary in) "← operator · m2"))
+    (is (str/ends-with? (:summary in) " · re m1"))
+    (is (not (str/includes? (:summary out) " re ")))
     (is (= :failed (:outcome (page/message-step route {:message_id "m3" :source route
                                                        :target "x" :status "failed"
                                                        :created_at 1}))))))

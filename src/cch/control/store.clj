@@ -34,7 +34,8 @@
         "ON control_sessions(agent, native_id)")
    (str "CREATE TABLE IF NOT EXISTS control_deliveries ("
         "message_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
-        "content_sha256 TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)")
+        "content_sha256 TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL,"
+        "seq INTEGER, in_reply_to TEXT)")
    (str "CREATE TABLE IF NOT EXISTS control_message_seqs ("
         "message_id TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
         "seq INTEGER NOT NULL, created_at INTEGER NOT NULL)")
@@ -92,7 +93,11 @@
         (ensure-column! ds "control_sessions" "transcript_path"
                         "transcript_path TEXT")
         (ensure-column! ds "control_sessions" "native_url"
-                        "native_url TEXT"))
+                        "native_url TEXT")
+        ;; Envelope metadata for the trace page. Receiving runners have no
+        ;; control_message_seqs row, so the delivery row carries both.
+        (ensure-column! ds "control_deliveries" "seq" "seq INTEGER")
+        (ensure-column! ds "control_deliveries" "in_reply_to" "in_reply_to TEXT"))
       (restrict-db-permissions! path)
       (swap! ensured-paths conj path))
     path))
@@ -162,18 +167,24 @@
        message-id])))
 
 (defn record-delivery!
-  [{:keys [message-id source target content-sha256 status]}]
+  "Record one delivery's routing metadata. seq and in-reply-to are the
+  envelope's; the body is never stored."
+  [{:keys [message-id source target content-sha256 status seq in-reply-to]}]
   (execute!
-    ["INSERT OR IGNORE INTO control_deliveries (message_id, source, target, content_sha256, status, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-     message-id source target content-sha256 status (System/currentTimeMillis)])
+    [(str "INSERT OR IGNORE INTO control_deliveries (message_id, source, target, content_sha256,"
+          " status, created_at, seq, in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+     message-id source target content-sha256 status (System/currentTimeMillis)
+     seq in-reply-to])
   (delivery message-id))
 
 (defn deliveries-for-route
   "Messages this runner recorded to or from one route, newest first, with
-  their channel sequence numbers. Bodies are never stored, so there are none."
+  their channel sequence numbers and in-reply-to ids. Bodies are never
+  stored, so there are none."
   [route-id limit]
   (execute!
-    [(str "SELECT d.message_id, d.source, d.target, d.status, d.created_at, s.seq "
+    [(str "SELECT d.message_id, d.source, d.target, d.status, d.created_at,"
+          " COALESCE(s.seq, d.seq) AS seq, d.in_reply_to "
           "FROM control_deliveries d "
           "LEFT JOIN control_message_seqs s ON s.message_id = d.message_id "
           "WHERE d.source = ? OR d.target = ? "

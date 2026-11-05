@@ -132,7 +132,7 @@
       in-reply-to (assoc :in-reply-to in-reply-to))))
 
 (defn- with-delivery-dedupe!
-  [{:keys [target source message-id content-sha256]} deliver!]
+  [{:keys [target source message-id content-sha256 seq in-reply-to]} deliver!]
   (locking delivery-lock
     (if-let [prior (store/delivery message-id)]
       (if (and (= target (:target prior))
@@ -147,7 +147,9 @@
                                  :source source
                                  :target target
                                  :content-sha256 content-sha256
-                                 :status (:status result)})
+                                 :status (:status result)
+                                 :seq seq
+                                 :in-reply-to in-reply-to})
         result))))
 
 (defn- with-remote-delivery-dedupe!
@@ -155,7 +157,7 @@
   to the disposable broker. A live broker suppresses it; a restarted in-memory
   broker can accept it again, while destination-side dedupe prevents a second
   native submission."
-  [{:keys [target source message-id content-sha256]} deliver!]
+  [{:keys [target source message-id content-sha256 seq in-reply-to]} deliver!]
   (locking delivery-lock
     (if-let [prior (store/delivery message-id)]
       (if (and (= target (:target prior))
@@ -169,7 +171,9 @@
                                  :source source
                                  :target target
                                  :content-sha256 content-sha256
-                                 :status (:status result)})
+                                 :status (:status result)
+                                 :seq seq
+                                 :in-reply-to in-reply-to})
         result))))
 
 (defn send-local-message!

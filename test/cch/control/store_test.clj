@@ -130,12 +130,19 @@
       (store/assign-seq! {:message-id "m1" :source "claude:a" :target "codex:b"})
       (store/record-delivery! {:message-id "m2" :source "codex:b" :target "claude:a"
                                :content-sha256 "y" :status "delivered"})
+      ;; A receiving runner has no seq row; the delivery carries the envelope's.
+      (store/record-delivery! {:message-id "m4" :source "codex:b" :target "claude:a"
+                               :content-sha256 "w" :status "delivered"
+                               :seq 7 :in-reply-to "m1"})
       (store/record-delivery! {:message-id "m3" :source "codex:b" :target "codex:c"
                                :content-sha256 "z" :status "delivered"})
       (let [rows (store/deliveries-for-route "claude:a" 10)]
-        (is (= #{"m1" "m2"} (set (map :message_id rows))))
+        (is (= #{"m1" "m2" "m4"} (set (map :message_id rows))))
         (is (= 1 (:seq (first (filter #(= "m1" (:message_id %)) rows)))))
-        (is (nil? (:seq (first (filter #(= "m2" (:message_id %)) rows)))))))))
+        (is (nil? (:seq (first (filter #(= "m2" (:message_id %)) rows)))))
+        (is (= {:seq 7 :in_reply_to "m1"}
+               (select-keys (first (filter #(= "m4" (:message_id %)) rows))
+                            [:seq :in_reply_to])))))))
 
 (deftest summaries-usage-and-cursor-round-trip
   (with-temp-store

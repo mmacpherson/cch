@@ -80,9 +80,9 @@
 
 (defn message-step
   "One cch message as a trace step. Bodies are never stored, so the step names
-  the peer, id, and channel number only."
+  the peer, id, channel number, and the id it answers."
   ([route delivery] (message-step route delivery {}))
-  ([route {:keys [message_id source target status created_at seq]} names]
+  ([route {:keys [message_id source target status created_at seq in_reply_to]} names]
   (let [outgoing? (= source route)
         peer (if outgoing? target source)]
     {:at-ms created_at
@@ -90,7 +90,8 @@
      :summary (str (if outgoing? "→ " "← ")
                    (peer-label peer names)
                    " · " message_id
-                   (when seq (str " · seq " seq)))
+                   (when seq (str " · seq " seq))
+                   (when in_reply_to (str " · re " in_reply_to)))
      :outcome (case status
                 ("delivered" "submitted" "queued" "duplicate") :ok
                 "failed" :failed
