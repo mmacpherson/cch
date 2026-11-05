@@ -279,3 +279,15 @@
     (is (empty? (:events (cs/dispatcher-diagnostics (str "# command = " (pr-str command) "\n")))))
     (is (empty? (:orphan-markers
                  (cs/dispatcher-diagnostics "note = '''\n# cch:begin not-a-marker\n'''\n"))))))
+
+(deftest intact-dispatcher-block-refreshes-without-absorbing-user-content
+  (let [old (cs/render-block "cch-dispatcher" sample-entries)
+        entries (conj sample-entries {:event "Stop" :matcher ".*"
+                                     :command "curl -X POST --data-binary @- http://127.0.0.1:8888/dispatch/Stop"})
+        new-text (cs/upsert-block old "cch-dispatcher" entries)
+        displaced (str/replace old "# cch:end" "[mcp_servers.other]\ncommand = 'other-server'\n# cch:end")
+        user-hook (str/replace old "# cch:end" "[[hooks.Stop.hooks]]\ncommand = 'echo user-hook'\n# cch:end")]
+    (is (= {"PreToolUse" 1 "Stop" 1} (:events (cs/dispatcher-diagnostics new-text))))
+    (is (= new-text (cs/upsert-block new-text "cch-dispatcher" entries)))
+    (is (= displaced (cs/upsert-block displaced "cch-dispatcher" entries)))
+    (is (= user-hook (cs/upsert-block user-hook "cch-dispatcher" entries)))))

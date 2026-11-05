@@ -225,21 +225,40 @@
   (let [{:keys [events dispatcher-markers?]} (dispatcher-diagnostics contents)]
     (boolean (or (seq events) dispatcher-markers?))))
 
+(defn- safe-dispatcher-block?
+  "A matched pair can have moved around unrelated TOML. Only splice it when
+  its entire body consists of dispatcher hook tables and generated fields."
+  [block]
+  (let [fields (string-fields block)
+        structure (str/replace block string-field-pattern
+                               #(if (second %) (str/replace (first %) #"[^\r\n]" " ") (first %)))]
+    (and (every? #(contains? #{"matcher" "type" "command"} (:key %)) fields)
+         (every? #(dispatch-event (:value %)) (filter #(= "command" (:key %)) fields))
+         (= 2 (count (re-seq #"(?m)^\s*# cch:(?:begin|end) " structure)))
+         (every? #(or (str/blank? %) (re-matches #"\s*#.*" %)
+                      (re-matches #"\s*\[\[hooks\.[A-Za-z]+(?:\.hooks)?\]\]\s*" %)
+                      (re-matches #"\s*timeout\s*=\s*\d+\s*(?:#.*)?" %))
+                 (str/split-lines structure)))))
+
 (defn upsert-block
   "Return new contents with the named cch block replaced (or appended).
-  Dispatcher content is left untouched when commands or dispatcher markers
-  already exist, even if markers moved. Other blocks are replaced as before.
+  Structurally intact dispatcher blocks are refreshed. External dispatch
+  commands or displaced markers cause preservation instead of duplication.
+  Other blocks are replaced as before.
   Always separates new blocks from prior content by a blank line."
   [contents name entries]
-  (if (and (= name "cch-dispatcher") (dispatcher-present? contents))
-    contents
-    (let [stripped (strip-block contents name)
-        sep (cond
+  (let [blocks (re-seq (block-pattern name) contents)
+        safe? (every? safe-dispatcher-block? blocks)
+        stripped (if (or (not= name "cch-dispatcher") safe?)
+                   (strip-block contents name) contents)]
+    (if (and (= name "cch-dispatcher") (dispatcher-present? stripped))
+      contents
+      (let [sep (cond
               (str/blank? stripped) ""
               (str/ends-with? stripped "\n\n") ""
               (str/ends-with? stripped "\n") "\n"
               :else "\n\n")]
-    (str stripped sep (render-block name entries)))))
+        (str stripped sep (render-block name entries))))))
 
 (defn install-hook!
   "Atomically install (or replace) the cch block for `name` in the

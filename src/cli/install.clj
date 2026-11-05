@@ -102,11 +102,11 @@
     (print-server-warning-if-down)))
 
 (defn- run-codex-install! []
-  (let [existing? (cs/dispatcher-present? (cs/read-config (cs/codex-config-path)))
+  (let [before (cs/read-config (cs/codex-config-path))
         {:keys [path written skipped]} (codex/install!)]
     (enable-code-hooks-globally!)
     (println (format "Installed cch to %s" path))
-    (if existing?
+    (if (= before (cs/read-config path))
       (println "  existing dispatcher configuration preserved; no entries appended (run cch doctor to check it)")
       (println (format "  %d codex hook entries written" written)))
     (when (seq skipped)
