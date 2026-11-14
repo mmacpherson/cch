@@ -227,6 +227,12 @@ authority, writes are modest, and queries benefit from an embedded transactional
 database. Current schemas include detailed events, hook configuration, context
 and usage snapshots, and projection support.
 
+The local server runs inside a small fixed heap, so readers of the event table
+must not hold stored payloads in memory: a session trace streams its rows and
+keeps only the fields it reads. A daily retention pass (`cch.retention`) clears
+old payloads and deletes old rows in small transactions. Heap exhaustion exits
+the process so the service manager starts a fresh one.
+
 Postgres is appropriate at the central broker because multiple runners and the
 fleet UI share durable coordination state. The two databases have different
 roles; the broker is not a remote replacement for runner SQLite.

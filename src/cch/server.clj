@@ -36,6 +36,7 @@
             [cch.protocol :as proto]
             [cch.stats :as stats]
             [cch.spawn-health :as spawn-health]
+            [cch.retention :as retention]
             [cch.summarizer-worker :as summarizer-worker]
             [cch.trace-page :as trace-page]
             [cch.usage :as usage]
@@ -1425,6 +1426,8 @@
     (forecast/start-bg-refresh!)
     ;; Idles unless the global config enables it; see cch.summarizer-worker.
     (summarizer-worker/start!)
+    ;; Daily pruning of old payloads and rows; see cch.retention.
+    (retention/start!)
     (spawn-health/start! {:on-unhealthy on-spawn-failure})
     (println (format "cch serve listening on %s port %d (%d code hook(s) loaded)"
                      (str/join ", " bound) port (count hooks)))
@@ -1442,6 +1445,7 @@
               (stop-nrepl! nrepl)
               (forecast/stop-bg-refresh!)
               (summarizer-worker/stop!)
+              (retention/stop!)
               (spawn-health/stop!)
               (db/close-db!)
               (log/stop-writer!))

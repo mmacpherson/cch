@@ -193,6 +193,24 @@ sensitive data. The complete event log stays in the runner's local SQLite
 database. Fleet federation publishes purpose-built activity and usage
 observations rather than copying the raw event tables.
 
+`cch serve` prunes that database once a day so it does not grow without limit.
+Stored payloads are cleared after 30 days, leaving the event row (time, session,
+hook, tool, decision) for statistics; event rows are deleted after a year and
+legacy context snapshots after 91 days. Usage observations are kept. Change a
+horizon, or set it to `0` to turn that rule off, in the global config:
+
+```yaml
+retention:
+  enabled: true
+  event-payload-days: 30
+  event-days: 365
+  context-snapshot-days: 91
+```
+
+`cch retention` shows what a pass would change and `cch retention --run` runs
+one now. Pruned space is reused by later events; to shrink the file itself,
+stop `cch serve` and run `cch retention --vacuum`.
+
 ## Native authority and security boundaries
 
 - Provider logins remain on the runner that executes the provider CLI.

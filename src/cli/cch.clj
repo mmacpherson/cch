@@ -21,6 +21,7 @@
             [cli.install :as install]
             [cli.list-cmd :as list-cmd]
             [cli.log-cmd :as log-cmd]
+            [cli.retention-cmd :as retention-cmd]
             [cli.service-cmd :as service-cmd]
             [clojure.tools.cli :as cli])
   (:gen-class))
@@ -60,6 +61,10 @@
                  :fn   #'attention-cmd
                  :opts [[nil "--days N"  "Look back N days (default: all history)" :parse-fn parse-long]
                         [nil "--limit N" "Max rows" :parse-fn parse-long]]}]
+   ["retention" {:desc "Show or run the event database's retention rules"
+                 :fn   #'retention-cmd/run
+                 :opts [[nil "--run"    "Run a retention pass now"]
+                        [nil "--vacuum" "Rebuild the database file to return freed space (stop `cch serve` first)"]]}]
    ["doctor"    {:desc "Report per-agent federation wiring on this box"
                  :fn   #'doctor/run
                  :opts [[nil "--cwd DIR" "Scope the codex trust check to DIR"]]}]
