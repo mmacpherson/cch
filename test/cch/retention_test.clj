@@ -104,3 +104,17 @@
                         (finally (reset! writing false)))]
         (is (= {:events 0 :context-snapshots 300 :event-payloads 300} result))
         (is (pos? @writer) "the writer kept inserting throughout")))))
+
+(deftest vacuum-returns-freed-space
+  (with-db
+    (fn [ds]
+      (jdbc/execute! ds ["PRAGMA journal_mode=WAL"])
+      (let [payload (apply str (repeat 20000 "x"))]
+        (dotimes [_ 200]
+          (jdbc/execute! ds ["INSERT INTO events (timestamp, hook_name, event_type, extra) VALUES (?,?,?,?)"
+                             (retention/cutoff now-ms 100) "event-log" "PostToolUse" payload])))
+      (retention/prune! (assoc (retention/settings nil) :pause-ms 0) now-ms (constantly true))
+      (let [size #(fs/size (db/db-path))
+            before (do (jdbc/execute! ds ["PRAGMA wal_checkpoint(TRUNCATE)"]) (size))]
+        (is (true? (retention/vacuum!)))
+        (is (< (size) (quot before 4)) "cleared payloads no longer occupy the file")))))

@@ -212,11 +212,23 @@
 (defn vacuum!
   "Rebuild the database file, returning freed pages to the filesystem. Holds
   the write lock throughout and needs free disk space about the size of the
-  rebuilt file, so run it with `cch serve` stopped."
-  []
-  (with-open [conn (open-connection)]
-    (jdbc/execute! conn ["VACUUM"])
-    (jdbc/execute! conn ["PRAGMA wal_checkpoint(TRUNCATE)"])))
+  rebuilt file, so run it with `cch serve` stopped.
+
+  The rebuilt content lands in the write-ahead log, and the file shrinks
+  when that is checkpointed, which another process with the database open
+  can hold up. Returns true once the checkpoint completed, false if it was
+  still held up after `attempts` tries; the next complete checkpoint by any
+  process then shrinks the file."
+  ([] (vacuum! 10))
+  ([attempts]
+   (with-open [conn (open-connection)]
+     (jdbc/execute! conn ["VACUUM"])
+     (loop [left attempts]
+       (let [busy (scalar conn ["PRAGMA wal_checkpoint(TRUNCATE)"])]
+         (cond
+           (zero? (or busy 0)) true
+           (<= left 1) false
+           :else (do (Thread/sleep 1000) (recur (dec left)))))))))
 
 ;; --- Scheduler ---
 

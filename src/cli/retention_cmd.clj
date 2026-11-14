@@ -27,8 +27,10 @@
         (println "Run it with `cch retention --run`.")))
     (when vacuum
       (println "Rebuilding the database file (stop `cch serve` first; this can take minutes)...")
-      (retention/vacuum!)
-      (println "Done."))))
+      (println (if (retention/vacuum!)
+                 "Done."
+                 (str "Rebuilt, but another process has the database open, so the file has not"
+                      " shrunk yet. It will after that process's next complete checkpoint."))))))
 
 (defn run [options _arguments]
   (if (fs/exists? (db/db-path))

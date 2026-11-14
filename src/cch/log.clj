@@ -101,8 +101,9 @@
 
 (defn- open-writer-connection [path]
   (doto (jdbc/get-connection {:dbtype "sqlite" :dbname path})
-    (jdbc/execute! ["PRAGMA journal_mode=WAL"])
-    (jdbc/execute! ["PRAGMA busy_timeout=5000"])))
+    ;; First, so the journal-mode statement waits for a busy database too.
+    (jdbc/execute! ["PRAGMA busy_timeout=5000"])
+    (jdbc/execute! ["PRAGMA journal_mode=WAL"])))
 
 (defn- run-item! [conn {:keys [statements]}]
   (doseq [stmt statements] (jdbc/execute! conn stmt)))
