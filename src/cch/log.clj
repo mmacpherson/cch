@@ -92,6 +92,15 @@
    (when decision (name decision)) reason
    elapsed-ms extra (or agent "claude-code")])
 
+(defonce ^:private write-gate (Object.))
+
+(defn with-writes-held
+  "Run `f` while the background writer holds its queue: events logged
+  meanwhile wait there and are written once `f` returns. For brief
+  maintenance that needs the database to itself, such as compaction."
+  [f]
+  (locking write-gate (f)))
+
 (defonce ^:private writer-failures (atom {:count 0 :last nil}))
 
 (defn writer-health
@@ -145,7 +154,7 @@
                             (println "cch.log: cannot open event DB:" (.getName (class e))))
                           nil))]
           (if conn
-            (write-batch! conn rows)
+            (locking write-gate (write-batch! conn rows))
             (swap! writer-failures update :count + (count rows)))
           (if stop?
             (some-> ^java.sql.Connection conn .close)

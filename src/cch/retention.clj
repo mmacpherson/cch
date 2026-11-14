@@ -28,13 +28,27 @@
 
   `cch serve` runs a pass shortly after start and then daily. Work is done in
   SQL, in small transactions with a pause between them, so a pass holds no
-  rows in memory and never keeps the event writer waiting long. Freed pages
-  are reused by later inserts; the file shrinks only on VACUUM
-  (`cch retention --run --vacuum`)."
+  rows in memory and never keeps the event writer waiting long.
+
+  Freed pages are reused by later inserts, but the file shrinks only when it
+  is rebuilt (VACUUM). The server does that by itself while idle: once no
+  event has been logged for `compact-idle-minutes`, it compacts if
+  `compact-interval-days` have passed since the last time or free pages make
+  up `compact-free-fraction` of the file. The event writer holds its queue
+  for those seconds, so nothing is dropped. 0 turns a trigger off:
+
+    retention:
+      compact-interval-days: 14
+      compact-free-fraction: 0.3
+      compact-idle-minutes: 30
+
+  `cch retention --vacuum` compacts on demand."
   (:require [cch.config :as config]
             [cch.db :as db]
+            [cch.log :as log]
+            [clojure.java.io :as io]
             [next.jdbc :as jdbc])
-  (:import [java.time Instant ZoneOffset]
+  (:import [java.time Instant LocalDateTime ZoneOffset]
            [java.time.format DateTimeFormatter]))
 
 (def defaults
@@ -42,6 +56,9 @@
    :event-payload-days 30
    :event-days 365
    :context-snapshot-days 91
+   :compact-interval-days 14
+   :compact-free-fraction 0.3
+   :compact-idle-minutes 30
    :interval-hours 24
    :start-delay-seconds 300
    :batch-rows 1000
@@ -230,6 +247,61 @@
            (<= left 1) false
            :else (do (Thread/sleep 1000) (recur (dec left)))))))))
 
+;; --- Compaction while idle ---
+
+(defn compact-due?
+  "Whether to compact now. `since-ms` is the time since the last compaction,
+  `free-fraction` the share of the file that is free pages, `idle-ms` the
+  time since the last logged event. Pure."
+  [{:keys [compact-interval-days compact-free-fraction compact-idle-minutes]}
+   {:keys [since-ms free-fraction idle-ms]}]
+  (and (>= idle-ms (* compact-idle-minutes 60000))
+       (or (and (pos? compact-free-fraction) (>= free-fraction compact-free-fraction))
+           (and (pos? compact-interval-days) (>= since-ms (* compact-interval-days 86400000))))
+       true))
+
+(defn- compaction-state
+  "The inputs to compact-due? as the database stands. A database seen for the
+  first time starts its interval now."
+  [now-ms]
+  (with-open [conn (open-connection)]
+    (jdbc/execute! conn ["INSERT OR IGNORE INTO retention_state (task, cursor) VALUES ('compaction', ?)"
+                         (quot now-ms 1000)])
+    (let [last-secs (scalar conn ["SELECT cursor FROM retention_state WHERE task='compaction'"])
+          pages (or (scalar conn ["PRAGMA page_count"]) 0)
+          free (or (scalar conn ["PRAGMA freelist_count"]) 0)
+          newest (scalar conn ["SELECT MAX(timestamp) FROM events"])]
+      {:since-ms (- now-ms (* 1000 last-secs))
+       :free-fraction (if (pos? pages) (/ (double free) pages) 0.0)
+       :idle-ms (if newest
+                  (- now-ms (.toEpochMilli (.toInstant (LocalDateTime/parse newest) ZoneOffset/UTC)))
+                  Long/MAX_VALUE)})))
+
+(defn- room-to-rebuild?
+  "The rebuild writes a second copy before the file shrinks."
+  []
+  (let [file (io/file (db/db-path))]
+    (> (.getUsableSpace (.getAbsoluteFile file)) (.length file))))
+
+(defn compact-if-due!
+  "Compact when compact-due? says so and the disk has room. Returns
+  :compacted, :held-up (rebuilt, but another process delayed the shrink),
+  :no-room, or nil when not due. The interval restarts in every non-nil
+  case, so a failed attempt is not retried hourly."
+  ([s] (compact-if-due! s (System/currentTimeMillis)))
+  ([s now-ms]
+   (when (compact-due? s (compaction-state now-ms))
+     (let [outcome (cond
+                     (not (room-to-rebuild?)) :no-room
+                     (log/with-writes-held vacuum!) :compacted
+                     :else :held-up)]
+       (with-open [conn (open-connection)]
+         (jdbc/execute! conn [(str "UPDATE retention_state SET cursor=?,"
+                                   " updated_at=strftime('%Y-%m-%dT%H:%M:%f','now')"
+                                   " WHERE task='compaction'")
+                              (quot now-ms 1000)]))
+       outcome))))
+
 ;; --- Scheduler ---
 
 (defonce ^:private worker (atom nil))
@@ -239,26 +311,45 @@
     (println (format "cch retention: cleared %d event payloads, deleted %d events and %d context snapshots"
                      (:event-payloads result) (:events result) (:context-snapshots result)))))
 
+(defn- report-compaction [outcome]
+  (case outcome
+    :compacted (println "cch retention: compacted the event database")
+    :held-up (println "cch retention: rebuilt the event database; it shrinks at the next complete checkpoint")
+    :no-room (println "cch retention: compaction skipped, not enough free disk space")
+    nil))
+
 (defn start!
-  "Start the daily retention worker. It reads the config on every pass, so a
-  changed horizon or `enabled: false` takes effect without a restart."
+  "Start the retention worker. It wakes hourly, runs a retention pass when
+  `interval-hours` have passed since the last, and compacts when due. It
+  reads the config every time, so a changed setting or `enabled: false`
+  takes effect without a restart."
   []
   (when-not @worker
     (let [running (atom true)
           sleep! (fn [ms] (try (Thread/sleep (long ms))
                                (catch InterruptedException _ (reset! running false))))
+          guarded (fn [label f]
+                    (try (f)
+                         (catch InterruptedException _ (reset! running false))
+                         (catch Exception e
+                           (println (str "cch retention: " label " failed:")
+                                    (.getSimpleName (class e))))))
           t (Thread.
               (fn []
                 (sleep! (* 1000 (:start-delay-seconds (load-settings))))
-                (while @running
-                  (let [s (load-settings)]
-                    (when (:enabled s)
-                      (try (report (prune! s (System/currentTimeMillis) #(deref running)))
-                           (catch InterruptedException _ (reset! running false))
-                           (catch Exception e
-                             (println "cch retention: pass failed:" (.getSimpleName (class e))))))
-                    (when @running
-                      (sleep! (* 3600000 (max 1 (:interval-hours s))))))))
+                (loop [last-pass nil]
+                  (when @running
+                    (let [s (load-settings)
+                          now (System/currentTimeMillis)
+                          pass? (and (:enabled s)
+                                     (or (nil? last-pass)
+                                         (>= (- now last-pass) (* 3600000 (max 1 (:interval-hours s))))))]
+                      (when pass?
+                        (guarded "pass" #(report (prune! s now (fn [] @running)))))
+                      (when (and (:enabled s) @running)
+                        (guarded "compaction" #(report-compaction (compact-if-due! s))))
+                      (when @running (sleep! 3600000))
+                      (recur (if pass? now last-pass))))))
               "cch-retention")]
       (.setDaemon t true)
       (.start t)

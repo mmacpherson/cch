@@ -118,3 +118,40 @@
             before (do (jdbc/execute! ds ["PRAGMA wal_checkpoint(TRUNCATE)"]) (size))]
         (is (true? (retention/vacuum!)))
         (is (< (size) (quot before 4)) "cleared payloads no longer occupy the file")))))
+
+(deftest compaction-waits-for-idle-and-a-trigger
+  (let [s (retention/settings nil)
+        idle (* 31 60000)
+        due? #(retention/compact-due? s (merge {:since-ms 0 :free-fraction 0.0 :idle-ms idle} %))]
+    (is (not (due? {})) "idle alone is not a reason")
+    (is (due? {:free-fraction 0.3}))
+    (is (due? {:since-ms (* 14 day-ms)}))
+    (is (not (due? {:free-fraction 0.9 :since-ms (* 30 day-ms) :idle-ms 60000}))
+        "never while events are arriving")
+    (is (not (retention/compact-due?
+               (retention/settings {:retention {:compact-interval-days 0 :compact-free-fraction 0}})
+               {:since-ms (* 99 day-ms) :free-fraction 1.0 :idle-ms idle}))
+        "both triggers off turns compaction off")))
+
+(deftest idle-compaction-shrinks-the-file-and-restarts-the-interval
+  (with-db
+    (fn [ds]
+      (jdbc/execute! ds ["PRAGMA journal_mode=WAL"])
+      (let [payload (apply str (repeat 20000 "x"))
+            s (assoc (retention/settings nil) :pause-ms 0)
+            size #(fs/size (db/db-path))]
+        (dotimes [_ 200]
+          (jdbc/execute! ds ["INSERT INTO events (timestamp, hook_name, event_type, extra) VALUES (?,?,?,?)"
+                             (retention/cutoff now-ms 100) "event-log" "PostToolUse" payload]))
+        (jdbc/execute! ds ["INSERT INTO events (timestamp, hook_name, event_type) VALUES (?,?,?)"
+                           (retention/cutoff now-ms 0.001) "event-log" "Stop"])
+        (retention/prune! s now-ms (constantly true))
+        (jdbc/execute! ds ["PRAGMA wal_checkpoint(TRUNCATE)"])
+        (let [before (size)]
+          (is (nil? (retention/compact-if-due! s now-ms))
+              "an event a minute ago: not idle, so nothing happens")
+          (is (= before (size)))
+          (is (= :compacted (retention/compact-if-due! s (+ now-ms (* 40 60000)))))
+          (is (< (size) (quot before 4)))
+          (is (nil? (retention/compact-if-due! s (+ now-ms (* 80 60000))))
+              "nothing left to free and the interval has restarted"))))))

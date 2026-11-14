@@ -207,9 +207,15 @@ retention:
   context-snapshot-days: 91
 ```
 
-`cch retention` shows what a pass would change and `cch retention --run` runs
-one now. Pruned space is reused by later events; to shrink the file itself,
-stop `cch serve` and run `cch retention --vacuum`.
+Pruned space is reused by later events, and the server also compacts the file
+while idle: once no event has been logged for 30 minutes, it rebuilds the file
+if two weeks have passed since the last time or free space has reached 30% of
+it. Events logged during those seconds wait in the writer's queue. The settings
+are `compact-interval-days`, `compact-free-fraction` and `compact-idle-minutes`
+under `retention:`; `0` turns a trigger off.
+
+`cch retention` shows what a pass would change, `cch retention --run` runs one
+now, and `cch retention --vacuum` compacts on demand.
 
 ## Native authority and security boundaries
 

@@ -4,7 +4,8 @@
   manual pass, and reclaiming disk space afterwards."
   (:require [babashka.fs :as fs]
             [cch.db :as db]
-            [cch.retention :as retention]))
+            [cch.retention :as retention]
+            [clojure.string]))
 
 (defn- describe [days]
   (if (pos? days) (format "after %s days" days) "off"))
@@ -17,6 +18,17 @@
     (println (format "  event payloads cleared  %s" (describe event-payload-days)))
     (println (format "  events deleted          %s" (describe event-days)))
     (println (format "  context snapshots       %s" (describe context-snapshot-days)))
+    (println (format "  compaction while idle   %s"
+                     (let [{:keys [compact-interval-days compact-free-fraction compact-idle-minutes]} s
+                           triggers (cond-> []
+                                      (pos? compact-interval-days)
+                                      (conj (format "every %s days" compact-interval-days))
+                                      (pos? compact-free-fraction)
+                                      (conj (format "at %.0f%% free" (* 100.0 compact-free-fraction))))]
+                       (if (seq triggers)
+                         (format "%s, after %s idle minutes"
+                                 (clojure.string/join " or " triggers) compact-idle-minutes)
+                         "off"))))
     (if run?
       (let [{:keys [event-payloads events context-snapshots]} (retention/prune! s)]
         (println (format "Cleared %d event payloads, deleted %d events and %d context snapshots."
