@@ -27,7 +27,10 @@
 
  :aliases
  {:server
-  {:main-opts ["-m" "cli.cch" "serve"]}
+  {:main-opts ["-m" "cli.cch" "serve"]
+   ;; As in the packaged launcher: exit on heap exhaustion rather than keep
+   ;; running without the threads that died.
+   :jvm-opts  ["-XX:+ExitOnOutOfMemoryError"]}
 
   :cli
   {:main-opts ["-m" "cli.cch"]}

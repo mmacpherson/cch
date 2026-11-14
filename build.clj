@@ -101,6 +101,10 @@
                "# UP (~231MB vs ~211MB) — tighter heap means more GC churn copying\n"
                "# survivors, and heap is only a slice of RSS anyway (metaspace,\n"
                "# code cache, mmapped jar, native libs make up the rest).\n"
+               "# Heap exhaustion exits the process (-XX:+ExitOnOutOfMemoryError): a JVM\n"
+               "# that survives an OutOfMemoryError can lose its accept thread and stop\n"
+               "# answering while the service manager still reports it running. Exiting\n"
+               "# lets systemd (Restart=on-failure) or launchd (KeepAlive) start a fresh one.\n"
                "# Override via $CCH_JAVA_OPTS for debugging.\n"
                "set -euo pipefail\n"
                ;; pwd -P: resolve the versioned directory behind the
@@ -111,6 +115,7 @@
                "  -Xmx256m \\\n"
                "  -XX:+UseSerialGC \\\n"
                "  -XX:MaxMetaspaceSize=128m \\\n"
+               "  -XX:+ExitOnOutOfMemoryError \\\n"
                ;; sqlite-jdbc loads its native library; allow it so every
                ;; invocation doesn't print restricted-method warnings.
                "  --enable-native-access=ALL-UNNAMED \\\n"
