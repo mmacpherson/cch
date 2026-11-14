@@ -11,6 +11,68 @@
                      (catch Exception _ {}))
     :else {}))
 
+(def ^:private patch-header
+  #"(?m)^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$")
+
+(defn- first-line [s] (or (first (str/split-lines s)) ""))
+
+(defn- command-head
+  "The lines command-summary reads: the first, and the first nonblank after it."
+  [s]
+  (let [[head & body] (str/split-lines s)]
+    (str/join "\n" (remove nil? [head (first (remove str/blank? body))]))))
+
+(defn- patch-headers [s]
+  (str/join "\n" (map first (re-seq patch-header s))))
+
+(def ^:private input-fields
+  "Tool-input fields tool-summary reads, each with the reduction that keeps
+  what it reads."
+  {:command command-head :cmd command-head
+   :file_path first-line :path first-line :pattern first-line
+   :patch patch-headers :input patch-headers})
+
+(defn- slim-input [tool-input]
+  (let [slim-map (fn [m]
+                   (reduce-kv (fn [acc k f]
+                                (let [v (get m k)]
+                                  (cond
+                                    (not (contains? m k)) acc
+                                    (string? v) (assoc acc k (f v))
+                                    ;; Keep truthiness without the content.
+                                    (coll? v) (assoc acc k (boolean (seq v)))
+                                    :else (assoc acc k v))))
+                              {} input-fields))]
+    (cond
+      (map? tool-input) (slim-map tool-input)
+      (string? tool-input) (let [m (object tool-input)]
+                             (if (seq m) (slim-map m) (patch-headers tool-input)))
+      :else nil)))
+
+(defn slim-payload
+  "Reduce a provider payload (a map or its JSON text) to the fields `turns`
+  reads. Tool output, file content, and patch bodies are dropped, so a
+  session's rows stay small however large its tool results were. `turns`
+  gives the same result for the slim payload as for the original."
+  [payload]
+  (let [p (object payload)
+        response (:tool_response p)]
+    (cond-> (select-keys p [:hook_event_name :tool_name :tool_use_id :turn_id :prompt_id
+                            :prompt :last_assistant_message :is_error :exit_code
+                            :duration_ms :trigger :agent_type :agent_id :cwd :message])
+      (contains? p :tool_input) (assoc :tool_input (slim-input (:tool_input p)))
+      (contains? p :tool_params) (assoc :tool_params (slim-input (:tool_params p)))
+      (map? response) (assoc :tool_response (select-keys response [:is_error :isError :exit_code])))))
+
+(defn payload-chars
+  "Characters of text held by a slim payload, for bounding a trace in memory."
+  [x]
+  (cond
+    (string? x) (count x)
+    (map? x) (transduce (map payload-chars) + 0 (vals x))
+    (coll? x) (transduce (map payload-chars) + 0 x)
+    :else 0))
+
 (defn- line [x]
   (when (string? x)
     (let [s (str/trim (or (first (str/split-lines x)) ""))]
@@ -30,7 +92,7 @@
   (let [input (object tool-input)
         patch (or (:patch input) (:input input) (when (string? tool-input) tool-input))
         paths (when (string? patch)
-                (map (fn [[_ path moved]] (or path moved)) (re-seq #"(?m)^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$" patch)))
+                (map (fn [[_ path moved]] (or path moved)) (re-seq patch-header patch)))
         paths (when paths (remove nil? paths))
         summary (case tool-name
                   ("Bash" "exec_command" "shell_command") (command-summary (or (:command input) (:cmd input)))

@@ -78,3 +78,17 @@
                               {:builder-fn rs/as-unqualified-maps})]
       (when (seq rows) (vec rows)))
     (catch java.sql.SQLException _ nil)))
+
+(defn reduce-query
+  "Reduce `f` over the rows of a SQL query one at a time, without holding the
+  result set in memory. Rows are unqualified keyword-keyed maps, as `query`
+  returns. `f` may return `reduced` to stop reading early. Returns `init` when
+  the DB file is missing. Use for queries whose rows can be large."
+  [f init sql]
+  (try
+    (let [ds (jdbc/get-datasource (jdbc-spec))
+          opts {:builder-fn rs/as-unqualified-maps}]
+      (reduce (fn [acc row] (f acc (rs/datafiable-row row ds opts)))
+              init
+              (jdbc/plan ds [sql] opts)))
+    (catch java.sql.SQLException _ init)))

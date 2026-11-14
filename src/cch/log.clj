@@ -21,6 +21,7 @@
   so tests can assert on rows immediately after a log call."
   (:require [babashka.process :as p]
             [babashka.fs :as fs]
+            [cch.activity-trace :as activity-trace]
             [cch.db :as db]
             [cch.migrate :as migrate]
             [cch.usage-observation :as usage]
@@ -282,13 +283,20 @@
              :limit    (int limit)}]
       (db/query (first (sql/format q {:inline true}))))))
 
+(def ^:const max-listed-payload-chars
+  "Longest stored payload query-events returns whole. A longer one is cut to
+  this length, so a page of events cannot carry megabytes per row."
+  200000)
+
 (defn query-events
-  "Query recent events. Returns a seq of maps.
+  "Query recent events. Returns a seq of maps. A payload (:extra) longer than
+  max-listed-payload-chars is cut there and no longer parses as JSON.
   opts: :limit, :hook, :event, :session, :decision, :since, :cwd-prefix,
         :agent, :q (text search)"
   [& {:keys [limit hook event session decision since cwd-prefix agent node q]}]
   (let [cols [:id :timestamp :agent :node :session-id :hook-name :event-type
-              :tool-name :file-path :cwd :decision :reason :elapsed-ms :extra]
+              :tool-name :file-path :cwd :decision :reason :elapsed-ms
+              [[:substr :extra [:inline 1] [:inline max-listed-payload-chars]] :extra]]
         qry  (cond-> {:select   cols
                       :from     [:events]
                       :order-by [[:id :desc]]
@@ -312,24 +320,43 @@
                         [:like :extra    (str "%" q "%")]]))]
     (db/query (first (sql/format qry {:inline true})))))
 
+(def ^:const trace-max-chars
+  "Most payload text one session trace holds in memory. Rows are slimmed
+  first, so only a session with very long prompts or replies reaches this."
+  4000000)
+
 (defn session-trace-rows
   "Rows that make up one session's activity trace, oldest first: every
-  event-log row (the full provider payload) plus any hook row that asked or
-  denied. At most `limit` of the newest rows."
-  [session-id & {:keys [limit] :or {limit 2000}}]
-  (->> (db/query
-         (first (sql/format
-                  {:select   [:id :timestamp :agent :session-id :hook-name :event-type
-                              :tool-name :file-path :cwd :decision :reason :elapsed-ms :extra]
-                   :from     [:events]
-                   :where    [:and
-                              [:= :session-id session-id]
-                              [:or [:= :hook-name "event-log"]
-                                   [:in :decision ["deny" "ask"]]]]
-                   :order-by [[:id :desc]]
-                   :limit    (int limit)}
-                  {:inline true})))
-       reverse
+  event-log row plus any hook row that asked or denied. At most `limit` of
+  the newest rows.
+
+  A stored payload can be megabytes of tool output, so rows are read one at a
+  time and :extra is replaced by the slim payload map the trace reads
+  (cch.activity-trace/slim-payload). Reading stops early, keeping the newest
+  rows, once they hold `max-chars` of payload text, so memory stays bounded
+  whatever the session stored."
+  [session-id & {:keys [limit max-chars] :or {limit 2000 max-chars trace-max-chars}}]
+  (->> (first (sql/format
+                {:select   [:id :timestamp :agent :session-id :hook-name :event-type
+                            :tool-name :file-path :cwd :decision :reason :elapsed-ms :extra]
+                 :from     [:events]
+                 :where    [:and
+                            [:= :session-id session-id]
+                            [:or [:= :hook-name "event-log"]
+                                 [:in :decision ["deny" "ask"]]]]
+                 :order-by [[:id :desc]]
+                 :limit    (int limit)}
+                {:inline true}))
+       (db/reduce-query
+         (fn [{:keys [rows chars] :as acc} row]
+           (let [slim (some-> (:extra row) activity-trace/slim-payload)
+                 chars (+ chars (activity-trace/payload-chars slim))]
+             (if (and (seq rows) (> chars max-chars))
+               (reduced acc)
+               {:rows (conj rows (assoc row :extra slim)) :chars chars})))
+         {:rows [] :chars 0})
+       :rows
+       rseq
        vec))
 
 (defn recent-session-summaries

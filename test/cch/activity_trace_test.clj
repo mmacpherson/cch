@@ -171,3 +171,31 @@ private second line"})
   (let [[turn] (trace/turns [(row 1 "PreToolUse" {:tool_use_id "x" :tool_name "Bash"})
                             (row 2 "PermissionDenied" {:tool_use_id "x" :tool_name "Bash"})])]
     (is (= [:denied :denied] (mapv :outcome (:steps turn))))))
+
+(deftest slim-payload-drops-bulk-and-keeps-the-trace
+  (let [big (apply str (repeat 50000 "x"))
+        rows [(row 1 "UserPromptSubmit" {:prompt_id "p" :prompt "fix it"})
+              (row 2 "PreToolUse" {:tool_use_id "a" :tool_name "Bash"
+                                   :tool_input {:command (str "cat <<EOF\n\nfirst\n" big "\nEOF")}})
+              (row 3 "PostToolUse" {:tool_use_id "a" :tool_name "Bash" :exit_code 1
+                                    :tool_response {:stdout big :is_error true}})
+              (row 4 "PreToolUse" {:tool_use_id "b" :tool_name "apply_patch"
+                                   :tool_input {:patch (str "*** Begin Patch\n*** Update File: a.clj\n" big
+                                                            "\n*** Add File: b.clj\n" big "\n*** End Patch")}})
+              (row 5 "PostToolUse" {:tool_use_id "b" :tool_name "apply_patch" :tool_response big})
+              (row 6 "PreToolUse" {:tool_use_id "c" :tool_name "Write"
+                                   :tool_input {:file_path "src/a.clj" :content big}})
+              (row 7 "PostToolUse" {:tool_use_id "c" :tool_name "Write"
+                                    :tool_input {:file_path "src/a.clj" :content big}
+                                    :tool_response {:content [{:text big}]}})
+              (row 8 "PreToolUse" {:tool_use_id "d" :tool_name "exec_command"
+                                   :tool_input (json/generate-string {:cmd "ls" :note big})})
+              (row 9 "Stop" {:last_assistant_message "done"})]
+        slim (mapv #(update % :extra trace/slim-payload) rows)]
+    (is (= (trace/turns rows) (trace/turns slim)))
+    (is (= ["cat <<EOF (heredoc) first" "a.clj, b.clj" "src/a.clj" "ls"]
+           (mapv :summary (:steps (first (trace/turns slim))))))
+    (is (< (reduce + (map #(trace/payload-chars (:extra %)) slim)) 400)
+        "tool output, file content, and patch bodies are gone")
+    (is (= {} (trace/slim-payload "not json")))
+    (is (= {} (trace/slim-payload nil)))))

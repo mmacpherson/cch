@@ -323,6 +323,42 @@
       (finally
         (fs/delete-tree tmp-dir)))))
 
+(deftest session-trace-rows-stay-small-for-large-payloads
+  (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-trace-bound-"}))
+        db-path (str tmp-dir "/test.db")
+        big (apply str (repeat 200000 "x"))
+        insert! (fn [event payload]
+                  (next.jdbc/execute!
+                    (next.jdbc/get-datasource {:dbtype "sqlite" :dbname db-path})
+                    ["INSERT INTO events (session_id, hook_name, event_type, extra) VALUES ('s1','event-log',?,?)"
+                     event (json/generate-string payload)]))]
+    (try
+      (with-redefs [db/db-path (constantly db-path)]
+        (log/ensure-db! db-path)
+        (insert! "UserPromptSubmit" {:prompt "older prompt"})
+        (insert! "PreToolUse" {:tool_use_id "t" :tool_name "Bash" :tool_input {:command "just test"}})
+        (insert! "PostToolUse" {:tool_use_id "t" :tool_name "Bash" :tool_response {:stdout big}})
+        (insert! "Stop" {:last_assistant_message "done"})
+        (let [rows (log/session-trace-rows "s1")]
+          (is (= 4 (count rows)))
+          (is (every? map? (map :extra rows)) "payloads arrive parsed and slim")
+          (is (= {:tool_use_id "t" :tool_name "Bash" :tool_response {}} (:extra (nth rows 2)))
+              "tool output never reaches the heap as part of the trace")
+          (is (= "just test" (get-in (second rows) [:extra :tool_input :command]))))
+        (testing "event listings cut an oversized payload instead of loading it whole"
+          (is (= [log/max-listed-payload-chars]
+                 (mapv #(count (:extra %)) (log/query-events :event "PostToolUse"))))
+          (is (= [{:prompt "older prompt"}]
+                 (mapv #(json/parse-string (:extra %) true)
+                       (log/query-events :event "UserPromptSubmit")))
+              "an ordinary payload is returned whole"))
+        (testing "the text budget keeps the newest rows, and always at least one"
+          (is (= ["PostToolUse" "Stop"]
+                 (mapv :event_type (log/session-trace-rows "s1" :max-chars 20))))
+          (is (= ["Stop"] (mapv :event_type (log/session-trace-rows "s1" :max-chars 0))))))
+      (finally
+        (fs/delete-tree tmp-dir)))))
+
 (deftest writer-survives-hostile-payload-bytes
   (testing "quotes, NUL, newlines and SQL-looking text are stored verbatim and do not stall later rows"
     (let [tmp-dir (str (fs/create-temp-dir {:prefix "log-writer-hostile-"}))
